@@ -86,10 +86,20 @@ pub fn parse_software_update(body_json: &str) -> Result<SoftwareUpdateBody, Stri
     serde_json::from_str(body_json).map_err(|e| format!("software_update json: {e}"))
 }
 
+/// Soft cap for staged binaries (same order as control-relayed blob max).
+const MAX_SOFTWARE_STAGE_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Stage a verified blob as the next binary for this host.
 pub fn stage_blob(version: &str, target: &SoftwareTarget) -> Result<StageStatus, String> {
     let hash = target.sha256.to_lowercase();
     let data = WeightsStore::read_blob(&hash)?;
+    if data.len() as u64 > MAX_SOFTWARE_STAGE_BYTES {
+        return Err(format!(
+            "software blob too large for stage ({} > {})",
+            data.len(),
+            MAX_SOFTWARE_STAGE_BYTES
+        ));
+    }
     if target.size > 0 && data.len() as u64 != target.size {
         return Err(format!(
             "size mismatch: blob {} bytes, target listed {}",
