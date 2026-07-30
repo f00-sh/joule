@@ -205,7 +205,8 @@
           " · paused=" + (op.operator_paused ? "YES" : "no") +
           " · chunks=" + (op.active_chunks||0) +
           " · blob digests=" + (op.blob_digests||0) +
-          " · operator key " + (op.operator_pubkey_configured ? "pinned" : "open (dev)");
+          " · operator " + (op.unofficial_override ? "LAB override" : "official embed") +
+          (op.official_fingerprint ? (" · fpr " + String(op.official_fingerprint).slice(0,12) + "…") : "");
         const ul = document.getElementById("notices");
         ul.innerHTML = "";
         const ns = notices.notices || [];

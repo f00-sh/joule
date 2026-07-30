@@ -22,27 +22,34 @@ if [[ -z "$BIN" ]]; then
   fi
 fi
 
-"$BIN" broadcast keygen --secret "$TMP/op.sec" --public "$TMP/op.pub"
-PUB=$(grep -v '^#' "$TMP/op.pub" | head -1 | tr -d '[:space:]')
-echo "export JOULE_OPERATOR_PUBKEY=$PUB  # pin this on control for verify"
-echo "demo public key: $PUB"
-
+# Prefer official protocol secret if present; else lab key + unofficial flag.
+OFF_SEC="${HOME}/.config/f00/joule/protocol.ed25519.sec"
 BODY="$ROOT/docs/examples/notice.json"
-"$BIN" broadcast sign --kind notice --body "$BODY" --secret "$TMP/op.sec" --out "$TMP/notice.env.json"
+if [[ -f "$OFF_SEC" ]]; then
+  echo "using official protocol secret: $OFF_SEC"
+  SEC="$OFF_SEC"
+  PUB=$(grep -v '^#' "$ROOT/docs/operator-keys/protocol.ed25519.pub" | head -1 | tr -d '[:space:]')
+  echo "official protocol pub: $PUB"
+else
+  echo "no official secret; generating LAB key (requires JOULE_ALLOW_UNOFFICIAL_OPERATOR=1 on control)"
+  "$BIN" broadcast keygen --secret "$TMP/op.sec" --public "$TMP/op.pub"
+  SEC="$TMP/op.sec"
+  PUB=$(grep -v '^#' "$TMP/op.pub" | head -1 | tr -d '[:space:]')
+  echo "export JOULE_ALLOW_UNOFFICIAL_OPERATOR=1"
+  echo "export JOULE_OPERATOR_PUBKEY=$PUB"
+fi
+
+"$BIN" broadcast sign --kind notice --body "$BODY" --secret "$SEC" --out "$TMP/notice.env.json"
 echo "signed → $TMP/notice.env.json"
 
 if curl -sf "$API/healthz" >/dev/null 2>&1; then
-  # Lab inject without pin works; with pin control must have matching env.
-  if [[ -n "${JOULE_OPERATOR_PUBKEY:-}" ]]; then
-    echo "using already-exported JOULE_OPERATOR_PUBKEY for inject path on CLI only"
-  fi
   "$BIN" broadcast inject --api "$API" --envelope "$TMP/notice.env.json" || {
-    echo "inject failed — start control with:"
-    echo "  JOULE_OPERATOR_PUBKEY=$PUB $BIN control"
+    echo "inject failed — stock control verifies the official embed only."
+    echo "  official: sign with ~/.config/f00/joule/protocol.ed25519.sec"
+    echo "  lab:      JOULE_ALLOW_UNOFFICIAL_OPERATOR=1 JOULE_OPERATOR_PUBKEY=$PUB $BIN control"
     exit 1
   }
-  echo "ok — check $API/v1/notices and the dashboard"
+  echo "ok — check $API/v1/notices , $API/v1/operator/pins"
 else
   echo "control not up at $API — envelope ready at $TMP/notice.env.json"
-  echo "start: JOULE_OPERATOR_PUBKEY=$PUB $BIN control"
 fi

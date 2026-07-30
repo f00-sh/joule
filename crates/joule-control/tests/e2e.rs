@@ -492,6 +492,7 @@ async fn operator_policy_and_software_fanout() {
     let _env = operator_env_lock().await;
     let sk = SigningKey::generate(&mut OsRng);
     let pk = hex::encode(sk.verifying_key().to_bytes());
+    std::env::set_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR", "1");
     std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
 
     let app = load_or_init_app(None).expect("app");
@@ -618,6 +619,7 @@ async fn operator_policy_and_software_fanout() {
 
     agent.abort();
     std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+    std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
 }
 
 /// model_update assigns digests (not full model) via FetchDigests.
@@ -631,6 +633,7 @@ async fn model_update_assigns_digests() {
     let _env = operator_env_lock().await;
     let sk = SigningKey::generate(&mut OsRng);
     let pk = hex::encode(sk.verifying_key().to_bytes());
+    std::env::set_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR", "1");
     std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
 
     let app = load_or_init_app(None).expect("app");
@@ -738,6 +741,7 @@ async fn model_update_assigns_digests() {
     }
     agent.abort();
     std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+    std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
 }
 
 /// Late joiner receives model_update catch-up and FetchDigests after plan re-run.
@@ -751,6 +755,7 @@ async fn late_joiner_gets_model_digests() {
     let _env = operator_env_lock().await;
     let sk = SigningKey::generate(&mut OsRng);
     let pk = hex::encode(sk.verifying_key().to_bytes());
+    std::env::set_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR", "1");
     std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
 
     let app = load_or_init_app(None).expect("app");
@@ -840,4 +845,5 @@ async fn late_joiner_gets_model_digests() {
     late.abort();
     early.1.abort();
     std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+    std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
 }

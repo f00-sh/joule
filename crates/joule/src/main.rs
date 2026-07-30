@@ -808,11 +808,11 @@ async fn run_agent(
                                 continue;
                             }
                         }
-                        if let Some(pk) = operator_pubkey_hex() {
-                            if let Err(e) = verify_operator_sig(&envelope, &pk) {
-                                warn!(error = %e, id = %envelope.id, "reject operator broadcast (bad sig)");
-                                continue;
-                            }
+                        // Always verify against official embed (or lab override).
+                        let pk = operator_pubkey_hex();
+                        if let Err(e) = verify_operator_sig(&envelope, &pk) {
+                            warn!(error = %e, id = %envelope.id, "reject operator broadcast (bad sig)");
+                            continue;
                         }
                         info!(
                             id = %envelope.id,

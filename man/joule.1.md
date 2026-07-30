@@ -88,8 +88,8 @@ installs the staged binary (hash-checked).
 ### joule broadcast
 
 Operator tools: keygen, sign body JSON, inject into control, demo chunk plan.
-Pin `JOULE_OPERATOR_PUBKEY` in production. Agents re-verify body hash and
-signature. Joiners receive recent envelopes and re-planned digests.
+Stock builds verify the embedded official protocol key (master OpenPGP
+`tj@f00.sh`). See docs/design/master-key-trust-v0.md.
 
 ### joule capacity
 
@@ -117,7 +117,9 @@ Offline demos (no network).
 | Variable | Purpose |
 |---|---|
 | `RUST_LOG` | Tracing filter |
-| `JOULE_OPERATOR_PUBKEY` | ed25519 public key hex; required to verify operator bus in production |
+| `JOULE_OPERATOR_PUBKEY` | Lab only: override verify key (needs `JOULE_ALLOW_UNOFFICIAL_OPERATOR=1`) |
+| `JOULE_ALLOW_UNOFFICIAL_OPERATOR` | `1` to allow non-embedded operator keys (lab/forks) |
+| `JOULE_SKIP_OFFICIAL_KEY_FETCH` | `1` skip HTTPS audit of joule.f00.sh key mirror |
 | `JOULE_ALLOW_EXTERNAL_FETCH` | `1` to allow third-party weight URL hints (never f00 origin) |
 | `JOULE_BLOBS_DIR` | Content-addressed blob store root |
 | `JOULE_WEIGHTS_DIR` | Weight cache root |

@@ -1,29 +1,50 @@
-# Operator keys (broadcast authority)
+# Operator keys (public only)
 
-The **private** key never goes in git.
+**Private keys never go in this directory or git.**
 
-## Protocol key (ed25519)
+## Master OpenPGP — `tj@f00.sh`
 
-Clients verify operator messages with a **public** ed25519 key:
+| File | Role |
+|------|------|
+| [master.asc](master.asc) | Full public key (also on the site) |
+| Fingerprint | `4B18FA65E246ACC61701B6AFCA4CB80ABF1AF878` |
 
-| Pin location | Notes |
-|---|---|
-| Env `JOULE_OPERATOR_PUBKEY=<64 hex>` | Preferred in production |
-| `~/.config/f00/joule/operator.pub` | f00 core path |
-| `docs/operator-keys/operator.ed25519.pub` | Dev tree convenience (public only) |
+This is the **master** human/release authority for joule.
 
-Generate:
+## Protocol ed25519 (agent bus)
+
+| File | Role |
+|------|------|
+| [protocol.ed25519.pub](protocol.ed25519.pub) | 64-hex verify key (embedded in binaries) |
+| [protocol.ed25519.pub.asc](protocol.ed25519.pub.asc) | Detached GPG signature by master |
+
+Agents verify bus envelopes with the **protocol** key (fast, pure Rust).  
+Humans verify this file with:
 
 ```text
-joule broadcast keygen --secret operator.ed25519.sec --public operator.ed25519.pub
+gpg --import master.asc
+gpg --verify protocol.ed25519.pub.asc protocol.ed25519.pub
 ```
 
-Copy the public file here as `operator.ed25519.pub` when ready to pin the community key.
+## Website
 
-## OpenPGP (optional, humans)
+After Pages deploy:
 
-Publish `operator.asc` (public) for `gpg --verify` of release notes and of the ed25519 public key file. Agents use ed25519 for speed (pure Rust).
+- https://joule.f00.sh/operator-keys/master.asc  
+- https://joule.f00.sh/operator-keys/protocol.ed25519.pub  
 
-## Ceremony
+Clients may fetch these over **TLS**, but only **accept if they match the embedded pins**.  
+Website alone cannot replace the master key.
 
-Full steps: [operator-ceremony-v0](../design/operator-ceremony-v0.md) · design [broadcast-v0](../design/broadcast-v0.md).
+## Secrets (this machine / yours)
+
+```text
+~/.config/f00/joule/master.gpg.sec.asc
+~/.config/f00/joule/master.gpg.pass
+~/.config/f00/joule/protocol.ed25519.sec
+~/.config/f00/joule/gnupg-joule-master/
+```
+
+## Full design
+
+**[docs/design/master-key-trust-v0.md](../design/master-key-trust-v0.md)** — how hijacks are blocked, what embed + website do, what they cannot do.

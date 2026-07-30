@@ -35,9 +35,10 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) if you expected a corporate CoC —
 ## Operator bus / distribution
 
 - f00 / joule.f00.sh is **website only** — never host weights or release binaries as a product CDN.
-- Operator orders: ed25519 signed envelopes; pin `JOULE_OPERATOR_PUBKEY` in production.
-- Ceremony: [docs/design/operator-ceremony-v0.md](docs/design/operator-ceremony-v0.md).
-- Example bodies: [docs/examples/](docs/examples/). Local demo: `scripts/demo-operator-bus.sh`.
+- Operator orders: ed25519 signed envelopes verified against **embedded official pin**.
+- Master OpenPGP `tj@f00.sh` certifies the protocol key; design: [master-key-trust-v0](docs/design/master-key-trust-v0.md).
+- Lab overrides need `JOULE_ALLOW_UNOFFICIAL_OPERATOR=1` — never ship that as default.
+- Example bodies: [docs/examples/](docs/examples/). Demo: `scripts/demo-operator-bus.sh`.
 - Seed content: `scripts/seed-lab-tiny.sh` / `joule seed-blob`.
 
 ## Security

@@ -107,10 +107,10 @@ impl BroadcastLog {
                 return Err("body_sha256 mismatch".into());
             }
         }
-        // Signature check against pinned operator key (if configured).
-        if let Some(pk) = operator_pubkey_hex() {
-            verify_operator_sig(&env, &pk)?;
-        }
+        // Always verify against official embed (or lab override if allowed).
+        // See docs/design/master-key-trust-v0.md — no "unsigned open" mode.
+        let pk = operator_pubkey_hex();
+        verify_operator_sig(&env, &pk)?;
         self.seen.insert(env.id);
         if env.kind == OperatorKind::Revoke {
             self.apply_revoke_body(&env.body_json);
@@ -124,40 +124,10 @@ impl BroadcastLog {
     }
 }
 
-/// Public for CLI / inject path.
-pub fn operator_pubkey_hex() -> Option<String> {
-    if let Ok(p) = std::env::var("JOULE_OPERATOR_PUBKEY") {
-        let t = p.trim().to_string();
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-    // Optional file next to data dir / f00 core
-    for path in [
-        std::env::var_os("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(".config/f00/joule/operator.pub")),
-        Some(std::path::PathBuf::from("operator.pub")),
-        Some(std::path::PathBuf::from(
-            "docs/operator-keys/operator.ed25519.pub",
-        )),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if let Ok(s) = std::fs::read_to_string(&path) {
-            let t = s.trim().to_string();
-            if !t.is_empty() && !t.starts_with('#') {
-                return Some(
-                    t.lines()
-                        .find(|l| !l.starts_with('#'))
-                        .unwrap_or("")
-                        .trim()
-                        .to_string(),
-                );
-            }
-        }
-    }
-    None
+/// Public for CLI / inject / agents — always returns the effective verify key.
+/// Official builds use the embedded pin; see `crate::pins`.
+pub fn operator_pubkey_hex() -> String {
+    crate::pins::effective_protocol_pubkey_hex()
 }
 
 pub fn verify_operator_sig(env: &SignedEnvelope, pubkey_hex: &str) -> Result<(), String> {
@@ -205,6 +175,7 @@ mod tests {
         let _g = env_lock();
         let sk = SigningKey::generate(&mut OsRng);
         let pk = hex::encode(sk.verifying_key().to_bytes());
+        std::env::set_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR", "1");
         std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
 
         let body = r#"{"title":"hello","body":"swarm"}"#;
@@ -226,6 +197,7 @@ mod tests {
         assert!(log.accept(env.clone(), now_ms()).unwrap());
         assert!(!log.accept(env, now_ms()).unwrap()); // dedupe
         std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+        std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
     }
 
     #[test]
@@ -233,6 +205,7 @@ mod tests {
         let _g = env_lock();
         let sk = SigningKey::generate(&mut OsRng);
         let pk = hex::encode(sk.verifying_key().to_bytes());
+        std::env::set_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR", "1");
         std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
 
         let victim_id = Uuid::new_v4();
@@ -268,5 +241,33 @@ mod tests {
         bad.sig_ed25519_hex = hex::encode(sk.sign(&pre).to_bytes());
         assert!(log.accept(bad, now_ms()).unwrap_err().contains("revoked"));
         std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+        std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
+    }
+
+    #[test]
+    fn official_pin_rejects_random_key_without_unofficial_flag() {
+        let _g = env_lock();
+        std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
+        std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+        let sk = SigningKey::generate(&mut OsRng);
+        let body = r#"{"title":"hijack?"}"#;
+        let mut env = SignedEnvelope {
+            id: Uuid::new_v4(),
+            issued_at_unix_ms: now_ms(),
+            expires_at_unix_ms: None,
+            kind: OperatorKind::Notice,
+            body_json: body.into(),
+            body_sha256: body_sha256_hex(body),
+            sig_ed25519_hex: String::new(),
+            openpgp_sig: None,
+        };
+        let pre = operator_preimage(&env);
+        env.sig_ed25519_hex = hex::encode(sk.sign(&pre).to_bytes());
+        let mut log = BroadcastLog::new(8);
+        let err = log.accept(env, now_ms()).unwrap_err();
+        assert!(
+            err.contains("signature") || err.contains("invalid"),
+            "{err}"
+        );
     }
 }

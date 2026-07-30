@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Master key trust v0**: OpenPGP master `tj@f00.sh` + embedded protocol ed25519; website HTTPS must match embed; env override only with `JOULE_ALLOW_UNOFFICIAL_OPERATOR=1` — see [docs/design/master-key-trust-v0.md](docs/design/master-key-trust-v0.md)
+- Public keys: `docs/operator-keys/master.asc`, `protocol.ed25519.pub` (+ GPG detach-sig); `GET /v1/operator/pins` and `/v1/operator/audit`
 - **Peer blob transfer**: `BlobWant` → `BlobProvide` → `BlobChunk` (base64); agents verify sha256 into content-addressed store; `FetchDigests` for assigned model/software digests only
 - **Redundant model chunks**: `plan_redundant_chunks` + rebalance when seeders drop; model_update never force-downloads full model
 - **Software update path**: peer-seed binary digests, stage under `~/.local/share/joule/software/stage`, `joule software status|apply`, `joule seed-blob`

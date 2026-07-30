@@ -47,6 +47,8 @@ pub fn router(app: App) -> Router {
         .route("/v1/broadcasts/inject", post(inject_broadcast))
         .route("/v1/notices", get(list_notices))
         .route("/v1/operator/status", get(operator_status))
+        .route("/v1/operator/pins", get(operator_pins))
+        .route("/v1/operator/audit", get(operator_key_audit))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -176,10 +178,7 @@ async fn readiness(State(app): State<App>) -> impl IntoResponse {
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("operator_paused".into(), json!(operator_paused));
                 obj.insert("nodes_model_loaded".into(), json!(nodes_model_loaded));
-                obj.insert(
-                    "operator_pubkey_configured".into(),
-                    json!(crate::broadcast::operator_pubkey_hex().is_some()),
-                );
+                obj.insert("operator_pubkey_configured".into(), json!(true));
             }
             Json(v).into_response()
         }
@@ -282,7 +281,9 @@ async fn list_broadcasts(State(app): State<App>) -> impl IntoResponse {
     Json(json!({
         "ok": true,
         "law": "signed by operator key; swarm relays; f00 is not a push CDN",
-        "operator_pubkey_configured": crate::broadcast::operator_pubkey_hex().is_some(),
+        "operator_pubkey": crate::broadcast::operator_pubkey_hex(),
+        "official_fingerprint": crate::pins::MASTER_OPENPGP_FINGERPRINT,
+        "unofficial_override": crate::pins::unofficial_operator_allowed(),
         "messages": g.broadcasts.recent(),
     }))
 }
@@ -317,13 +318,38 @@ async fn operator_status(State(app): State<App>) -> impl IntoResponse {
         "broadcasts_recent": g.broadcasts.recent().len(),
         "revoked_envelopes": g.broadcasts.revoked_count(),
         "pending_blob_xfers": g.pending_blob_xfers.len(),
-        "operator_pubkey_configured": crate::broadcast::operator_pubkey_hex().is_some(),
+        "operator_pubkey": crate::broadcast::operator_pubkey_hex(),
+        "official_fingerprint": crate::pins::MASTER_OPENPGP_FINGERPRINT,
+        "unofficial_override": crate::pins::unofficial_operator_allowed(),
         "law": "pause/resume/policy via signed operator bus; digests peer-seeded",
     }))
 }
 
-/// Inject a pre-signed operator envelope (any node with HTTP access to a control).
-/// Verifies signature when JOULE_OPERATOR_PUBKEY is configured, then floods agents.
+async fn operator_pins() -> impl IntoResponse {
+    Json(json!({
+        "ok": true,
+        "master_openpgp_fingerprint": crate::pins::MASTER_OPENPGP_FINGERPRINT,
+        "protocol_ed25519_hex": crate::pins::PROTOCOL_ED25519_PUBKEY_HEX,
+        "effective_protocol_hex": crate::broadcast::operator_pubkey_hex(),
+        "unofficial_override": crate::pins::unofficial_operator_allowed(),
+        "official_master_url": crate::pins::OFFICIAL_MASTER_ASC_URL,
+        "official_protocol_url": crate::pins::OFFICIAL_PROTOCOL_PUB_URL,
+        "law": "embed is root of trust; website must match embed (docs/design/master-key-trust-v0.md)",
+    }))
+}
+
+async fn operator_key_audit() -> impl IntoResponse {
+    let audit = crate::official_fetch::audit_official_keys().await;
+    let status = if audit.ok {
+        StatusCode::OK
+    } else {
+        StatusCode::CONFLICT
+    };
+    (status, Json(audit))
+}
+
+/// Inject a pre-signed operator envelope. Always verifies against official embed
+/// (or lab override with JOULE_ALLOW_UNOFFICIAL_OPERATOR=1).
 async fn inject_broadcast(
     State(app): State<App>,
     Json(envelope): Json<SignedEnvelope>,

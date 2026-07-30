@@ -10,8 +10,10 @@ mod edge;
 mod http;
 mod identity;
 mod model_update;
+mod official_fetch;
 mod operator_actions;
 mod persist;
+mod pins;
 mod state;
 mod tcp;
 
@@ -23,6 +25,10 @@ pub use broadcast::{
 pub use http::router;
 pub use identity::{verify_preimage, PoolIdentity};
 pub use persist::default_data_dir;
+pub use pins::{
+    unofficial_operator_allowed, MASTER_OPENPGP_ASC, MASTER_OPENPGP_FINGERPRINT,
+    PROTOCOL_ED25519_PUBKEY_HEX,
+};
 pub use state::{AccountInfo, ControlState, NodeView, SharedState};
 pub use tcp::{
     agent_handle_challenge, agent_handle_infer, challenge_loop, run_agent_listener,
@@ -37,6 +43,21 @@ use tracing::info;
 
 /// Run control plane until cancelled (agent TCP + HTTP API + challenges).
 pub async fn serve(app: App, agent_addr: SocketAddr, http_addr: SocketAddr) -> Result<()> {
+    info!(
+        fingerprint = crate::pins::MASTER_OPENPGP_FINGERPRINT,
+        protocol = crate::pins::PROTOCOL_ED25519_PUBKEY_HEX,
+        unofficial = crate::pins::unofficial_operator_allowed(),
+        "operator trust pins (official embed)"
+    );
+    tokio::spawn(async {
+        let audit = crate::official_fetch::audit_official_keys().await;
+        if audit.ok {
+            info!(message = %audit.message, "official key audit");
+        } else {
+            tracing::error!(message = %audit.message, "official key audit FAILED");
+        }
+    });
+
     let agent_listener = TcpListener::bind(agent_addr)
         .await
         .with_context(|| format!("bind agent listener {agent_addr}"))?;

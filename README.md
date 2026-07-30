@@ -125,7 +125,7 @@ joule software status|apply
 joule broadcast keygen|sign|inject|plan-chunks
 ```
 
-**Operator bus (signed, peer-flooded):** pin `JOULE_OPERATOR_PUBKEY`, sign offline, inject once — swarm relays. Model/software updates carry **hashes**; bytes move peer→peer. Agents verify body hash + sig locally when key is pinned. Ceremony: [docs/design/operator-ceremony-v0.md](docs/design/operator-ceremony-v0.md). Demo: `scripts/demo-operator-bus.sh`. Seed fixture: `scripts/seed-lab-tiny.sh`.
+**Operator bus:** stock builds verify the **embedded official** protocol key (OpenPGP master `tj@f00.sh` certifies it). Env override only with `JOULE_ALLOW_UNOFFICIAL_OPERATOR=1` (lab). Trust model: [docs/design/master-key-trust-v0.md](docs/design/master-key-trust-v0.md). Demo: `scripts/demo-operator-bus.sh`. Seed: `scripts/seed-lab-tiny.sh`.
 
 Full option reference: [man/joule.1.md](man/joule.1.md).
 
