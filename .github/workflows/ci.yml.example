@@ -1,0 +1,37 @@
+# Example CI baseline. Copy to .github/workflows/ci.yml and adapt to Rust.
+# Goals: lint/format check + test + build on pull_request and push to main.
+# Never echo secrets. Cache dependencies when the ecosystem supports it.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      # Node 24 action majors only — see ~/.grok/rules/85-github-actions.md
+      - uses: actions/checkout@v6
+
+      # --- Replace this block with language toolchain setup ---
+      # Rust example:
+      # - uses: dtolnay/rust-toolchain@stable
+      #   with:
+      #     components: rustfmt, clippy
+      # - uses: Swatinem/rust-cache@v2
+      # - run: cargo fmt --check
+      # - run: cargo clippy --all-targets -- -D warnings
+      # - run: cargo test
+      # - run: cargo build --release
+
+      - name: Placeholder
+        run: |
+          echo "Replace with format, lint, test, and build for Rust"
+          exit 1

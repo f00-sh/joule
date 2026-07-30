@@ -1,0 +1,108 @@
+# --- OS ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+*~
+
+# --- Editors / IDEs ---
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+*.swp
+*.swo
+*.swn
+*.bak
+.project
+.classpath
+.settings/
+*.code-workspace
+
+# --- Secrets / local env (never commit real secrets) ---
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+.secrets/
+secrets/
+
+# --- Logs & local state ---
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.cache/
+tmp/
+temp/
+.temp/
+*.tmp
+
+# --- Coverage / test output ---
+coverage/
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+*.lcov
+
+# --- Build / dist (language tools add more below) ---
+dist/
+build/
+out/
+target/
+bin/
+obj/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+ENV/
+
+# --- Tooling ---
+.direnv/
+.terraform/
+*.tfstate*
+.serverless/
+
+# --- Archives ---
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Language-specific rules: append from
+# ~/.grok/references/repo-scaffold/gitignore/<language>.gitignore
+
+# --- Language: Rust ---
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+# Keep Cargo.lock for binaries/applications; ignore only for pure libraries if you choose:
+# Cargo.lock
+.idea/
+*.pdb
