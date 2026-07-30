@@ -11,9 +11,9 @@ use joule_proto::{
     NodeId, OperatorKind, SignedEnvelope, CLUSTER_MODEL,
 };
 use joule_runtime::{
-    apply_staged, load_model, match_target, parse_software_update, read_stage, readiness_for_pool_ex,
-    stage_blob, ClusterEngine, Engine, InferRequest, ManifestFile, RuntimeFlags, SoftwareTarget,
-    StubEngine, WeightsStore,
+    apply_staged, load_model, match_target, parse_software_update, read_stage,
+    readiness_for_pool_ex, stage_blob, ClusterEngine, Engine, InferRequest, ManifestFile,
+    RuntimeFlags, SoftwareTarget, StubEngine, WeightsStore,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -393,7 +393,10 @@ async fn run_blobs(json: bool, api: String) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(&list)?);
     } else if list.is_empty() {
-        println!("no local blobs under {}", WeightsStore::blob_root().display());
+        println!(
+            "no local blobs under {}",
+            WeightsStore::blob_root().display()
+        );
         println!("seed with: joule seed-blob --path FILE");
     } else {
         println!(
@@ -402,13 +405,7 @@ async fn run_blobs(json: bool, api: String) -> Result<()> {
             WeightsStore::blob_root().display()
         );
         for b in list {
-            println!(
-                "  {}  {:>10}  {}  {}",
-                b.sha256,
-                b.size,
-                b.kind,
-                b.name
-            );
+            println!("  {}  {:>10}  {}  {}", b.sha256, b.size, b.kind, b.name);
         }
     }
     Ok(())

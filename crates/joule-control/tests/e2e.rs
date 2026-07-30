@@ -362,9 +362,7 @@ async fn peer_blob_chunk_transfer() {
             }
             let env = decode_line(line.as_bytes()).unwrap();
             if let Message::BlobProvide {
-                sha256,
-                request_id,
-                ..
+                sha256, request_id, ..
             } = env.msg
             {
                 assert_eq!(sha256.to_lowercase(), seeder_hash);
@@ -529,7 +527,10 @@ async fn operator_policy_and_software_fanout() {
                 continue;
             }
             let env = decode_line(line.as_bytes()).unwrap();
-            if let Message::FetchDigests { digests, reason, .. } = env.msg {
+            if let Message::FetchDigests {
+                digests, reason, ..
+            } = env.msg
+            {
                 if reason.starts_with("software_update:") {
                     *dig_slot.lock().unwrap() = digests;
                 }
@@ -683,7 +684,10 @@ async fn model_update_assigns_digests() {
                 continue;
             }
             let env = decode_line(line.as_bytes()).unwrap();
-            if let Message::FetchDigests { digests, reason, .. } = env.msg {
+            if let Message::FetchDigests {
+                digests, reason, ..
+            } = env.msg
+            {
                 if reason.starts_with("model_update:") {
                     *slot.lock().unwrap() = digests;
                 }

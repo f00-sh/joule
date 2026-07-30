@@ -191,7 +191,10 @@ pub fn apply_staged(dest: &Path) -> Result<StageStatus, String> {
         hex::encode(Sha256::digest(&data))
     };
     if got != st.sha256.to_lowercase() {
-        return Err(format!("staged hash mismatch: want {}, got {got}", st.sha256));
+        return Err(format!(
+            "staged hash mismatch: want {}, got {got}",
+            st.sha256
+        ));
     }
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;

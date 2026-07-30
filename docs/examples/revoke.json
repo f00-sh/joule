@@ -1,0 +1,4 @@
+{
+  "ids": ["00000000-0000-0000-0000-000000000000"],
+  "note": "Replace with real envelope UUID(s) to blacklist. After inject, those ids never re-accept."
+}
