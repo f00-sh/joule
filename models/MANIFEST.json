@@ -1,10 +1,10 @@
 {
-  "version": 2,
+  "version": 3,
   "models": [
     {
       "id": "kimi-open",
       "label": "Kimi (open weights)",
-      "description": "Single model on one logical GPU (sum of donor VRAM). Not loaded until the pool hits the load milestone. Service goes live after weights load on the mesh.",
+      "description": "Single model on one logical GPU (sum of donor VRAM). Open checkpoint pipeline: lab-tiny (always loadable) + Kimi-K3 meta from Hugging Face. Full multi-hundred-GB K3 shards pin when operators host a mirror.",
       "min_pool_vram_mib": 65536,
       "min_backends": 3,
       "model_layers": 80,
@@ -56,9 +56,47 @@
         }
       ],
       "weights": {
-        "published": false,
-        "note": "Pin redistributable open Kimi checkpoint URLs/hashes when the pool routinely exceeds kimi-eligible. Until then agents arm the cache only.",
+        "published": true,
+        "note": "published=true: lab-tiny fixture always loadable; kimi-k3-meta pulls Moonshot HF configs. Full Kimi-K3 96-shard weights: https://huggingface.co/moonshotai/Kimi-K3 — pin shard list + sha256 when a redistributable mirror is ready (multi-hundred GB).",
         "quants": [
+          {
+            "id": "lab-tiny",
+            "min_node_vram_mib": 256,
+            "approx_file_mib": 1,
+            "files": [
+              {
+                "path": "model.safetensors",
+                "sha256": "b937cbc2c6def42c46579c6caab3b1a881b451994d6382d298d66d67f1549b24",
+                "url": "repo://models/fixtures/lab-tiny/model.safetensors",
+                "size_bytes": 32872
+              }
+            ]
+          },
+          {
+            "id": "kimi-k3-meta",
+            "min_node_vram_mib": 512,
+            "approx_file_mib": 1,
+            "files": [
+              {
+                "path": "config.json",
+                "sha256": "9710e121a58d03ac92c8d6da287a19541994319afbbe6d6202af001ffd379213",
+                "url": "https://huggingface.co/moonshotai/Kimi-K3/resolve/main/config.json",
+                "size_bytes": 7006
+              },
+              {
+                "path": "generation_config.json",
+                "sha256": "c6648c25e9705af7fba8847e243840d21b5cc63ddeb6297f750a7ddbb6a02836",
+                "url": "https://huggingface.co/moonshotai/Kimi-K3/resolve/main/generation_config.json",
+                "size_bytes": 53
+              },
+              {
+                "path": "tokenizer_config.json",
+                "sha256": "5d0803c94db9cd78763499e0956c95fd5a225c14a727e5a6cf5db3f96f010a6e",
+                "url": "https://huggingface.co/moonshotai/Kimi-K3/resolve/main/tokenizer_config.json",
+                "size_bytes": 3478
+              }
+            ]
+          },
           {
             "id": "q4_k_m",
             "min_node_vram_mib": 8192,

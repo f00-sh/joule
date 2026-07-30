@@ -154,14 +154,23 @@ impl ManifestFile {
 }
 
 impl ModelSpec {
+    /// Prefer the largest quant that fits **and has files listed** (downloadable).
+    /// Falls back to any fitting quant, then first quant.
     pub fn pick_quant(&self, node_vram_mib: u32) -> Option<&QuantSpec> {
-        let mut best: Option<&QuantSpec> = None;
+        let mut best_with_files: Option<&QuantSpec> = None;
+        let mut best_any: Option<&QuantSpec> = None;
         for q in &self.weights.quants {
-            if node_vram_mib >= q.min_node_vram_mib {
-                best = Some(q);
+            if node_vram_mib < q.min_node_vram_mib {
+                continue;
+            }
+            best_any = Some(q);
+            if !q.files.is_empty() {
+                best_with_files = Some(q);
             }
         }
-        best.or_else(|| self.weights.quants.first())
+        best_with_files
+            .or(best_any)
+            .or_else(|| self.weights.quants.first())
     }
 
     fn milestone_progress(&self, m: &MilestoneSpec, pool_vram_mib: u64, backends: u32) -> u8 {
@@ -366,6 +375,7 @@ mod tests {
             .milestones
             .iter()
             .any(|x| x.id == "kimi-eligible" && x.reached));
-        assert!(!r2.can_load_model); // weights not published
+        assert!(r2.weights_published);
+        assert!(r2.can_load_model); // weights published + pool ready
     }
 }

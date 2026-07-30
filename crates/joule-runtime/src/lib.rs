@@ -4,10 +4,12 @@
 //! hits the load milestone (and weights exist), [`load_model`] maps tensors into
 //! RAM. Service-live is a separate control flag after the mesh has loaded.
 
+mod decode;
 mod load;
 mod manifest;
 mod weights;
 
+pub use decode::generate as generate_from_loaded;
 pub use load::{load_model, LoadError, LoadReport, LoadedModel, TensorInfo};
 pub use manifest::{
     InferenceMode, ManifestFile, MilestoneStatus, ModelReadiness, ModelSpec, QuantSpec,
@@ -187,16 +189,8 @@ impl Engine for ClusterEngine {
 
         let loaded = self.loaded.lock().expect("lock").clone();
         if let Some(lm) = loaded {
-            // Real weights resident: still no full Kimi decoder — answer with load proof.
-            // When a decoder is wired, this branch runs matmul/attention over `lm.tensors`.
-            let reply = format!(
-                "[joule-loaded:{}/{} bytes={} tensors={}] {}",
-                lm.model_id,
-                lm.quant,
-                lm.bytes_resident,
-                lm.tensors.len(),
-                req.prompt
-            );
+            // Tensor-backed path (lab-tiny embeddings or future full Kimi kernels).
+            let reply = decode::generate(&lm, &req.prompt, req.max_tokens.max(16));
             return Ok(InferResponse {
                 text: reply.clone(),
                 prompt_tokens: req.prompt.split_whitespace().count() as u32,
@@ -287,6 +281,7 @@ mod tests {
         assert!(r.next_milestone.is_some());
         let r = readiness_for_pool(72 * 1024, 5).unwrap();
         assert!(r.pool_ready);
-        assert!(!r.weights_published);
+        assert!(r.weights_published);
+        assert!(r.can_load_model);
     }
 }
