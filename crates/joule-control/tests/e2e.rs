@@ -739,3 +739,105 @@ async fn model_update_assigns_digests() {
     agent.abort();
     std::env::remove_var("JOULE_OPERATOR_PUBKEY");
 }
+
+/// Late joiner receives model_update catch-up and FetchDigests after plan re-run.
+#[tokio::test]
+async fn late_joiner_gets_model_digests() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use joule_control::{body_sha256_hex, now_ms, operator_preimage};
+    use joule_proto::{OperatorKind, SignedEnvelope};
+    use rand::rngs::OsRng;
+
+    let _env = operator_env_lock().await;
+    let sk = SigningKey::generate(&mut OsRng);
+    let pk = hex::encode(sk.verifying_key().to_bytes());
+    std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
+
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    // First donor joins and stays quiet.
+    let early = spawn_agent(agent_addr, "early", 8192).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    let body = r#"{"model_id":"kimi-open","replica_factor":2,"chunks":[{"path":"a","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},{"path":"b","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":1}]}"#;
+    let mut env = SignedEnvelope {
+        id: Uuid::new_v4(),
+        issued_at_unix_ms: now_ms(),
+        expires_at_unix_ms: None,
+        kind: OperatorKind::ModelUpdate,
+        body_json: body.into(),
+        body_sha256: body_sha256_hex(body),
+        sig_ed25519_hex: String::new(),
+        openpgp_sig: None,
+    };
+    let pre = operator_preimage(&env);
+    env.sig_ed25519_hex = hex::encode(sk.sign(&pre).to_bytes());
+    let client = reqwest::Client::new();
+    client
+        .post(format!("http://{http_addr}/v1/broadcasts/inject"))
+        .json(&env)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    // Late joiner with custom loop capturing FetchDigests.
+    let got = Arc::new(Mutex::new(Vec::<String>::new()));
+    let node_id = NodeId::new();
+    let sock = TcpStream::connect(agent_addr).await.unwrap();
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::Hello {
+                    account: "late".into(),
+                    caps: NodeCaps::for_cluster(DeviceClass::Gpu, 16384, 40),
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = lines.next_line().await.unwrap(); // welcome
+    let slot = got.clone();
+    let late = tokio::spawn(async move {
+        loop {
+            let Ok(Some(line)) = lines.next_line().await else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let env = decode_line(line.as_bytes()).unwrap();
+            if let Message::FetchDigests { digests, .. } = env.msg {
+                if !digests.is_empty() {
+                    *slot.lock().unwrap() = digests;
+                }
+            }
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            if !got.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .expect("late joiner FetchDigests");
+    assert!(!got.lock().unwrap().is_empty());
+
+    late.abort();
+    early.1.abort();
+    std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+}
