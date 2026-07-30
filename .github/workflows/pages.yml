@@ -28,9 +28,18 @@ jobs:
           grep -q 'pay in compute' docs/index.html
           grep -q 'millijoule' docs/index.html
 
+      - name: Ensure Cloudflare Pages project exists
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Create is idempotent enough: ignore "already exists"
+          command: pages project create f00-joule --production-branch=main
+        continue-on-error: true
+
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy docs --project-name=f00-joule --branch=main
+          command: pages deploy docs --project-name=f00-joule --branch=main --commit-dirty=true
