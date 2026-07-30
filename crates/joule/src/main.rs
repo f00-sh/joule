@@ -799,6 +799,15 @@ async fn run_agent(
                     Message::OperatorBroadcast { envelope } => {
                         // Defense in depth: if operator key is pinned, verify even when
                         // the message arrived via control flood (control may be untrusted).
+                        {
+                            let expect = body_sha256_hex(&envelope.body_json);
+                            if expect != envelope.body_sha256.to_lowercase()
+                                && expect != envelope.body_sha256
+                            {
+                                warn!(id = %envelope.id, "reject operator broadcast (body_sha256)");
+                                continue;
+                            }
+                        }
                         if let Some(pk) = operator_pubkey_hex() {
                             if let Err(e) = verify_operator_sig(&envelope, &pk) {
                                 warn!(error = %e, id = %envelope.id, "reject operator broadcast (bad sig)");

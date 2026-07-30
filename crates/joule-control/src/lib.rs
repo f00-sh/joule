@@ -20,7 +20,6 @@ pub use broadcast::{
     body_sha256_hex, now_ms, operator_preimage, operator_pubkey_hex, verify_operator_sig,
     BroadcastLog,
 };
-// re-export for agents that want local verify before acting on flooded envelopes
 pub use http::router;
 pub use identity::{verify_preimage, PoolIdentity};
 pub use persist::default_data_dir;
