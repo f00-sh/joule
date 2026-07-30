@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Demo: operator key → sign notice → inject into local control.
-# Requires a running control with JOULE_OPERATOR_PUBKEY matching the generated key
-# (or no key pin for lab). Does not commit secrets.
+# Prefers official protocol secret (~/.config/f00/joule/protocol.ed25519.sec).
+# Lab fallback needs JOULE_ALLOW_UNOFFICIAL_OPERATOR=1 on control. Does not commit secrets.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

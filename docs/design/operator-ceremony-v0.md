@@ -28,16 +28,17 @@ joule broadcast keygen \
 - **Secret** (`operator.ed25519.sec`): 32-byte hex. Mode `0600`. **Never commit. Never put on f00.** Prefer offline / air-gapped storage.  
 - **Public** (`operator.ed25519.pub`): safe to commit under `docs/operator-keys/` and publish on the website.
 
-Pin on every control/agent host:
+Stock builds **embed** the official protocol public key (see [master-key-trust-v0](master-key-trust-v0.md)).  
+You do **not** need `JOULE_OPERATOR_PUBKEY` on production controls — they verify the embed.
+
+Lab/forks only:
 
 ```text
-export JOULE_OPERATOR_PUBKEY=<64 hex chars>
-# or drop public hex at:
-#   ~/.config/f00/joule/operator.pub
-#   docs/operator-keys/operator.ed25519.pub  (dev tree)
+export JOULE_ALLOW_UNOFFICIAL_OPERATOR=1
+export JOULE_OPERATOR_PUBKEY=<64 hex chars>   # non-official key
 ```
 
-If **no** pubkey is configured, controls accept any envelope (lab only). Production **must** pin.
+Without the unofficial flag, env pubkey overrides are **ignored**.
 
 ---
 
@@ -138,9 +139,9 @@ Revoke is **relay-only** in v0 (no automatic key tombstone).
 
 ## 7. Checklist before production
 
-- [ ] Secret offline  
-- [ ] Public key in git + site  
-- [ ] `JOULE_OPERATOR_PUBKEY` on all controls  
-- [ ] Lab inject without key fails in prod config  
+- [ ] Protocol + master secrets offline (`~/.config/f00/joule/` or air-gapped)  
+- [ ] Public material in git + site (`docs/operator-keys/*`) matches embed pins  
+- [ ] Stock control verifies embed (no need for env pin)  
+- [ ] Random-key inject fails without `JOULE_ALLOW_UNOFFICIAL_OPERATOR`  
 - [ ] First software seed done from a trusted builder machine  
 - [ ] Dashboard shows notices (`/v1/notices`)  

@@ -132,6 +132,23 @@ mod tests {
         assert!(master_asc_contains_pin(MASTER_OPENPGP_ASC));
     }
 
+    /// Shipped public key files under docs/operator-keys must match embed pins
+    /// (drives real include_str + parse_protocol_pub_file, not a reimplementation).
+    #[test]
+    fn operator_key_files_match_embed_pins() {
+        let pub_file = include_str!("../../../docs/operator-keys/protocol.ed25519.pub");
+        let from_file = parse_protocol_pub_file(pub_file).expect("protocol pub hex line");
+        assert_eq!(from_file, PROTOCOL_ED25519_PUBKEY_HEX.to_lowercase());
+        let asc_file = include_str!("../../../docs/operator-keys/master.asc");
+        assert_eq!(asc_file.trim(), MASTER_OPENPGP_ASC.trim());
+        assert!(asc_file.contains("BEGIN PGP PUBLIC KEY BLOCK"));
+        // Fingerprint pin is the stable human identifier (UID is armored/base64).
+        assert_eq!(
+            normalize_fpr(MASTER_OPENPGP_FINGERPRINT),
+            "4B18FA65E246ACC61701B6AFCA4CB80ABF1AF878"
+        );
+    }
+
     #[test]
     fn effective_defaults_to_official() {
         let _g = test_env_lock();
