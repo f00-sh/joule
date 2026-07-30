@@ -143,6 +143,8 @@ pub struct ControlState {
     /// Active model chunks from last model_update (for rebalance).
     pub active_chunks: Vec<joule_cluster::ModelChunk>,
     pub active_replica_factor: u32,
+    /// Last rebalance wall time (rate-limit BlobsHave-triggered rebalance).
+    pub last_rebalance: Option<Instant>,
     dirty: bool,
 }
 
@@ -177,6 +179,7 @@ impl ControlState {
             pending_blob_xfers: HashMap::new(),
             active_chunks: Vec::new(),
             active_replica_factor: joule_cluster::DEFAULT_REPLICA_FACTOR,
+            last_rebalance: None,
             dirty: false,
         }
     }

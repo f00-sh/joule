@@ -122,11 +122,22 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     // Full inventory replace from agent (authoritative local scan).
                     g.blobs.announce(id.clone(), blobs);
                     tracing::debug!(%id, "blob inventory updated");
-                    !g.active_chunks.is_empty()
+                    if g.active_chunks.is_empty() {
+                        false
+                    } else {
+                        let now = Instant::now();
+                        let due = g
+                            .last_rebalance
+                            .map(|t| now.duration_since(t) >= Duration::from_secs(10))
+                            .unwrap_or(true);
+                        if due {
+                            g.last_rebalance = Some(now);
+                        }
+                        due
+                    }
                 };
                 if need_rebalance {
-                    // New seed may heal under-replication — schedule rebalance next loop
-                    // by running a light pass now.
+                    // New seed may heal under-replication (rate-limited).
                     crate::model_update::rebalance_replicas(&app).await;
                 }
             }
