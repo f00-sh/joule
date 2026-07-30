@@ -226,14 +226,14 @@ website may **mirror signed** bootstrap/stats; never required as payload or as t
 |-------|--------|------|
 | **A** | **Landed** | Agent `--peer-listen` (default `127.0.0.1:0`); `PeerAlive` gossip via control flood hub; `GET /v1/mesh/peers`; status `mesh_peers` |
 | **B** | **Landed** | `BlobMeta.multiaddrs`; `BlobLocate.multiaddrs`; agent prefers direct `peer_net` BlobWant/BlobChunk; control relay remains fallback |
-| **C** | **Started** | `joule-dht` crate: peer/blob keys, XOR distance, bootstrap.json; control mirrors PeerAlive/BlobsHave into DHT; `GET /v1/dht/keys`, `GET /v1/dht/get/{*key}`, `GET /v1/bootstrap` |
+| **C** | **In progress** | `joule-dht` crate; control + **agent LocalMesh** DHT; peer port accepts PeerAlive/BlobsHave; bootstrap.json dial announce; FetchDigests prefers local mesh before control BlobWant; HTTP `/v1/dht/*`, `/v1/bootstrap` |
 | **D** | Not yet | PlanOffer / RequestInfer without permanent control |
 | **E** | Not yet | Erasure, QUIC, full NAT traversal |
 
 ### Remaining for production mesh
 
-1. Replicate DHT records peer-to-peer (not only control view).  
-2. Dial bootstrap multiaddrs for first contact without control.  
+1. Full DHT k-bucket routing + multi-hop get/put (beyond local view + control mirror).  
+2. Optional pure mesh mode: no control TCP required for chat once PlanOffer lands.  
 3. PlanOffer path without control (Phase D).  
 4. QUIC + NAT (Phase E).
 

@@ -769,8 +769,11 @@ async fn run_agent(
         },
     );
 
-    // Peer listen for direct mesh dial (decentral Phase A).
+    // Peer listen for direct mesh dial (decentral Phase A/C).
+    let local_mesh: peer_net::SharedMesh =
+        std::sync::Arc::new(tokio::sync::Mutex::new(peer_net::LocalMesh::new()));
     let mut multiaddrs: Vec<String> = Vec::new();
+    let mut bootstrap_targets: Vec<String> = Vec::new();
     if !peer_listen.trim().is_empty() {
         let bind: SocketAddr = peer_listen
             .parse()
@@ -782,8 +785,9 @@ async fn run_agent(
         multiaddrs.push(peer_net::format_tcp_multiaddr(local));
         println!("peer listen: {}", multiaddrs[0]);
         let nid = node_id.clone();
+        let mesh = local_mesh.clone();
         tokio::spawn(async move {
-            if let Err(e) = peer_net::run_peer_listener(listener, nid).await {
+            if let Err(e) = peer_net::run_peer_listener(listener, nid, mesh).await {
                 warn!(error = %e, "peer listener exited");
             }
         });
@@ -801,6 +805,15 @@ async fn run_agent(
         );
         for a in boot.multiaddrs.iter().take(8) {
             println!("  bootstrap dial hint: {a}");
+            bootstrap_targets.push(a.clone());
+        }
+        if !multiaddrs.is_empty() && !bootstrap_targets.is_empty() {
+            let nid = node_id.clone();
+            let ours = multiaddrs.clone();
+            let targets = bootstrap_targets.clone();
+            tokio::spawn(async move {
+                peer_net::announce_to_peers(&targets, &nid, &ours, 0, None).await;
+            });
         }
     }
 
@@ -896,15 +909,35 @@ async fn run_agent(
                         }
                     }
                     Message::PeerAlive {
-                        multiaddrs: _addrs,
+                        multiaddrs: peer_addrs,
+                        load,
                         healthy,
                         blob_count,
-                        ..
                     } => {
                         if healthy {
                             mesh_seen.insert(env.from.clone());
                         } else {
                             mesh_seen.remove(&env.from);
+                        }
+                        {
+                            let mut g = local_mesh.lock().await;
+                            g.apply_peer_alive(
+                                &env.from,
+                                peer_addrs.clone(),
+                                load,
+                                healthy,
+                                blob_count,
+                            );
+                        }
+                        // Re-announce ourselves to new peers (P2P mesh fill).
+                        if !multiaddrs.is_empty() && !peer_addrs.is_empty() {
+                            let nid = node_id.clone();
+                            let ours = multiaddrs.clone();
+                            let targets = peer_addrs.clone();
+                            let bc = WeightsStore::list_blob_store().len() as u32;
+                            tokio::spawn(async move {
+                                peer_net::announce_to_peers(&targets, &nid, &ours, bc, None).await;
+                            });
                         }
                         tracing::debug!(
                             blob_count,
@@ -924,6 +957,23 @@ async fn run_agent(
                             ?sizes,
                             "BlobLocate"
                         );
+                        // Mirror locate into local DHT for future control-free fetches.
+                        {
+                            let mut g = local_mesh.lock().await;
+                            for (i, peer) in peers.iter().enumerate() {
+                                let addrs = locate_addrs.get(i).cloned().unwrap_or_default();
+                                let size = sizes.get(i).copied().unwrap_or(0);
+                                if !addrs.is_empty() {
+                                    g.apply_peer_alive(peer, addrs.clone(), 0.0, true, 0);
+                                }
+                                g.dht.put_blob_seeder(
+                                    &sha256,
+                                    &peer.to_string(),
+                                    size,
+                                    addrs,
+                                );
+                            }
+                        }
                         // Phase B: try direct peer fetch before waiting on control relay chunks.
                         let mut tried_direct = false;
                         for addrs in &locate_addrs {
@@ -954,7 +1004,21 @@ async fn run_agent(
                             }
                         }
                         if !tried_direct {
-                            tracing::debug!(%sha256, "no multiaddrs yet; control BlobProvide path");
+                            // Try local mesh DHT (may have learned seeders earlier).
+                            if peer_net::try_fetch_from_local_mesh(&local_mesh, &sha256)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                let _ = announce_local_blobs(
+                                    &mut writer,
+                                    &node_id,
+                                    &store,
+                                    &multiaddrs,
+                                )
+                                .await;
+                            } else {
+                                tracing::debug!(%sha256, "no multiaddrs yet; control BlobProvide path");
+                            }
                         }
                     }
                     Message::PoolStatus {
@@ -1216,6 +1280,20 @@ async fn run_agent(
                         for d in digests {
                             let hash = d.to_lowercase();
                             if WeightsStore::has_blob(&hash) {
+                                continue;
+                            }
+                            // Phase C: try local mesh DHT before asking control.
+                            if peer_net::try_fetch_from_local_mesh(&local_mesh, &hash)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                let _ = announce_local_blobs(
+                                    &mut writer,
+                                    &node_id,
+                                    &store,
+                                    &multiaddrs,
+                                )
+                                .await;
                                 continue;
                             }
                             info!(%hash, "BlobWant (missing digest)");

@@ -1,18 +1,99 @@
-//! Agent peer listen + direct blob transfer (decentral Phase A/B).
+//! Agent peer listen + direct blob transfer (decentral Phase A/B/C).
 //!
 //! Dial strings use `tcp://host:port`. Same NDJSON envelopes as the control agent port.
+//! Peer sessions accept BlobWant (seed), PeerAlive + BlobsHave (local DHT), no control required.
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use joule_proto::{decode_line, encode_line, Envelope, Message, NodeId};
+use joule_dht::{DhtStore, PeerRecord};
+use joule_proto::{decode_line, encode_line, BlobMeta, Envelope, Message, NodeId};
 use joule_runtime::WeightsStore;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 const CHUNK: usize = 64 * 1024;
+
+/// Local mesh + DHT view (Phase C) — filled by control gossip and direct peer messages.
+#[derive(Debug, Default)]
+pub struct LocalMesh {
+    pub dht: DhtStore,
+    /// node_id → multiaddrs
+    pub multiaddrs: HashMap<String, Vec<String>>,
+}
+
+impl LocalMesh {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn apply_peer_alive(
+        &mut self,
+        from: &NodeId,
+        multiaddrs: Vec<String>,
+        load: f32,
+        healthy: bool,
+        blob_count: u32,
+    ) {
+        let id = from.to_string();
+        if !multiaddrs.is_empty() {
+            self.multiaddrs.insert(id.clone(), multiaddrs.clone());
+        }
+        let seq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.dht.put_peer(PeerRecord {
+            node_id: id,
+            multiaddrs,
+            load_milli: (load * 1000.0) as u32,
+            healthy,
+            blob_count,
+            seq,
+            updated_unix_ms: seq,
+        });
+    }
+
+    pub fn apply_blobs_have(&mut self, from: &NodeId, blobs: &[BlobMeta]) {
+        let id = from.to_string();
+        for b in blobs {
+            let mut addrs = b.multiaddrs.clone();
+            if addrs.is_empty() {
+                if let Some(m) = self.multiaddrs.get(&id) {
+                    addrs = m.clone();
+                }
+            }
+            self.dht
+                .put_blob_seeder(&b.sha256, &id, b.size, addrs);
+        }
+    }
+
+    /// All known multiaddrs that seed this hash (deduped).
+    pub fn multiaddrs_for_blob(&self, sha256: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(rec) = self.dht.get_blob(sha256) {
+            for hint in rec.seeders.values() {
+                for a in &hint.multiaddrs {
+                    if !out.contains(a) {
+                        out.push(a.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    pub fn peer_count(&self) -> u32 {
+        self.multiaddrs.len() as u32
+    }
+}
+
+pub type SharedMesh = Arc<Mutex<LocalMesh>>;
 
 /// Parse `tcp://host:port` (or bare `host:port`) into a socket address.
 pub fn parse_tcp_multiaddr(s: &str) -> Result<SocketAddr> {
@@ -30,20 +111,29 @@ pub fn format_tcp_multiaddr(addr: SocketAddr) -> String {
     format!("tcp://{addr}")
 }
 
-/// Serve peer NDJSON: BlobWant → BlobChunk from local blob store.
-pub async fn run_peer_listener(listener: TcpListener, node_id: NodeId) -> Result<()> {
+/// Serve peer NDJSON: BlobWant → BlobChunk; PeerAlive/BlobsHave update local DHT.
+pub async fn run_peer_listener(
+    listener: TcpListener,
+    node_id: NodeId,
+    mesh: SharedMesh,
+) -> Result<()> {
     loop {
         let (sock, peer) = listener.accept().await?;
         let node_id = node_id.clone();
+        let mesh = mesh.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_peer_session(sock, node_id).await {
+            if let Err(e) = handle_peer_session(sock, node_id, mesh).await {
                 warn!(%peer, error = %e, "peer session ended");
             }
         });
     }
 }
 
-async fn handle_peer_session(sock: TcpStream, node_id: NodeId) -> Result<()> {
+async fn handle_peer_session(
+    sock: TcpStream,
+    node_id: NodeId,
+    mesh: SharedMesh,
+) -> Result<()> {
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await? {
@@ -102,8 +192,20 @@ async fn handle_peer_session(sock: TcpStream, node_id: NodeId) -> Result<()> {
                     }
                 }
             }
-            Message::PeerAlive { .. } => {
-                // Accept as liveness ping; no reply required.
+            Message::PeerAlive {
+                multiaddrs,
+                load,
+                healthy,
+                blob_count,
+            } => {
+                let mut g = mesh.lock().await;
+                g.apply_peer_alive(&env.from, multiaddrs, load, healthy, blob_count);
+                info!(from = %env.from, peers = g.peer_count(), "peer PeerAlive → local DHT");
+            }
+            Message::BlobsHave { blobs } => {
+                let mut g = mesh.lock().await;
+                g.apply_blobs_have(&env.from, &blobs);
+                info!(from = %env.from, n = blobs.len(), "peer BlobsHave → local DHT");
             }
             other => {
                 warn!(msg = ?other, "ignored peer message");
@@ -187,15 +289,95 @@ pub async fn fetch_blob_from_addrs(addrs: &[String], sha256: &str) -> Result<Vec
     Err(last)
 }
 
+/// Dial bootstrap / known peer multiaddrs and announce PeerAlive (+ optional BlobsHave).
+/// Best-effort; failures are logged, not fatal.
+pub async fn announce_to_peers(
+    targets: &[String],
+    node_id: &NodeId,
+    our_multiaddrs: &[String],
+    blob_count: u32,
+    blobs: Option<&[BlobMeta]>,
+) {
+    for a in targets {
+        // Skip self.
+        if our_multiaddrs.iter().any(|m| m == a) {
+            continue;
+        }
+        if let Err(e) = announce_one(a, node_id, our_multiaddrs, blob_count, blobs).await {
+            warn!(%a, error = %e, "bootstrap/mesh announce failed");
+        }
+    }
+}
+
+async fn announce_one(
+    multiaddr: &str,
+    node_id: &NodeId,
+    our_multiaddrs: &[String],
+    blob_count: u32,
+    blobs: Option<&[BlobMeta]>,
+) -> Result<()> {
+    let addr = parse_tcp_multiaddr(multiaddr)?;
+    let sock = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr))
+        .await
+        .context("connect timeout")?
+        .with_context(|| format!("connect {addr}"))?;
+    let (_reader, mut writer) = sock.into_split();
+    let alive = Envelope::new(
+        node_id.clone(),
+        Message::PeerAlive {
+            multiaddrs: our_multiaddrs.to_vec(),
+            load: 0.1,
+            healthy: true,
+            blob_count,
+        },
+    );
+    writer.write_all(&encode_line(&alive)?).await?;
+    if let Some(blobs) = blobs {
+        if !blobs.is_empty() {
+            let have = Envelope::new(
+                node_id.clone(),
+                Message::BlobsHave {
+                    blobs: blobs.to_vec(),
+                },
+            );
+            writer.write_all(&encode_line(&have)?).await?;
+        }
+    }
+    let _ = writer.shutdown().await;
+    Ok(())
+}
+
+/// Try local DHT multiaddrs for a digest; returns true if stored successfully.
+pub async fn try_fetch_from_local_mesh(mesh: &SharedMesh, sha256: &str) -> Result<bool> {
+    let addrs = {
+        let g = mesh.lock().await;
+        g.multiaddrs_for_blob(sha256)
+    };
+    if addrs.is_empty() {
+        return Ok(false);
+    }
+    match fetch_blob_from_addrs(&addrs, sha256).await {
+        Ok(data) => {
+            WeightsStore::store_blob(sha256, &data).map_err(|e| anyhow::anyhow!(e))?;
+            info!(%sha256, "local mesh DHT blob OK");
+            Ok(true)
+        }
+        Err(e) => {
+            warn!(%sha256, error = %e, "local mesh fetch failed");
+            Ok(false)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex as StdMutex, OnceLock};
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
@@ -207,6 +389,34 @@ mod tests {
         let b = parse_tcp_multiaddr("127.0.0.1:7703").unwrap();
         assert_eq!(b.port(), 7703);
         assert!(format_tcp_multiaddr(a).starts_with("tcp://"));
+    }
+
+    #[test]
+    fn local_mesh_blob_multiaddrs() {
+        let mut m = LocalMesh::new();
+        let id = NodeId::new();
+        m.apply_peer_alive(
+            &id,
+            vec!["tcp://127.0.0.1:9".into()],
+            0.1,
+            true,
+            1,
+        );
+        let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        m.apply_blobs_have(
+            &id,
+            &[BlobMeta {
+                sha256: hash.into(),
+                size: 1,
+                kind: "blob".into(),
+                name: "t".into(),
+                multiaddrs: vec![],
+            }],
+        );
+        let addrs = m.multiaddrs_for_blob(hash);
+        assert_eq!(addrs, vec!["tcp://127.0.0.1:9".to_string()]);
+        assert_eq!(m.peer_count(), 1);
+        assert!(m.dht.len() >= 2);
     }
 
     /// Phase B: seeder peer listen → leech direct BlobWant (no control relay).
@@ -231,26 +441,49 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let multi = format_tcp_multiaddr(addr);
         let seeder = NodeId::new();
+        let mesh = Arc::new(Mutex::new(LocalMesh::new()));
+        let mesh2 = mesh.clone();
         tokio::spawn(async move {
-            let _ = run_peer_listener(listener, seeder).await;
+            let _ = run_peer_listener(listener, seeder, mesh2).await;
         });
-        // accept ready
         tokio::time::sleep(Duration::from_millis(30)).await;
 
         let got = fetch_blob_direct(&multi, &hash).await.expect("direct fetch");
         assert_eq!(got, payload);
 
-        // multiaddr list helper
         let got2 = fetch_blob_from_addrs(
             &[
-                "tcp://127.0.0.1:1".into(), // dead first
-                multi,
+                "tcp://127.0.0.1:1".into(),
+                multi.clone(),
             ],
             &hash,
         )
         .await
         .expect("fallback multiaddr");
         assert_eq!(got2, payload);
+
+        // Phase C: PeerAlive + BlobsHave over peer port fills local DHT.
+        let leech = NodeId::new();
+        announce_to_peers(
+            std::slice::from_ref(&multi),
+            &leech,
+            &["tcp://127.0.0.1:19999".into()],
+            0,
+            Some(&[BlobMeta {
+                sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
+                size: 1,
+                kind: "blob".into(),
+                name: "c".into(),
+                multiaddrs: vec!["tcp://127.0.0.1:19999".into()],
+            }]),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let g = mesh.lock().await;
+        assert!(g.peer_count() >= 1);
+        assert!(!g
+            .multiaddrs_for_blob("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+            .is_empty());
 
         std::env::remove_var("JOULE_BLOBS_DIR");
         let _ = std::fs::remove_dir_all(&dir);
