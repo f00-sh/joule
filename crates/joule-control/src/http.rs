@@ -32,6 +32,8 @@ pub fn router(app: App) -> Router {
         .route("/v1/cluster/nodes", get(nodes))
         .route("/v1/models", get(models))
         .route("/v1/models/readiness", get(readiness))
+        .route("/v1/public/snapshot", get(public_snapshot))
+        .route("/v1/public/pubkey", get(public_pubkey))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -154,6 +156,16 @@ async fn readiness(State(app): State<App>) -> impl IntoResponse {
         Ok(r) => Json(json!(r)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
+}
+
+/// Signed public pool snapshot — anyone may mirror; site multi-sources these.
+async fn public_snapshot(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    Json(crate::edge::build_signed_snapshot(&g, &app.identity))
+}
+
+async fn public_pubkey(State(app): State<App>) -> impl IntoResponse {
+    Json(json!(app.identity.public_info()))
 }
 
 fn bearer_key(headers: &HeaderMap) -> Option<String> {

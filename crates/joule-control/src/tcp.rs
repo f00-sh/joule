@@ -76,7 +76,9 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 let id = env.from.clone();
                 let api_key = {
                     let mut g = app.state.write().await;
-                    g.register_node(id.clone(), &account, caps)
+                    let key = g.register_node(id.clone(), &account, caps);
+                    crate::edge::publish_snapshot_async(&g, Some(&app.identity), true);
+                    key
                 };
                 {
                     let mut r = app.routes.lock().await;
@@ -98,6 +100,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 let mut g = app.state.write().await;
                 match g.on_heartbeat(&id, load, healthy) {
                     Ok(Some(mint)) => {
+                        crate::edge::publish_snapshot_async(&g, Some(&app.identity), false);
                         tracing::debug!(%id, mint, "heartbeat mint");
                     }
                     Ok(None) => {}

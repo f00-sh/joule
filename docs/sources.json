@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "description": "Bootstrap multi-source list for decentralized pool stats. The site fetches all sources, prefers signed+fresh snapshots, and falls back to majority/ freshest unsigned mirrors. Cloudflare edge is one mirror — not authority.",
+  "sources": [
+    {
+      "id": "f00-edge",
+      "url": "https://joule.f00.sh/api/pool",
+      "kind": "mirror",
+      "note": "Optional CF mirror (ingest-fed). Not required for decentralization."
+    },
+    {
+      "id": "local-control",
+      "url": "http://127.0.0.1:7700/v1/public/snapshot",
+      "kind": "control",
+      "optional": true,
+      "note": "Any joule control exposes signed snapshots. Add your public control URL here or via ?sources="
+    }
+  ],
+  "trust": {
+    "mode": "freshest_prefer_signed",
+    "max_age_secs": 180,
+    "require_signature": false
+  }
+}

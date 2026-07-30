@@ -6,12 +6,14 @@
 mod app;
 mod edge;
 mod http;
+mod identity;
 mod persist;
 mod state;
 mod tcp;
 
 pub use app::App;
 pub use http::router;
+pub use identity::{verify_preimage, PoolIdentity};
 pub use persist::default_data_dir;
 pub use state::{AccountInfo, ControlState, NodeView, SharedState};
 pub use tcp::{
@@ -54,8 +56,8 @@ pub async fn serve(app: App, agent_addr: SocketAddr, http_addr: SocketAddr) -> R
             {
                 let mut g = prune_app.state.write().await;
                 g.prune();
-                // Push live pool JSON to joule.f00.sh edge (if JOULE_EDGE_TOKEN set).
-                edge::publish_snapshot_async(&g, false);
+                // Optional edge mirror; landing page multi-sources signed /v1/public/snapshot too.
+                edge::publish_snapshot_async(&g, Some(&prune_app.identity), false);
             }
             broadcast_pool_status(&prune_app).await;
         }

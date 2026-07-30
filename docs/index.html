@@ -43,9 +43,9 @@
     <div class="live-bar" aria-live="polite">
       <span class="dot" id="live-dot" aria-hidden="true"></span>
       <strong id="live-status">…</strong>
-      <span class="meta">cluster feed</span>
+      <span class="meta">decentralized cluster feed</span>
       <span class="meta">updated <span id="live-age">—</span></span>
-      <span class="meta" id="live-hint">SSE /api/pool/stream · fallback poll</span>
+      <span class="meta" id="live-hint">multi-source · signed preferred</span>
     </div>
 
     <section class="hero" id="top">
@@ -119,8 +119,9 @@
         </tbody>
       </table>
       <p class="muted" style="font-size:0.78rem;margin-top:0.6rem">
-        Edge API: <code>/api/pool</code> · stream <code>/api/pool/stream</code>.
-        Lab override: <code>?api=http://127.0.0.1:7700</code>.
+        Multi-source bootstrap: <a href="sources.json"><code>sources.json</code></a>.
+        Any control: <code>GET /v1/public/snapshot</code> (ed25519 signed).
+        Optional CF mirror: <code>/api/pool</code>. Lab: <code>?api=http://127.0.0.1:7700</code>.
       </p>
     </section>
 
@@ -194,16 +195,19 @@ burn = (prompt + 4×completion) × leecher_usage_bp
     <section id="join">
       <h2>Join the pool</h2>
       <div class="callout">
-        <strong>Publish live stats to this site:</strong>
-        run control with <code>JOULE_EDGE_TOKEN</code> set (matches the Pages ingest secret).
-        Default edge URL is <code>https://joule.f00.sh/api/ingest</code>.
+        <strong>Decentralized stats:</strong> control signs snapshots
+        (<code>/v1/public/snapshot</code>). Add your public URL to
+        <code>sources.json</code> — the site does not need Cloudflare.
+        Optional mirror: put the ingest token at
+        <code>~/.config/f00/joule/edge.token</code> (f00 core path) so control
+        also pushes to <code>joule.f00.sh/api/ingest</code>.
       </div>
       <pre class="cmd">git clone https://github.com/f00-sh/joule.git
 cd joule && cargo build --release -p joule
 
-# terminal 1 — control (publishes to joule.f00.sh when token set)
-export JOULE_EDGE_TOKEN=…   # same as Cloudflare Pages INGEST_TOKEN
+# terminal 1 — control (auto-loads edge token from f00 core path if present)
 ./target/release/joule control
+# signed feed → http://127.0.0.1:7700/v1/public/snapshot
 
 # terminal 2 — donate
 ./target/release/joule agent --account you --control 127.0.0.1:7701</pre>

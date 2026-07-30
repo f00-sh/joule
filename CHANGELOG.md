@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
 - **Live public pool on joule.f00.sh**: Pages Functions `/api/pool` + SSE `/api/pool/stream` + KV snapshot; control edge publish (`JOULE_EDGE_TOKEN` → `/api/ingest`)
+- **Decentralized stats v0**: signed `GET /v1/public/snapshot` (ed25519); multi-source `sources.json` on the site; CF edge is optional mirror only (`docs/design/decentral-stats-v0.md`)
+- Edge token auto-load from f00 core path `~/.config/f00/joule/edge.token`
 - **Teaser site** (f00 theme shell): free/compute pitch, economy explain, real-time cluster stats + donors
 - **CI:** GitHub Actions Pages deploy (`pages.yml`) + economy/site sanity in `ci.yml`
 - Account fairness windows persisted (snapshot v2); `/v1/account` exposes leecher + tenure fields

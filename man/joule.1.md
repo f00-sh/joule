@@ -55,6 +55,8 @@ HTTP routes:
 | GET | `/v1/cluster/nodes` | Donor node list |
 | GET | `/v1/models` | Models offered by healthy donors |
 | GET | `/v1/account` | Balance + donating flag (Bearer key) |
+| GET | `/v1/public/snapshot` | Signed public pool snapshot (multi-source stats) |
+| GET | `/v1/public/pubkey` | Pool ed25519 verifying key |
 | POST | `/v1/chat/completions` | OpenAI-shaped chat; `stream: true` for SSE |
 
 ### joule agent
