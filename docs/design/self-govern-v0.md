@@ -1,6 +1,6 @@
 # joule — self-governing verifiable economy v0
 
-**Status:** active  
+**Status:** active (v0 code: sealed ledger, verified VRAM challenges, public audit APIs)  
 **Goal:** the pool **runs itself**. Users cannot invent millijoules or GPU size. Everything public is **recomputable and hash-chained**.
 
 **No money.** Public pool access is paid only in donated compute, scored as millijoules (mJ).

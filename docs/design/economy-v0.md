@@ -1,6 +1,6 @@
 # joule — millijoule economy v0
 
-**Status:** active  
+**Status:** active (v0 code: √VRAM mint, tenure, leecher mults, dual_verify)  
 **Algorithm id:** `eco=v0` (embedded in every ledger reason string)  
 **Code:** `crates/joule-ledger/src/economy.rs`  
 **Product:** free public pool — pay only in donated compute
