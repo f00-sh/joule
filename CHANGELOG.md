@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Operator **revoke** envelope id blacklist; agent broadcast journal (ndjson)
 - **dual_verify** wired: every Nth chat runs a free second pool pass and logs mismatch
 - Joining agents receive recent operator envelopes + rebalance FetchDigests; agents verify body hash + operator sig locally when key pinned
+- Late joiners re-plan model digests (included in redundant placement); e2e coverage
+- `scripts/install.sh` installs from local cargo build (or GitHub release when assets exist)
 - **Weight download/verify**: HTTP(S) + `repo://` with sha256; `weights.published=true`
 - **lab-tiny** fixture + **kimi-k3-meta** (Moonshot HF configs); tensor-backed generate (`decode.rs`)
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
