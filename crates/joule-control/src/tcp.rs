@@ -458,10 +458,10 @@ pub async fn dispatch_infer(
         }
     }
 
-    match tokio::time::timeout(Duration::from_secs(45), rx).await {
-        Ok(Ok(Ok(outcome))) => Ok(outcome),
-        Ok(Ok(Err(e))) => Err(e),
-        Ok(Err(_)) => Err("infer channel closed".into()),
+    let first = match tokio::time::timeout(Duration::from_secs(45), rx).await {
+        Ok(Ok(Ok(outcome))) => outcome,
+        Ok(Ok(Err(e))) => return Err(e),
+        Ok(Err(_)) => return Err("infer channel closed".into()),
         Err(_) => {
             let mut g = app.state.write().await;
             if let Some(mut p) = g.pending.remove(&request_id) {
@@ -469,7 +469,119 @@ pub async fn dispatch_infer(
                 g.wake_scheduler();
                 let _ = p.tx.take();
             }
-            Err("sharded infer timed out".into())
+            return Err("sharded infer timed out".into());
+        }
+    };
+
+    // Optional dual-verify: second full pool pass; log mismatch (tensor decode may differ).
+    let dual = {
+        let mut g = app.state.write().await;
+        g.should_dual_verify()
+    };
+    if dual {
+        match Box::pin(dispatch_infer_once(
+            app, account, &model, prompt, max_tokens,
+        ))
+        .await
+        {
+            Ok(second) => {
+                if second.text.trim() != first.text.trim() {
+                    warn!(
+                        first_len = first.text.len(),
+                        second_len = second.text.len(),
+                        "dual_verify text mismatch (accepted primary; tensors may be non-deterministic)"
+                    );
+                } else {
+                    info!("dual_verify matched");
+                }
+            }
+            Err(e) => warn!(error = %e, "dual_verify second pass failed"),
+        }
+    }
+    Ok(first)
+}
+
+/// One sharded infer without dual-verify recursion.
+async fn dispatch_infer_once(
+    app: &App,
+    account: &str,
+    model: &str,
+    prompt: &str,
+    max_tokens: u32,
+) -> Result<InferOutcome, String> {
+    let model = resolve_cluster_model(Some(model))?.to_string();
+    {
+        let g = app.state.read().await;
+        if !g.cluster.account_is_donating(account) {
+            return Err(
+                "contribution required: run `joule agent` for this account before using the API"
+                    .into(),
+            );
+        }
+    }
+    let plan = acquire_stream_with_wait(app, Duration::from_secs(20)).await?;
+    let request_id = Uuid::new_v4();
+    let (tx, rx) = oneshot::channel();
+    let awaiting: std::collections::HashSet<NodeId> =
+        plan.shards.iter().map(|s| s.node.clone()).collect();
+    let tail = plan
+        .shards
+        .last()
+        .map(|s| s.node.clone())
+        .ok_or_else(|| "empty shard plan".to_string())?;
+    {
+        let mut g = app.state.write().await;
+        g.pending.insert(
+            request_id,
+            PendingInfer {
+                account: account.to_string(),
+                plan: plan.clone(),
+                awaiting,
+                tail_text: None,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                charge: false, // dual pass does not double-charge
+                tx: Some(tx),
+            },
+        );
+    }
+    let mut sent = 0usize;
+    for shard in &plan.shards {
+        let is_tail = shard.node == tail;
+        let env = Envelope::new(
+            shard.node.clone(),
+            Message::InferRequest {
+                request_id,
+                model: model.clone(),
+                prompt: prompt.to_string(),
+                max_tokens,
+                plan: plan.clone(),
+                is_tail,
+            },
+        );
+        if send_to_agent(&app.routes, &shard.node, env).await {
+            sent += 1;
+        }
+    }
+    if sent == 0 {
+        let mut g = app.state.write().await;
+        g.pending.remove(&request_id);
+        g.cluster.release_stream(&plan);
+        g.wake_scheduler();
+        return Err("no connected agents for dual_verify".into());
+    }
+    match tokio::time::timeout(Duration::from_secs(45), rx).await {
+        Ok(Ok(Ok(outcome))) => Ok(outcome),
+        Ok(Ok(Err(e))) => Err(e),
+        Ok(Err(_)) => Err("dual_verify channel closed".into()),
+        Err(_) => {
+            let mut g = app.state.write().await;
+            if let Some(mut p) = g.pending.remove(&request_id) {
+                g.cluster.release_stream(&p.plan);
+                g.wake_scheduler();
+                let _ = p.tx.take();
+            }
+            Err("dual_verify timed out".into())
         }
     }
 }
