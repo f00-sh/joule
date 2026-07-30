@@ -1,10 +1,10 @@
-//! joule — mesh supercomputer CLI (research mesh-first).
+//! joule — distributed cluster supercomputer CLI.
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use joule_cluster::Cluster;
 use joule_ledger::{estimate_contribution_millijoules, estimate_usage_millijoules, Ledger};
-use joule_mesh::Mesh;
-use joule_proto::{DeviceClass, NodeCaps, NodeId};
+use joule_proto::{ClusterCapacity, DeviceClass, NodeCaps, NodeId};
 use joule_runtime::{Engine, InferRequest, StubEngine};
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "joule",
     version,
-    about = "Decentralized mesh supercomputer for open-weight AI inference"
+    about = "Distributed internet-wide cluster: pool idle GPUs into open-weight AI inference"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -24,30 +24,39 @@ struct Cli {
 enum Commands {
     /// Print protocol and build identity.
     Version,
-    /// Local lab: register fake peers, plan a mesh, run stub inference.
+    /// Local lab: synthetic nodes, capacity snapshot, placement, stub inference.
     Lab {
         /// Model tag to plan for.
         #[arg(long, default_value = "kimi-open-q4")]
         model: String,
         /// Prompt text for stub inference.
-        #[arg(long, default_value = "status report from the mesh")]
+        #[arg(long, default_value = "status report from the cluster")]
         prompt: String,
-        /// Prefer pipeline parallelism when enough peers exist.
+        /// Prefer pipeline parallelism when enough nodes exist.
         #[arg(long, default_value_t = true)]
         pipeline: bool,
         /// Pipeline stage count when pipeline is preferred.
         #[arg(long, default_value_t = 2)]
         stages: usize,
-        /// Number of synthetic GPU peers.
+        /// Number of synthetic GPU nodes.
         #[arg(long, default_value_t = 3)]
         peers: usize,
+    },
+    /// Print cluster capacity (dashboard feed shape).
+    Capacity {
+        /// Synthetic healthy GPU nodes for local demo (0 = empty cluster).
+        #[arg(long, default_value_t = 5)]
+        peers: usize,
+        /// Emit JSON (same schema as future GET /v1/cluster/capacity).
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
     /// Show ledger demo (mint contribution, burn usage).
     Credits {
         #[arg(long, default_value = "donor")]
         account: String,
     },
-    /// Placeholder: run a donor agent (network mesh not wired yet).
+    /// Placeholder: run a donor agent (network join not wired yet).
     Agent {
         #[arg(long, default_value = "kimi-open-q4")]
         model: String,
@@ -67,7 +76,7 @@ async fn main() -> Result<()> {
         Commands::Version => {
             println!("joule {}", env!("CARGO_PKG_VERSION"));
             println!("protocol {}", joule_proto::PROTOCOL_VERSION);
-            println!("mesh-first research build");
+            println!("distributed cluster (internet-wide)");
         }
         Commands::Lab {
             model,
@@ -78,17 +87,63 @@ async fn main() -> Result<()> {
         } => {
             run_lab(model, prompt, pipeline, stages, peers).await?;
         }
+        Commands::Capacity { peers, json } => {
+            run_capacity(peers, json)?;
+        }
         Commands::Credits { account } => {
             run_credits(&account)?;
         }
         Commands::Agent { model, config } => {
             let _ = config;
             bail!(
-                "agent network transport not implemented yet (model={model}). See docs/design/mesh-v0.md"
+                "agent network transport not implemented yet (model={model}). See docs/design/cluster-v0.md"
             );
         }
     }
     Ok(())
+}
+
+fn demo_cluster(peers: usize, model: &str) -> Cluster {
+    let mut cluster = Cluster::new();
+    for i in 0..peers {
+        let id = NodeId::new();
+        let mem = 8192 + (i as u32) * 4096;
+        cluster.upsert_node(
+            id,
+            NodeCaps {
+                device: DeviceClass::Gpu,
+                mem_mib: mem,
+                throughput_class: 10 + i as u16,
+                models: vec![model.to_string()],
+            },
+        );
+    }
+    cluster
+}
+
+fn print_capacity(cap: &ClusterCapacity) {
+    println!("cluster capacity (live aggregate)");
+    println!(
+        "  nodes:     {} healthy / {} total",
+        cap.nodes_healthy, cap.nodes_total
+    );
+    println!(
+        "  devices:   gpu={} metal={} cpu={}",
+        cap.nodes_gpu, cap.nodes_metal, cap.nodes_cpu
+    );
+    println!(
+        "  memory:    {} MiB healthy / {} MiB total",
+        cap.mem_mib_healthy, cap.mem_mib_total
+    );
+    println!(
+        "  throughput_class_sum (healthy): {}",
+        cap.throughput_class_sum
+    );
+    if cap.models_available.is_empty() {
+        println!("  models:    (none)");
+    } else {
+        println!("  models:    {}", cap.models_available.join(", "));
+    }
 }
 
 async fn run_lab(
@@ -98,24 +153,13 @@ async fn run_lab(
     stages: usize,
     peers: usize,
 ) -> Result<()> {
-    let mut mesh = Mesh::new();
-    for i in 0..peers {
-        let id = NodeId::new();
-        let mem = 8192 + (i as u32) * 4096;
-        mesh.upsert_peer(
-            id,
-            NodeCaps {
-                device: DeviceClass::Gpu,
-                mem_mib: mem,
-                throughput_class: 10 + i as u16,
-                models: vec![model.clone()],
-            },
-        );
-    }
+    let cluster = demo_cluster(peers, &model);
+    let cap = cluster.capacity();
+    print_capacity(&cap);
 
-    let plan = mesh
+    let plan = cluster
         .plan_for(&model, pipeline, stages)
-        .context("planning mesh")?;
+        .context("planning cluster")?;
     println!(
         "plan {} shards={} model={}",
         plan.plan_id,
@@ -159,6 +203,17 @@ async fn run_lab(
         "ledger lab-donor balance={} mJ (minted {mint}, burned {burn})",
         ledger.balance("lab-donor")
     );
+    Ok(())
+}
+
+fn run_capacity(peers: usize, json: bool) -> Result<()> {
+    let cluster = demo_cluster(peers, "kimi-open-q4");
+    let cap = cluster.capacity();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cap)?);
+    } else {
+        print_capacity(&cap);
+    }
     Ok(())
 }
 

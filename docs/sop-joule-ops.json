@@ -3,24 +3,26 @@
   "document_id": "JOULE-SOP-OPS-001",
   "version": "0.0.0",
   "status": "draft",
-  "purpose": "Day-to-day operation of a joule mesh lab and future public pool gateway.",
-  "scope": "Operators running joule coordinators, donor agents, and release gates for f00-sh/joule.",
+  "purpose": "Day-to-day operation of a joule distributed cluster lab and future public pool gateway/dashboard.",
+  "scope": "Operators running joule coordinators, donor agents, capacity dashboard, and release gates for f00-sh/joule.",
   "audience": "joule operators and release owners",
   "sections": [
     {
       "heading": "Purpose",
-      "body": "This SOP defines how operators run joule safely: mesh lab checks, contribution gates, and release documentation. Graphical flowcharts are mandatory for gate and ship flows."
+      "body": "This SOP defines how operators run joule safely: cluster lab checks, live capacity visibility, contribution gates, and release documentation. Graphical flowcharts are mandatory for gate and ship flows."
     },
     {
       "heading": "Day-to-day gates",
-      "body": "Before exposing any gateway: (1) cargo test green, (2) joule lab succeeds, (3) ledger mint/burn demo succeeds, (4) no freeloader path without contribution checks when API is enabled.",
+      "body": "Before exposing any gateway: (1) cargo test green, (2) joule lab succeeds, (3) joule capacity --json succeeds, (4) ledger mint/burn demo succeeds, (5) dashboard or capacity API reflects healthy nodes when cluster is live, (6) no freeloader path without contribution checks when API is enabled.",
       "flowchart": {
         "title": "Day-to-day operator gates",
         "nodes": [
           { "id": "start", "label": "Start ops check" },
           { "id": "test", "label": "cargo test --workspace" },
           { "id": "lab", "label": "joule lab" },
+          { "id": "cap", "label": "joule capacity --json" },
           { "id": "ledger", "label": "joule credits" },
+          { "id": "dash", "label": "Dashboard shows live capacity?" },
           { "id": "gate_api", "label": "API enabled?" },
           { "id": "contrib", "label": "Contribution gate live?" },
           { "id": "ok", "label": "Operate" },
@@ -29,8 +31,11 @@
         "edges": [
           { "from": "start", "to": "test" },
           { "from": "test", "to": "lab" },
-          { "from": "lab", "to": "ledger" },
-          { "from": "ledger", "to": "gate_api" },
+          { "from": "lab", "to": "cap" },
+          { "from": "cap", "to": "ledger" },
+          { "from": "ledger", "to": "dash" },
+          { "from": "dash", "to": "gate_api", "label": "yes or lab-only" },
+          { "from": "dash", "to": "block", "label": "live pool but broken" },
           { "from": "gate_api", "to": "contrib", "label": "yes" },
           { "from": "gate_api", "to": "ok", "label": "no (lab only)" },
           { "from": "contrib", "to": "ok", "label": "yes" },
@@ -45,7 +50,7 @@
         "title": "Release ship flow",
         "nodes": [
           { "id": "ready", "label": "Release candidate" },
-          { "id": "verify", "label": "Tests + lab" },
+          { "id": "verify", "label": "Tests + lab + capacity" },
           { "id": "docs", "label": "Docs pack" },
           { "id": "tag", "label": "SemVer tag" },
           { "id": "assets", "label": "Attach install + file_id.diz" },

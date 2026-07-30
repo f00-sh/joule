@@ -1,6 +1,6 @@
 # joule
 
-**Mesh supercomputer for open-weight AI.** Idle GPUs join a peer mesh. Access is earned in millijoules — compute in, tokens out. No cash buy-in for the public pool.
+**Distributed supercomputer cluster for open-weight AI.** Idle GPUs anywhere on the internet join one pool. Access is earned in millijoules — compute in, tokens out. The dashboard shows **live** how much distributed compute is online.
 
 | | |
 |---|---|
@@ -10,7 +10,7 @@
 
 ## Why this project exists
 
-Frontier models need more than one idle card. Central clouds re-centralize power. joule pools donated machines into a **mesh**: multi-node placement first, OpenAI-compatible access when the mesh is real. Donors keep control of their hardware. Freeloaders without contribution do not get keys that work.
+Frontier models need more than one idle card. Central clouds re-centralize power. joule pools donated machines into an **internet-wide cluster**. Multi-node placement is first-class. Connectivity medium does not matter. Donors keep control of their hardware. Freeloaders without contribution do not get working keys. Everyone can see the pool size on the dashboard.
 
 ## Requirements
 
@@ -34,6 +34,7 @@ curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh |
 git clone https://github.com/f00-sh/joule.git
 cd joule
 cargo build --release -p joule
+./target/release/joule capacity --json
 ./target/release/joule lab
 ```
 
@@ -41,6 +42,7 @@ cargo build --release -p joule
 
 ```text
 joule version
+joule capacity --peers 5 --json
 joule lab --peers 3 --stages 2
 joule credits --account alice
 ```
@@ -51,7 +53,7 @@ See the man page for full options.
 
 | Document | Location |
 |---|---|
-| Design (mesh-v0) | [design/mesh-v0.md](design/mesh-v0.md) |
+| Design (cluster-v0) | [design/cluster-v0.md](design/cluster-v0.md) |
 | Operator SOP (NASA PDF) | [sop-joule-ops.pdf](sop-joule-ops.pdf) — generated on release |
 | Release memos | [releases/](releases/) |
 | README | [../README.md](../README.md) |
@@ -65,10 +67,10 @@ See the man page for full options.
 ╔══════════════════════════════════════════════════╗
 ║▓▓▓▓░░░░  joule  ░░░░▓▓▓▓                         ║
 ║████████████████████████████████████████████████  ║
-║  ▄█▀  MESH SUPERCOMPUTER  ▀█▄                    ║
+║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
 ║  v0.0.0  ·  MIT  ·  2026                         ║
-║  idle GPUs → open-weight mesh · pay in compute   ║
+║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝
 ```
@@ -79,7 +81,7 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) and [AGENTS.md](../AGENTS.md).
 
 ```text
 cargo test --workspace
-cargo run -p joule -- lab
+cargo run -p joule -- capacity --json
 ```
 
 ## License

@@ -1,7 +1,8 @@
-//! Protocol types for the joule mesh.
+//! Protocol types for the joule distributed cluster.
 //!
 //! Nodes speak a versioned message set over authenticated channels.
-//! This crate is pure data + encoding; transport lives in `joule-mesh`.
+//! Transport and membership live in `joule-cluster`. Connectivity medium
+//! (fiber, cellular, satellite, whatever) is out of scope for the protocol.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -9,7 +10,7 @@ use uuid::Uuid;
 /// Wire protocol major.minor. Bump major on breaking message changes.
 pub const PROTOCOL_VERSION: &str = "0.1.0";
 
-/// Stable node identity (public key fingerprint later; UUID for early mesh).
+/// Stable node identity (public key fingerprint later; UUID for early cluster).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub Uuid);
 
@@ -29,9 +30,9 @@ impl Default for NodeId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceClass {
-    /// NVIDIA / AMD discrete GPU with usable VRAM.
+    /// Discrete GPU with usable VRAM (any vendor path the runtime supports).
     Gpu,
-    /// Apple Silicon unified memory GPU path.
+    /// Apple Silicon unified-memory GPU path.
     Metal,
     /// CPU-only fallback (low credit weight).
     Cpu,
@@ -45,7 +46,7 @@ pub struct NodeCaps {
     pub mem_mib: u32,
     /// Self-reported sustained token/s class for placement (verified later).
     pub throughput_class: u16,
-    /// Model/quant tags this node can load (e.g. "kimi-k3-q4_k_m").
+    /// Model/quant tags this node can load (e.g. "kimi-open-q4").
     pub models: Vec<String>,
 }
 
@@ -53,7 +54,7 @@ pub struct NodeCaps {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShardRole {
-    /// Full model replica on one node (mesh-simple path).
+    /// Full model replica on one node.
     Replica,
     /// Pipeline stage (layer range).
     Pipeline,
@@ -77,15 +78,38 @@ pub struct ShardAssignment {
     pub tp_world: Option<u16>,
 }
 
-/// Active multi-node (or single-node) serving plan.
+/// Active multi-node (or single-node) serving plan for the cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MeshPlan {
+pub struct ClusterPlan {
     pub plan_id: Uuid,
     pub model: String,
     pub shards: Vec<ShardAssignment>,
 }
 
-/// Envelope for all peer messages.
+/// Live aggregate of donated compute — power the public dashboard.
+///
+/// Built from node heartbeats. Medium of connectivity is irrelevant; only
+/// healthy, registered capacity counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterCapacity {
+    /// Nodes currently registered (including unhealthy).
+    pub nodes_total: u32,
+    /// Nodes passing health checks / recent heartbeat.
+    pub nodes_healthy: u32,
+    pub nodes_gpu: u32,
+    pub nodes_metal: u32,
+    pub nodes_cpu: u32,
+    /// Sum of advertised mem_mib across all registered nodes.
+    pub mem_mib_total: u64,
+    /// Sum of mem_mib for healthy nodes only (what the dashboard should highlight).
+    pub mem_mib_healthy: u64,
+    /// Sum of throughput_class for healthy nodes (relative pool strength).
+    pub throughput_class_sum: u64,
+    /// Distinct model tags offered by at least one healthy node.
+    pub models_available: Vec<String>,
+}
+
+/// Envelope for all peer / control messages.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub protocol: String,
@@ -103,12 +127,16 @@ pub enum Message {
         load: f32,
         healthy: bool,
     },
-    /// Request a mesh plan for a model (bootstrap / rebalance).
+    /// Request a cluster placement plan for a model.
     PlanRequest {
         model: String,
     },
     PlanOffer {
-        plan: MeshPlan,
+        plan: ClusterPlan,
+    },
+    /// Publish or request live pool capacity (dashboard / status).
+    CapacitySnapshot {
+        capacity: ClusterCapacity,
     },
     /// Inference request (OpenAI-shaped body later; opaque JSON for now).
     InferRequest {
@@ -122,7 +150,6 @@ pub enum Message {
     },
     InferDone {
         request_id: Uuid,
-        /// Token accounting for ledger mint/burn.
         prompt_tokens: u32,
         completion_tokens: u32,
     },
@@ -174,5 +201,22 @@ mod tests {
             Message::Hello { caps } => assert_eq!(caps.mem_mib, 24576),
             _ => panic!("expected hello"),
         }
+    }
+
+    #[test]
+    fn capacity_serializes() {
+        let c = ClusterCapacity {
+            nodes_total: 2,
+            nodes_healthy: 2,
+            nodes_gpu: 2,
+            nodes_metal: 0,
+            nodes_cpu: 0,
+            mem_mib_total: 32768,
+            mem_mib_healthy: 32768,
+            throughput_class_sum: 50,
+            models_available: vec!["kimi-open-q4".into()],
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["nodes_healthy"], 2);
     }
 }

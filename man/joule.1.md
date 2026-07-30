@@ -1,13 +1,14 @@
-# joule(1) — mesh supercomputer agent and lab CLI
+# joule(1) — distributed cluster agent and lab CLI
 
 ## NAME
 
-joule — donate idle GPU compute to an open mesh; earn millijoules for AI API access
+joule — donate idle GPU compute to an internet-wide cluster; earn millijoules for AI API access
 
 ## SYNOPSIS
 
 ```text
 joule version
+joule capacity [--peers N] [--json]
 joule lab [--model NAME] [--prompt TEXT] [--pipeline] [--stages N] [--peers N]
 joule credits [--account NAME]
 joule agent [--model NAME] [--config PATH]
@@ -17,18 +18,23 @@ joule -V | --version
 
 ## DESCRIPTION
 
-**joule** is the command-line tool for the joule mesh supercomputer.
+**joule** is the command-line tool for the joule distributed supercomputer cluster.
 
-Donors run a native agent that joins a peer mesh. The mesh places open-weight
-model inference across nodes (pipeline when enough peers exist; replica otherwise).
+Donors run a native agent that joins a global volunteer cluster. Nodes may reach
+the internet by any means. The control plane places open-weight model inference
+across healthy nodes (pipeline when enough peers exist; replica otherwise).
 Users spend **millijoules** on API access. Credits are minted from verified
 contribution only. The public pool does not sell cash bypasses.
 
-Version **0.0.0** ships a local lab and ledger demo. Network agent transport
-and real model engines land in later milestones (see docs/design/mesh-v0.md).
+The **dashboard** (and `joule capacity`) exposes live aggregate compute so anyone
+can see how large the distributed pool is at a given moment.
+
+Version **0.0.0** ships a local lab, capacity demo, and ledger demo. Network
+agent transport and real model engines land in later milestones
+(see docs/design/cluster-v0.md).
 
 Primary user: operator or donor who contributes GPU time.
-Primary job: run lab experiments now; run agent and serve mesh later.
+Primary job: run lab and capacity demos now; run agent and grow the cluster later.
 
 ## OPTIONS
 
@@ -36,10 +42,24 @@ Primary job: run lab experiments now; run agent and serve mesh later.
 
 Print package version, protocol version, and build posture.
 
+### joule capacity
+
+Print cluster capacity in the same shape the dashboard will consume
+(`ClusterCapacity`). With synthetic `--peers` for local demo until a live
+control plane exists.
+
+```text
+--peers N
+    Synthetic healthy GPU nodes for local demo (default: 5).
+
+--json
+    Emit JSON (schema for GET /v1/cluster/capacity).
+```
+
 ### joule lab
 
-Run an in-process mesh lab with synthetic peers, a placement plan, stub
-inference, and a ledger mint/burn demo.
+Run an in-process cluster lab: capacity snapshot, placement plan, stub
+inference, and ledger mint/burn demo.
 
 ```text
 --model NAME
@@ -49,13 +69,13 @@ inference, and a ledger mint/burn demo.
     Prompt for stub completion.
 
 --pipeline / --no-pipeline
-    Prefer pipeline placement when enough peers exist (default: true).
+    Prefer pipeline placement when enough nodes exist (default: true).
 
 --stages N
     Pipeline stage count (default: 2).
 
 --peers N
-    Number of synthetic GPU peers (default: 3).
+    Number of synthetic GPU nodes (default: 3).
 ```
 
 ### joule credits
@@ -104,7 +124,7 @@ Start a donor agent. **Not implemented in 0.0.0** (exits with error pointing at 
 
 | Path | Purpose |
 |---|---|
-| `docs/design/mesh-v0.md` | Architecture and phase plan |
+| `docs/design/cluster-v0.md` | Architecture and phase plan |
 | `file_id.diz` | Release scene card (repository root; GitHub Release asset) |
 
 All supported install methods install this manual page.
@@ -112,20 +132,16 @@ All supported install methods install this manual page.
 ## EXAMPLES
 
 ```text
-# Build identity
 joule version
-
-# Three-peer pipeline lab
+joule capacity --peers 5 --json
 joule lab --peers 3 --stages 2 --model kimi-open-q4
-
-# Ledger demo
 joule credits --account alice
 ```
 
 ## SEE ALSO
 
 - [README.md](../README.md)
-- [docs/design/mesh-v0.md](../docs/design/mesh-v0.md)
+- [docs/design/cluster-v0.md](../docs/design/cluster-v0.md)
 - Project site under [docs/](../docs/)
 - [CHANGELOG.md](../CHANGELOG.md)
 - [file_id.diz](../file_id.diz)

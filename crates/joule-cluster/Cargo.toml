@@ -1,6 +1,6 @@
 [package]
-name = "joule-mesh"
-description = "Peer discovery, session, and request routing for joule"
+name = "joule-cluster"
+description = "Distributed cluster membership, capacity snapshot, and placement for joule"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

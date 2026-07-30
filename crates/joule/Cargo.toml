@@ -1,6 +1,6 @@
 [package]
 name = "joule"
-description = "CLI for the joule mesh supercomputer"
+description = "CLI for the joule distributed compute cluster"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 joule-proto = { workspace = true }
-joule-mesh = { workspace = true }
+joule-cluster = { workspace = true }
 joule-runtime = { workspace = true }
 joule-ledger = { workspace = true }
 anyhow = { workspace = true }

@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/joule",
     "crates/joule-proto",
-    "crates/joule-mesh",
+    "crates/joule-cluster",
     "crates/joule-runtime",
     "crates/joule-ledger",
 ]
@@ -20,7 +20,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 joule-proto = { path = "crates/joule-proto" }
-joule-mesh = { path = "crates/joule-mesh" }
+joule-cluster = { path = "crates/joule-cluster" }
 joule-runtime = { path = "crates/joule-runtime" }
 joule-ledger = { path = "crates/joule-ledger" }
 anyhow = "1"

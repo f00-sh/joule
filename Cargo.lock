@@ -201,8 +201,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "joule-cluster",
  "joule-ledger",
- "joule-mesh",
  "joule-proto",
  "joule-runtime",
  "serde_json",
@@ -213,16 +213,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "joule-ledger"
-version = "0.0.0"
-dependencies = [
- "serde",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "joule-mesh"
+name = "joule-cluster"
 version = "0.0.0"
 dependencies = [
  "joule-proto",
@@ -230,6 +221,15 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "joule-ledger"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "thiserror",
  "uuid",
 ]
 

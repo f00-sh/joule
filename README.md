@@ -1,8 +1,8 @@
 # joule
 
-**Decentralized mesh supercomputer** — pool idle GPUs into open-weight AI inference (Kimi-class).
+**Distributed supercomputer cluster** — pool idle GPUs across the internet into open-weight AI inference (Kimi-class).
 
-joule is an f00 product: donors run a native agent; the mesh places work across peers (pipeline when it helps, replica when it must); access to the OpenAI-compatible API is earned only by contributing compute. Credits are **millijoules**.
+Donors run a native agent. Nodes join one shared cluster no matter how they reach the net. Placement can span many machines. Access to the OpenAI-compatible API is earned only by contributing compute. Credits are **millijoules**. The **dashboard always shows live pool capacity**.
 
 | | |
 |---|---|
@@ -10,21 +10,22 @@ joule is an f00 product: donors run a native agent; the mesh places work across 
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
-| Design | [docs/design/mesh-v0.md](docs/design/mesh-v0.md) |
+| Design | [docs/design/cluster-v0.md](docs/design/cluster-v0.md) |
 
 ## Why
 
-Central API clouds concentrate power and cost. Consumer GPUs sit idle. joule turns spare cycles into a **community mesh**: no cash buy-in for the public pool — only donated compute. Research focus is **mesh-first** multi-node inference, not a single-box wrapper with marketing.
+Central API clouds concentrate power and cost. Consumer GPUs sit idle. joule turns spare cycles into a **community cluster on the public internet**: no cash buy-in for the public pool — only donated compute. Multi-node inference is first-class. We do not care if a node is on LAN, WAN, cellular, or anything else — only that it is online, healthy, and donating.
 
 ## How it works (target)
 
 1. Install the **native agent** (`joule agent`) on a machine with a GPU (CPU works for lab only).
-2. Agent joins the mesh, advertises VRAM/model class, accepts shard or replica plans.
+2. Agent joins the **distributed cluster**, advertises VRAM/model class, accepts shard or replica plans.
 3. Account **mints millijoules** from verified contribution.
 4. Point any OpenAI-compatible client at the gateway with your API key.
 5. Usage **burns millijoules**. No live contribution / balance ⇒ no access.
+6. **Dashboard** shows live aggregate compute (healthy nodes, VRAM, throughput class, models online).
 
-The website is for keys, stats, and installers — **not** for browser-side pool compute.
+The website is for keys, stats, capacity, and installers — **not** for browser-side pool compute.
 
 ## Requirements
 
@@ -51,6 +52,7 @@ git clone https://github.com/f00-sh/joule.git
 cd joule
 cargo build --release -p joule
 ./target/release/joule version
+./target/release/joule capacity --json
 ./target/release/joule lab
 ```
 
@@ -60,13 +62,17 @@ cargo build --release -p joule
 # Protocol + build identity
 joule version
 
-# Local mesh lab: synthetic peers, placement plan, stub inference, ledger demo
+# Live capacity shape (dashboard feed) — synthetic peers for local demo
+joule capacity --peers 5
+joule capacity --peers 5 --json
+
+# Local cluster lab: capacity, placement plan, stub inference, ledger demo
 joule lab --model kimi-open-q4 --peers 3 --stages 2
 
 # Millijoule ledger demo
 joule credits --account alice
 
-# Donor agent (network transport: not implemented in 0.0.0)
+# Donor agent (network join: not implemented in 0.0.0)
 joule agent --model kimi-open-q4
 ```
 
@@ -76,20 +82,20 @@ Full option reference: [man/joule.1.md](man/joule.1.md).
 
 | Crate | Role |
 |---|---|
-| `joule-proto` | Wire protocol types |
-| `joule-mesh` | Membership + placement |
+| `joule-proto` | Wire protocol + `ClusterCapacity` |
+| `joule-cluster` | Membership, capacity aggregate, placement |
 | `joule-runtime` | Inference `Engine` trait + stub |
 | `joule-ledger` | Millijoule mint/burn |
 | `joule` | CLI |
 
-See [docs/design/mesh-v0.md](docs/design/mesh-v0.md) for mesh-first phases M0–M7 and the PR plan.
+See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 and the PR plan.
 
 ## Documentation
 
 | Surface | Location |
 |---|---|
 | This README | [README.md](README.md) |
-| Design | [docs/design/mesh-v0.md](docs/design/mesh-v0.md) |
+| Design | [docs/design/cluster-v0.md](docs/design/cluster-v0.md) |
 | Man page | [man/joule.1.md](man/joule.1.md) |
 | GitHub Pages | [docs/](docs/) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
@@ -103,10 +109,10 @@ See [docs/design/mesh-v0.md](docs/design/mesh-v0.md) for mesh-first phases M0–
 ╔══════════════════════════════════════════════════╗
 ║▓▓▓▓░░░░  joule  ░░░░▓▓▓▓                         ║
 ║████████████████████████████████████████████████  ║
-║  ▄█▀  MESH SUPERCOMPUTER  ▀█▄                    ║
+║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
 ║  v0.0.0  ·  MIT  ·  2026                         ║
-║  idle GPUs → open-weight mesh · pay in compute   ║
+║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝
 ```
@@ -117,6 +123,7 @@ See [docs/design/mesh-v0.md](docs/design/mesh-v0.md) for mesh-first phases M0–
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+cargo run -p joule -- capacity --json
 cargo run -p joule -- lab
 ```
 

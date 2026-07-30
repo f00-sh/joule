@@ -1,6 +1,6 @@
 [package]
 name = "joule-ledger"
-description = "Credit ledger: millijoules earned from verified mesh work, spent on API use"
+description = "Credit ledger: millijoules earned from verified cluster work, spent on API use"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

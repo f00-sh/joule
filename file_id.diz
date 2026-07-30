@@ -1,9 +1,9 @@
 ╔══════════════════════════════════════════════════╗
 ║▓▓▓▓░░░░  joule  ░░░░▓▓▓▓                         ║
 ║████████████████████████████████████████████████  ║
-║  ▄█▀  MESH SUPERCOMPUTER  ▀█▄                    ║
+║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
 ║  v0.0.0  ·  MIT  ·  2026                         ║
-║  idle GPUs → open-weight mesh · pay in compute   ║
+║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝

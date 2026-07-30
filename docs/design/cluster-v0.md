@@ -1,0 +1,245 @@
+# joule — cluster-v0 design
+
+**Status:** active  
+**Version target:** 0.1.0  
+**Product:** [joule](https://github.com/f00-sh/joule) · f00-sh  
+**Default model family:** open Kimi weights (tag `kimi-open-*` until K3 pin is frozen)
+
+---
+
+## 1. Problem
+
+Frontier open models need more compute than one idle machine often has. Centralized API clouds reintroduce single-operator dependence. joule pools **donated idle compute** into one **distributed cluster on the public internet**: users earn API access only by contributing. Placement can span many nodes. How a node reaches the network (home fiber, coffee-shop Wi‑Fi, 5G, datacenter uplink, carrier pigeon with a USB stick and a prayer) is **not** a product concern — only that the node is reachable, healthy, and contributing.
+
+This is **not** a LAN mesh product. It is a **global volunteer compute cluster**.
+
+## 2. Product laws
+
+1. **Compute is the only currency.** No paid bypass in the public pool.
+2. **No contribution ⇒ no API.** Keys fail closed without an active donor window and/or spendable balance.
+3. **Credits measure verified useful work** (millijoules), not uptime theater.
+4. **Donor machines stay under user control** (caps, schedule, pause, thermal/battery).
+5. **Open weights, open agent, open protocol.** Anyone can run a grid; f00 may host a default pool.
+6. **Internet-wide cluster:** multi-node placement and failure handling are first-class. No LAN/WAN product tiers.
+
+## 3. Goals / non-goals
+
+### Goals
+
+- Native **donor agent** (not browser compute).
+- **Versioned cluster protocol** (hello, heartbeat, plan, infer, challenge, capacity, credit events).
+- **Placement planner** for replica / pipeline / later tensor across any healthy nodes that fit.
+- **Live cluster capacity** feed powering the **dashboard** (how much distributed compute exists *right now*).
+- **OpenAI-compatible gateway** for client apps.
+- **Ledger** in millijoules: mint on verified contribution, burn on usage.
+- **Stub runtime** for CI; real engine behind a trait.
+
+### Non-goals
+
+- Browser WebGPU as primary capacity.
+- Preferring or requiring LAN adjacency for “real” multi-node work.
+- Link-class product UX (lan/metro/wan badges, carrier pigeon mode, etc.).
+- Trustless global blockchain settlement.
+- Training (inference only).
+- Shipping weights under a non-redistributable license.
+
+## 4. Architecture
+
+```
+                    ┌──────────────────────────┐
+   OpenAI clients ──►│ gateway (HTTPS /v1)      │
+                    └────────────┬─────────────┘
+                                 │ plan + route
+                    ┌────────────▼─────────────┐
+                    │ cluster control (open)     │
+                    │ membership · planner ·     │
+                    │ capacity · challenges ·    │
+                    │ ledger                     │
+                    └─────┬───────────┬─────────┘
+                          │           │
+              ┌───────────▼──┐   ┌────▼────────────┐
+              │ agent node A │   │ agent node B …  │
+              │ (any network)│   │ (any network)   │
+              └──────────────┘   └─────────────────┘
+
+   Dashboard ──GET /v1/cluster/capacity──► same control plane
+              (live aggregate from heartbeats)
+```
+
+### Crates
+
+| Crate | Role |
+|---|---|
+| `joule-proto` | Wire types, `ClusterPlan`, `ClusterCapacity`, messages |
+| `joule-cluster` | Membership, **capacity snapshot**, placement |
+| `joule-runtime` | `Engine` trait + `StubEngine` |
+| `joule-ledger` | Millijoule accounting |
+| `joule` | CLI: `lab`, `capacity`, `credits`, `agent` |
+
+### Client model
+
+Users **download a native program** (`joule agent`). Website/dashboard: accounts, keys, **live pool size**, installers — **not** pool FLOPs from the browser.
+
+## 5. Dashboard: live distributed compute
+
+**Requirement:** at any time, the dashboard shows how much distributed compute the cluster has.
+
+### Source of truth
+
+- Agents heartbeat to control with `NodeCaps` + load + health.
+- Control maintains the node registry.
+- `Cluster::capacity()` aggregates:
+
+| Field | Meaning |
+|---|---|
+| `nodes_total` / `nodes_healthy` | Registry size vs currently usable |
+| `nodes_gpu` / `nodes_metal` / `nodes_cpu` | Device mix |
+| `mem_mib_total` / `mem_mib_healthy` | Advertised memory (highlight healthy) |
+| `throughput_class_sum` | Relative healthy throughput (verified rates later) |
+| `models_available` | Model tags healthy nodes can load |
+
+### API (target)
+
+```http
+GET /v1/cluster/capacity
+```
+
+Returns `ClusterCapacity` JSON. **Public read** for the marketing/dashboard strip is allowed (no secrets). Optional authenticated richer view (per-node breakdown) for the owner’s account.
+
+### Dashboard UX (minimum)
+
+- Big numbers: **healthy nodes**, **healthy VRAM (GiB)**, **relative throughput**, **models online**
+- Subtext: total registered vs healthy (churn visibility)
+- Auto-refresh (poll 5–15s or SSE later)
+- Empty state: “0 nodes — install the agent to grow the cluster”
+
+### CLI (now)
+
+```text
+joule capacity --peers 5
+joule capacity --peers 5 --json
+```
+
+Same schema as the HTTP endpoint will use.
+
+## 6. Placement (distributed, medium-agnostic)
+
+### Plan types
+
+1. **Replica** — full quant on one node  
+2. **Pipeline** — layer ranges across N nodes  
+3. **Tensor** — TP ranks (later)  
+4. **Prefill/Decode split** — disagg (later)
+
+### Policy (v0)
+
+```
+if prefer_pipeline && healthy_fit_nodes >= stages && stages > 1:
+    assign pipeline shards
+else:
+    assign single best replica (mem, then load)
+```
+
+No path checks the donor’s network type. If a plan is too slow in practice, operators tune stage count / quant / model — they do not get a “LAN-only mode” product surface.
+
+### Failure
+
+- Shard dies → cancel + replan or failover to replica capacity if any.
+- Stale heartbeats → node leaves healthy set → capacity drops on the dashboard immediately.
+
+## 7. Runtime strategy
+
+1. **StubEngine** — CI and lab (done).  
+2. Pure-Rust engine path preferred under language purity.  
+3. FFI only with ADR + AGENTS note.
+
+## 8. Economy (millijoules)
+
+| Action | Effect |
+|---|---|
+| Verified contribution | **mint** mJ × device multiplier |
+| API usage | **burn** mJ |
+| Idle with zero useful work | ~0 mint |
+
+**Access:** healthy agent recently seen **and** balance covers estimated burn (or small rolling debt capped by recent mint).
+
+## 9. Security & trust
+
+- Device keys for agents; API keys for clients.
+- Challenges + spot recompute — never trust self-reported FLOPs alone for mint.
+- Capacity dashboard fields are **aggregates**; do not leak home IPs on the public endpoint.
+
+## 10. Decentralization posture
+
+| Layer | v0 | Later |
+|---|---|---|
+| Workers | Peer-owned, any internet path | Same |
+| Control | Open-source process (f00 default pool) | Multi-coordinator federation |
+| Capacity feed | Single control aggregate | Federated sum of pools |
+| Ledger | Append log | Gossip + checkpoints |
+
+## 11. Default model
+
+- Open Kimi-family weights; pin in `models/MANIFEST` when engine lands.
+- Quant ladder by VRAM class.
+
+## 12. Phased delivery
+
+| Phase | Outcome | Exit |
+|---|---|---|
+| **C0** | Skeleton, capacity type, lab, design | `cargo test`, `joule capacity --json` |
+| **C1** | Agent transport + heartbeats | 2 nodes anywhere form a cluster |
+| **C2** | Real single-node engine | Replica serves real model |
+| **C3** | Multi-node execution | Pipeline/replica across internet nodes |
+| **C4** | Gateway + keys | OpenAI clients work; freeloader denied |
+| **C5** | Live capacity API + dashboard UI | Public page shows live pool stats |
+| **C6** | Challenges + economy | Mint/burn live; abuse path measured |
+| **C7** | Public alpha installers | External donors move the dashboard numbers |
+
+## 13. Key decisions
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Name | **joule** | Energy unit; millijoules as credit |
+| Topology | **Distributed internet cluster** | Not mesh/LAN product |
+| Connectivity | **Irrelevant** | Only reachability + health |
+| Dashboard | **Live capacity required** | Show pool strength continuously |
+| Client | **Native agent** | Real GPU inference |
+| Language | **Rust workspace** | One binary agent |
+| API shape | **OpenAI-compatible** | Drop-in tools |
+| Capacity API | **Public aggregate JSON** | Dashboard + transparency |
+
+## 14. Open questions
+
+1. Exact Kimi checkpoint + license pin.  
+2. Transport (lean QUIC).  
+3. Pure-Rust vs ADR’d FFI for production speed.  
+4. Contribution window *N* and freeload grace.  
+5. Whether public capacity includes rough **tokens/s estimate** once measured (not just throughput_class_sum).
+
+## 15. PR Plan
+
+| PR | Title | Scope | Depends |
+|---|---|---|---|
+| PR1 | chore: cluster rename + capacity | proto/cluster crates, design, CLI capacity | — |
+| PR2 | feat(cluster): transport + auth | agent join, heartbeat | PR1 |
+| PR3 | feat(runtime): single-node engine | load quant, generate | PR1 |
+| PR4 | feat(cluster): multi-node execution | distributed forward | PR2, PR3 |
+| PR5 | feat(gateway): OpenAI API | `/v1`, streaming, keys | PR3 |
+| PR6 | feat(api): live capacity endpoint | `GET /v1/cluster/capacity` | PR2 |
+| PR7 | feat(site): dashboard capacity strip | live numbers UI | PR6 |
+| PR8 | feat(ledger): live mint/burn + gates | contribution required | PR5 |
+| PR9 | feat(agent): idle policy + installers | thermal/battery, install.sh | PR2 |
+| PR10 | feat(security): challenges | anti-cheat sampling | PR4, PR8 |
+
+---
+
+## Appendix — CLI sketch
+
+```text
+joule lab --model kimi-open-q4 --peers 3 --stages 2
+joule capacity --peers 5 --json
+joule credits --account alice
+joule agent --model kimi-open-q4
+joule version
+```

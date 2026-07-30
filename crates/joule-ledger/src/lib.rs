@@ -1,7 +1,7 @@
 //! Append-only credit ledger denominated in **millijoules**.
 //!
 //! Product law: API access requires recent contribution and non-negative spendable balance
-//! (or an active-donor window — see design doc). This crate is the pure accounting core.
+//! (or an active-donor window — see design doc). Mint from verified cluster work; burn on usage.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -68,7 +68,7 @@ impl Ledger {
         Ok(event)
     }
 
-    /// Mint credits for verified mesh contribution.
+    /// Mint credits for verified cluster contribution.
     pub fn mint_contribution(
         &mut self,
         account: impl Into<String>,

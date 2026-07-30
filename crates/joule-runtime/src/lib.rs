@@ -1,10 +1,10 @@
 //! Inference backend trait and stub engine.
 //!
-//! Product law: mesh protocol stays pure Rust. Real GPU backends land behind
+//! Product law: cluster protocol stays pure Rust. Real GPU backends land behind
 //! this trait. Prefer pure-Rust engines (e.g. candle) before any FFI exception.
 
 use async_trait::async_trait;
-use joule_proto::MeshPlan;
+use joule_proto::ClusterPlan;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -34,11 +34,11 @@ pub struct InferResponse {
 /// Local or multi-shard inference engine.
 #[async_trait]
 pub trait Engine: Send + Sync {
-    async fn load_plan(&self, plan: &MeshPlan) -> Result<(), RuntimeError>;
+    async fn load_plan(&self, plan: &ClusterPlan) -> Result<(), RuntimeError>;
     async fn infer(&self, req: InferRequest) -> Result<InferResponse, RuntimeError>;
 }
 
-/// Deterministic stub for mesh/protocol tests without GPUs.
+/// Deterministic stub for cluster/protocol tests without GPUs.
 pub struct StubEngine {
     loaded: std::sync::Mutex<Option<String>>,
 }
@@ -59,7 +59,7 @@ impl Default for StubEngine {
 
 #[async_trait]
 impl Engine for StubEngine {
-    async fn load_plan(&self, plan: &MeshPlan) -> Result<(), RuntimeError> {
+    async fn load_plan(&self, plan: &ClusterPlan) -> Result<(), RuntimeError> {
         if plan.shards.is_empty() {
             return Err(RuntimeError::UnsupportedPlan("empty shards".into()));
         }
@@ -94,7 +94,7 @@ mod tests {
     #[tokio::test]
     async fn stub_roundtrip() {
         let eng = StubEngine::new();
-        let plan = MeshPlan {
+        let plan = ClusterPlan {
             plan_id: Uuid::new_v4(),
             model: "kimi-open-q4".into(),
             shards: vec![ShardAssignment {
@@ -110,11 +110,11 @@ mod tests {
         let out = eng
             .infer(InferRequest {
                 model: "kimi-open-q4".into(),
-                prompt: "hello mesh".into(),
+                prompt: "hello cluster".into(),
                 max_tokens: 16,
             })
             .await
             .unwrap();
-        assert!(out.text.contains("hello mesh"));
+        assert!(out.text.contains("hello cluster"));
     }
 }

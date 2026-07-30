@@ -1,6 +1,6 @@
 [package]
 name = "joule-proto"
-description = "Wire types and messages for the joule mesh"
+description = "Wire types and messages for the joule distributed cluster"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

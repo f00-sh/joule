@@ -7,16 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Product language: **distributed internet-wide cluster** (not mesh/LAN-first)
+- Crate rename: `joule-mesh` → `joule-cluster`; `MeshPlan` → `ClusterPlan`
+- Design SoT: `docs/design/cluster-v0.md` (replaces mesh-v0)
+
 ### Added
 
-- Rust workspace: `joule`, `joule-proto`, `joule-mesh`, `joule-runtime`, `joule-ledger`
+- `ClusterCapacity` aggregate + `Cluster::capacity()` for live dashboard feed
+- CLI: `joule capacity [--peers N] [--json]`
+- Capacity message type on the wire protocol
+- Dashboard requirement: always show live distributed compute
+
+### Prior scaffold
+
+- Rust workspace: `joule`, `joule-proto`, `joule-cluster`, `joule-runtime`, `joule-ledger`
 - CLI: `joule version`, `joule lab`, `joule credits`, `joule agent` (stub)
-- Mesh placement: replica + pipeline plans
+- Placement: replica + pipeline plans
 - Stub inference engine for CI/lab
 - Millijoule ledger mint/burn
-- Design doc: `docs/design/mesh-v0.md`
 - CI workflow (fmt, clippy, test, release build)
-- Docs triad seeds, SOP JSON stub, scene card
 
 ## [0.0.0] - 2026-07-30
 
