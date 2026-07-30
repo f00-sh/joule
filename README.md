@@ -58,35 +58,44 @@ cargo build --release -p joule
 
 ## Quick start (local pool)
 
-Terminal 1 — control plane (dashboard + capacity API + chat + agent registry):
+### Terminal 1 — control plane (localhost)
 
 ```text
 cargo run -p joule --release -- control
+# or: ./target/release/joule control --ephemeral
+
 # agents    → 127.0.0.1:7701
 # http      → http://127.0.0.1:7700
 # dashboard → http://127.0.0.1:7700/
-# data      → ~/.local/share/joule  (override with --data-dir / --ephemeral)
+# healthz   → http://127.0.0.1:7700/healthz
 ```
 
-Terminal 2 — donate compute (earn millijoules; prints API key):
+Leave this running. Open **http://127.0.0.1:7700/** in a browser.
+
+### Terminal 2+ — donate (one or more machines)
 
 ```text
-cargo run -p joule --release -- agent --account alice --model kimi-open-q4
+cargo run -p joule --release -- agent --account alice --control 127.0.0.1:7701
+# optional second donor:
+cargo run -p joule --release -- agent --account bob --control 127.0.0.1:7701 --mem-mib 16384
 ```
 
-Terminal 3 — live pool size + use the AI:
+Each agent prints an **API key**. Dashboard should show healthy nodes + VRAM.
+
+### Terminal 3 — use the pool
 
 ```text
-# open http://127.0.0.1:7700/  — live capacity + donor table (auto-refresh)
-joule capacity --api http://127.0.0.1:7700 --json
+curl -s http://127.0.0.1:7700/v1/cluster/capacity | jq
 joule whoami --key joule_…
 joule chat --key joule_… --prompt "hello from the pool"
 joule chat --key joule_… --stream --prompt "stream me"
 ```
 
-**Law:** no active donor agent for that account → chat is forbidden. Invalid keys → 401.
+**Law:** no active donor agent for that account → chat forbidden. Invalid keys → 401.
 
-Inference is still a **stub engine** until a real model backend lands; the pool, dashboard, streaming chat, and contribute-to-consume path are real.
+**Scheduling:** multi-donor load balance (inflight + load + reputation). Spot anti-cheat challenges run automatically; every 3rd chat dual-verifies across two donors when available.
+
+Inference is still a **stub engine** until real weights land; the pool, dashboard, routing, and contribute-to-consume path are real.
 
 ## Usage
 

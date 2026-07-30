@@ -171,8 +171,10 @@ pub enum Message {
         request_id: Uuid,
         error: String,
     },
+    /// Spot anti-cheat challenge: agent must run model on prompt.
     Challenge {
         challenge_id: Uuid,
+        model: String,
         prompt: String,
     },
     ChallengeResult {

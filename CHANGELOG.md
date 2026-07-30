@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Multi-donor load balancing**: inflight-aware scheduling, failover across agents
+- **Anti-cheat challenges**: spot challenges every ~12s + dual-verify every 3rd chat
+- **Reputation**: pass/fail scores; ban unhealthy cheaters from scheduling
+- **Localhost control hardened**: shared agent routes (fixed dispatch), bind errors, healthz shows agents_connected
 - **Live dashboard** at `GET /` (capacity + donor table, 3s refresh)
 - `GET /v1/cluster/nodes` for dashboard node list
 - **SSE streaming** chat (`stream: true` / `joule chat --stream`)

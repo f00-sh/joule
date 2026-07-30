@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -34,12 +34,19 @@ pub struct NodeView {
     pub throughput_class: u16,
     pub healthy: bool,
     pub load: f32,
+    pub inflight: u32,
+    pub reputation_ok: u64,
+    pub reputation_fail: u64,
+    pub banned: bool,
     pub models: Vec<String>,
 }
 
 #[derive(Debug)]
 pub struct PendingInfer {
     pub account: String,
+    pub worker: NodeId,
+    /// If false, mint worker contribution only (verify path; do not burn caller balance).
+    pub charge: bool,
     pub tx: oneshot::Sender<Result<InferOutcome, String>>,
 }
 
@@ -50,23 +57,31 @@ pub struct InferOutcome {
     pub completion_tokens: u32,
     pub worker_account: String,
     pub device: DeviceClass,
+    pub worker_id: NodeId,
+}
+
+#[derive(Debug)]
+pub struct PendingChallenge {
+    pub node: NodeId,
+    pub model: String,
+    pub prompt: String,
+    pub expected: String,
+    pub started: Instant,
 }
 
 #[derive(Debug)]
 pub struct ControlState {
     pub cluster: Cluster,
     pub ledger: Ledger,
-    /// api_key → account
     pub keys: HashMap<String, String>,
-    /// account → api_key
     pub account_keys: HashMap<String, String>,
-    /// node → account (for mint routing)
     pub node_account: HashMap<NodeId, String>,
-    /// outstanding infer jobs waiting on an agent reply
     pub pending: HashMap<Uuid, PendingInfer>,
-    /// millijoules minted per healthy heartbeat (earn-by-providing)
+    pub pending_challenges: HashMap<Uuid, PendingChallenge>,
     pub heartbeat_mint_mj: Millijoule,
-    /// optional on-disk state directory
+    /// Every Nth chat request also runs a second-worker verify (0 = off).
+    pub dual_verify_every: u64,
+    pub chat_count: u64,
     pub data_dir: Option<PathBuf>,
     dirty: bool,
 }
@@ -86,7 +101,10 @@ impl ControlState {
             account_keys: HashMap::new(),
             node_account: HashMap::new(),
             pending: HashMap::new(),
+            pending_challenges: HashMap::new(),
             heartbeat_mint_mj: 10,
+            dual_verify_every: 3,
+            chat_count: 0,
             data_dir: None,
             dirty: false,
         }
@@ -127,6 +145,10 @@ impl ControlState {
     pub fn prune(&mut self) {
         self.cluster.apply_staleness();
         self.cluster.reap_dead(Duration::from_secs(120));
+        // Expire old challenges.
+        let now = Instant::now();
+        self.pending_challenges
+            .retain(|_, c| now.duration_since(c.started) < Duration::from_secs(60));
         self.save_if_dirty();
     }
 
@@ -180,7 +202,6 @@ impl ControlState {
             .ledger
             .mint_contribution(&account, mint, format!("heartbeat:{id}"));
         self.mark_dirty();
-        // Persist often so restarts keep earned compute credit.
         self.save_if_dirty();
         Ok(Some(mint))
     }
@@ -188,6 +209,8 @@ impl ControlState {
     pub fn remove_node(&mut self, id: &NodeId) {
         self.cluster.remove_node(id);
         self.node_account.remove(id);
+        // Drop pending challenges for this node.
+        self.pending_challenges.retain(|_, c| c.node != *id);
     }
 
     pub fn account_info(&self, account: &str) -> Option<AccountInfo> {
@@ -201,6 +224,7 @@ impl ControlState {
     }
 
     pub fn node_views(&self) -> Vec<NodeView> {
+        let now = Instant::now();
         let mut out: Vec<NodeView> = self
             .cluster
             .nodes()
@@ -216,6 +240,10 @@ impl ControlState {
                 throughput_class: n.caps.throughput_class,
                 healthy: n.healthy,
                 load: n.load,
+                inflight: n.inflight,
+                reputation_ok: n.reputation.ok,
+                reputation_fail: n.reputation.fail,
+                banned: n.reputation.is_banned(now),
                 models: n.caps.models.clone(),
             })
             .collect();
@@ -231,6 +259,7 @@ impl ControlState {
         completion_tokens: u32,
         worker: &NodeId,
     ) {
+        self.cluster.release_worker(worker);
         let device = self
             .cluster
             .get(worker)
@@ -249,21 +278,25 @@ impl ControlState {
             .mint_contribution(&worker_account, mint, format!("infer:{request_id}"));
 
         if let Some(pending) = self.pending.remove(&request_id) {
-            let burn = estimate_usage_millijoules(prompt_tokens, completion_tokens);
-            let burn_res =
-                self.ledger
-                    .burn_usage(&pending.account, burn, format!("chat:{request_id}"));
-            self.mark_dirty();
-            if let Err(e) = burn_res {
-                let _ = pending.tx.send(Err(e.to_string()));
-                return;
+            if pending.charge {
+                let burn = estimate_usage_millijoules(prompt_tokens, completion_tokens);
+                if let Err(e) =
+                    self.ledger
+                        .burn_usage(&pending.account, burn, format!("chat:{request_id}"))
+                {
+                    self.mark_dirty();
+                    let _ = pending.tx.send(Err(e.to_string()));
+                    return;
+                }
             }
+            self.mark_dirty();
             let _ = pending.tx.send(Ok(InferOutcome {
                 text,
                 prompt_tokens,
                 completion_tokens,
                 worker_account,
                 device,
+                worker_id: worker.clone(),
             }));
         } else {
             self.mark_dirty();
@@ -272,7 +305,45 @@ impl ControlState {
 
     pub fn settle_infer_error(&mut self, request_id: Uuid, error: String) {
         if let Some(pending) = self.pending.remove(&request_id) {
+            self.cluster.release_worker(&pending.worker);
             let _ = pending.tx.send(Err(error));
         }
+    }
+
+    pub fn should_dual_verify(&mut self) -> bool {
+        if self.dual_verify_every == 0 {
+            return false;
+        }
+        self.chat_count = self.chat_count.wrapping_add(1);
+        self.chat_count % self.dual_verify_every == 0
+    }
+
+    pub fn settle_challenge_result(
+        &mut self,
+        challenge_id: Uuid,
+        completion: String,
+        from: &NodeId,
+    ) -> Option<bool> {
+        let pending = self.pending_challenges.remove(&challenge_id)?;
+        if pending.node != *from {
+            // Wrong node answered.
+            self.cluster.record_challenge_fail(&pending.node);
+            return Some(false);
+        }
+        let ok = completion.trim() == pending.expected.trim();
+        if ok {
+            self.cluster.record_challenge_ok(from);
+            // Small mint for honest challenge work.
+            if let Some(account) = self.node_account.get(from).cloned() {
+                let _ =
+                    self.ledger
+                        .mint_contribution(&account, 5, format!("challenge:{challenge_id}"));
+                self.mark_dirty();
+            }
+        } else {
+            self.cluster.record_challenge_fail(from);
+            warn!(%from, "challenge failed");
+        }
+        Some(ok)
     }
 }

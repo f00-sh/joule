@@ -1,6 +1,7 @@
 //! HTTP API: dashboard, capacity, OpenAI-compatible chat (incl. SSE stream).
 
-use crate::state::{AccountInfo, NodeView, SharedState};
+use crate::app::App;
+use crate::state::{AccountInfo, NodeView};
 use crate::tcp::dispatch_infer;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -20,7 +21,7 @@ use uuid::Uuid;
 
 const DASHBOARD_HTML: &str = include_str!("dashboard.html");
 
-pub fn router(state: SharedState) -> Router {
+pub fn router(app: App) -> Router {
     Router::new()
         .route("/", get(dashboard))
         .route("/dashboard", get(dashboard))
@@ -30,7 +31,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
-        .with_state(state)
+        .with_state(app)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
 }
@@ -39,12 +40,20 @@ async fn dashboard() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
 
-async fn healthz() -> impl IntoResponse {
-    Json(json!({"ok": true, "service": "joule-control"}))
+async fn healthz(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let cap = g.cluster.capacity();
+    let agents = app.routes.lock().await.len();
+    Json(json!({
+        "ok": true,
+        "service": "joule-control",
+        "agents_connected": agents,
+        "nodes_healthy": cap.nodes_healthy,
+    }))
 }
 
-async fn capacity(State(state): State<SharedState>) -> Json<ClusterCapacity> {
-    let mut g = state.write().await;
+async fn capacity(State(app): State<App>) -> Json<ClusterCapacity> {
+    let mut g = app.state.write().await;
     g.prune();
     Json(g.cluster.capacity())
 }
@@ -54,16 +63,16 @@ struct NodesResponse {
     nodes: Vec<NodeView>,
 }
 
-async fn nodes(State(state): State<SharedState>) -> Json<NodesResponse> {
-    let mut g = state.write().await;
+async fn nodes(State(app): State<App>) -> Json<NodesResponse> {
+    let mut g = app.state.write().await;
     g.prune();
     Json(NodesResponse {
         nodes: g.node_views(),
     })
 }
 
-async fn models(State(state): State<SharedState>) -> impl IntoResponse {
-    let g = state.read().await;
+async fn models(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
     let cap = g.cluster.capacity();
     let data: Vec<Value> = cap
         .models_available
@@ -90,7 +99,7 @@ fn bearer_key(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn account(
-    State(state): State<SharedState>,
+    State(app): State<App>,
     headers: HeaderMap,
 ) -> Result<Json<AccountInfo>, (StatusCode, Json<Value>)> {
     let key = bearer_key(&headers).ok_or_else(|| {
@@ -99,7 +108,7 @@ async fn account(
             Json(json!({"error": "missing Bearer API key"})),
         )
     })?;
-    let g = state.read().await;
+    let g = app.state.read().await;
     let account = g.account_for_key(&key).ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
@@ -169,7 +178,7 @@ fn now_secs() -> u64 {
 fn map_err(e: String) -> (StatusCode, Json<Value>) {
     let status = if e.contains("contribution required") {
         StatusCode::FORBIDDEN
-    } else if e.contains("no healthy workers") {
+    } else if e.contains("no healthy workers") || e.contains("agent not connected") {
         StatusCode::SERVICE_UNAVAILABLE
     } else if e.contains("insufficient balance") {
         StatusCode::PAYMENT_REQUIRED
@@ -180,7 +189,7 @@ fn map_err(e: String) -> (StatusCode, Json<Value>) {
 }
 
 async fn chat_completions(
-    State(state): State<SharedState>,
+    State(app): State<App>,
     headers: HeaderMap,
     Json(body): Json<ChatRequest>,
 ) -> Result<Response, (StatusCode, Json<Value>)> {
@@ -191,7 +200,7 @@ async fn chat_completions(
         )
     })?;
     let account = {
-        let g = state.read().await;
+        let g = app.state.read().await;
         g.account_for_key(&key)
             .map(|s| s.to_string())
             .ok_or_else(|| {
@@ -212,7 +221,7 @@ async fn chat_completions(
     let max_tokens = body.max_tokens.unwrap_or(256);
     let stream = body.stream.unwrap_or(false);
 
-    let out = dispatch_infer(&state, &account, &model, &prompt, max_tokens)
+    let out = dispatch_infer(&app, &account, &model, &prompt, max_tokens)
         .await
         .map_err(map_err)?;
 
@@ -255,7 +264,6 @@ fn sse_chat_stream(
     text: String,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
-        // OpenAI-style chunked deltas by whitespace tokens.
         let tokens: Vec<&str> = text.split_inclusive(char::is_whitespace).collect();
         for (i, tok) in tokens.iter().enumerate() {
             let delta = if i == 0 {

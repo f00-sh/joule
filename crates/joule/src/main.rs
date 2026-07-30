@@ -146,12 +146,13 @@ async fn main() -> Result<()> {
             } else {
                 Some(data_dir.unwrap_or_else(joule_control::default_data_dir))
             };
-            let state = joule_control::load_or_init_state(dir.clone())?;
+            let app = joule_control::load_or_init_app(dir.clone())?;
             info!(%agent_listen, %http_listen, ?dir, "starting control plane");
             println!("joule control");
             println!("  agents    → {agent_listen}");
             println!("  http      → http://{http_listen}");
             println!("  dashboard → http://{http_listen}/");
+            println!("  healthz   → http://{http_listen}/healthz");
             println!("  capacity  GET /v1/cluster/capacity");
             println!("  chat      POST /v1/chat/completions");
             if let Some(d) = &dir {
@@ -159,7 +160,10 @@ async fn main() -> Result<()> {
             } else {
                 println!("  data      → (ephemeral)");
             }
-            joule_control::serve(state, agent_listen, http_listen).await?;
+            println!();
+            println!("  open the dashboard, then run:");
+            println!("    joule agent --account alice --control {agent_listen}");
+            joule_control::serve(app, agent_listen, http_listen).await?;
         }
         Commands::Agent {
             control,
@@ -277,13 +281,21 @@ async fn run_agent(
                     Message::Welcome { account: acc, api_key: key } => {
                         println!("joined cluster as account={acc}");
                         println!("API key (save this): {key}");
-                        println!("capacity: curl -s http://127.0.0.1:7700/v1/cluster/capacity");
-                        println!("chat:     joule chat --key {key} --prompt \"hello\"");
+                        println!("dashboard: http://127.0.0.1:7700/");
+                        println!("capacity:  curl -s http://127.0.0.1:7700/v1/cluster/capacity");
+                        println!("chat:      joule chat --key {key} --prompt \"hello\"");
                     }
                     Message::InferRequest { .. } => {
                         let reply = joule_control::agent_handle_infer(&env, &stub)
                             .await
                             .context("handle infer")?;
+                        let reply = Envelope::new(node_id.clone(), reply.msg);
+                        writer.write_all(&encode_line(&reply)?).await?;
+                    }
+                    Message::Challenge { .. } => {
+                        let reply = joule_control::agent_handle_challenge(&env, &stub)
+                            .await
+                            .context("handle challenge")?;
                         let reply = Envelope::new(node_id.clone(), reply.msg);
                         writer.write_all(&encode_line(&reply)?).await?;
                     }

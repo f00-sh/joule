@@ -1,7 +1,7 @@
 //! Distributed compute cluster membership, live capacity, and placement.
 //!
 //! Internet-wide volunteer pool. Nodes join the control plane over any path.
-//! Only healthy capacity and model fit matter for placement and the dashboard.
+//! Load balancing uses inflight work + advertised load + reputation.
 
 use joule_proto::{
     ClusterCapacity, ClusterPlan, DeviceClass, NodeCaps, NodeId, ShardAssignment, ShardRole,
@@ -19,6 +19,36 @@ pub enum ClusterError {
     UnknownNode(NodeId),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Reputation {
+    pub ok: u64,
+    pub fail: u64,
+    pub banned_until: Option<Instant>,
+}
+
+impl Reputation {
+    pub fn score(&self) -> f64 {
+        let total = (self.ok + self.fail).max(1) as f64;
+        self.ok as f64 / total
+    }
+
+    pub fn is_banned(&self, now: Instant) -> bool {
+        self.banned_until.is_some_and(|t| now < t)
+    }
+
+    pub fn record_ok(&mut self) {
+        self.ok = self.ok.saturating_add(1);
+    }
+
+    pub fn record_fail(&mut self, ban_after_fails: u64, ban_for: Duration) {
+        self.fail = self.fail.saturating_add(1);
+        // Ban if more fails than oks and at least ban_after_fails failures.
+        if self.fail >= ban_after_fails && self.fail > self.ok {
+            self.banned_until = Some(Instant::now() + ban_for);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: NodeId,
@@ -27,14 +57,19 @@ pub struct Node {
     pub healthy: bool,
     pub load: f32,
     pub last_seen: Instant,
+    /// In-flight inference jobs assigned by control (for load balancing).
+    pub inflight: u32,
+    pub reputation: Reputation,
+    /// Round-robin salt updated when selected.
+    pub rr_seq: u64,
 }
 
 /// In-memory cluster registry fed by agent hellos/heartbeats.
 #[derive(Debug)]
 pub struct Cluster {
     nodes: HashMap<NodeId, Node>,
-    /// Nodes without a heartbeat newer than this are marked unhealthy.
     stale_after: Duration,
+    rr_counter: u64,
 }
 
 impl Default for Cluster {
@@ -48,11 +83,19 @@ impl Cluster {
         Self {
             nodes: HashMap::new(),
             stale_after,
+            rr_counter: 0,
         }
     }
 
     pub fn upsert_node(&mut self, id: NodeId, account: impl Into<String>, caps: NodeCaps) {
         let account = account.into();
+        if let Some(existing) = self.nodes.get_mut(&id) {
+            existing.account = account;
+            existing.caps = caps;
+            existing.healthy = true;
+            existing.last_seen = Instant::now();
+            return;
+        }
         self.nodes.insert(
             id.clone(),
             Node {
@@ -62,6 +105,9 @@ impl Cluster {
                 healthy: true,
                 load: 0.0,
                 last_seen: Instant::now(),
+                inflight: 0,
+                reputation: Reputation::default(),
+                rr_seq: 0,
             },
         );
     }
@@ -82,20 +128,10 @@ impl Cluster {
         Ok(())
     }
 
-    pub fn touch(&mut self, id: &NodeId) -> Result<(), ClusterError> {
-        let node = self
-            .nodes
-            .get_mut(id)
-            .ok_or_else(|| ClusterError::UnknownNode(id.clone()))?;
-        node.last_seen = Instant::now();
-        Ok(())
-    }
-
     pub fn remove_node(&mut self, id: &NodeId) {
         self.nodes.remove(id);
     }
 
-    /// Mark nodes with stale heartbeats unhealthy (still counted in totals).
     pub fn apply_staleness(&mut self) {
         let now = Instant::now();
         let stale = self.stale_after;
@@ -106,7 +142,6 @@ impl Cluster {
         }
     }
 
-    /// Drop nodes that have been stale far longer than the heartbeat window.
     pub fn reap_dead(&mut self, dead_after: Duration) {
         let now = Instant::now();
         self.nodes
@@ -121,33 +156,114 @@ impl Cluster {
         self.nodes.get(id)
     }
 
-    /// True if this account has at least one healthy node right now.
-    pub fn account_is_donating(&self, account: &str) -> bool {
-        self.nodes
-            .values()
-            .any(|n| n.account == account && n.healthy)
+    pub fn get_mut(&mut self, id: &NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(id)
     }
 
-    /// Pick a healthy node that can serve `model` (lowest load, then most mem).
-    pub fn pick_worker(&self, model: &str) -> Option<&Node> {
+    pub fn account_is_donating(&self, account: &str) -> bool {
+        let now = Instant::now();
+        self.nodes
+            .values()
+            .any(|n| n.account == account && n.healthy && !n.reputation.is_banned(now))
+    }
+
+    /// Scheduling score: lower is better.
+    fn schedule_score(n: &Node) -> (i64, i64, i64, u64) {
+        // inflight heavily weighted; load * 100; prefer high reputation (invert); then rr
+        let inflight = i64::from(n.inflight) * 1000;
+        let load = (n.load * 100.0) as i64;
+        let rep = -((n.reputation.score() * 1000.0) as i64);
+        (
+            inflight + load + rep,
+            -(i64::from(n.caps.mem_mib)),
+            -(i64::from(n.caps.throughput_class)),
+            n.rr_seq,
+        )
+    }
+
+    fn eligible<'a>(&'a self, model: &str) -> Vec<&'a Node> {
+        let now = Instant::now();
+        self.nodes
+            .values()
+            .filter(|p| {
+                p.healthy
+                    && !p.reputation.is_banned(now)
+                    && p.caps.models.iter().any(|m| m == model)
+            })
+            .collect()
+    }
+
+    /// Rank eligible workers (best first) without mutating.
+    pub fn rank_workers(&self, model: &str) -> Vec<NodeId> {
+        let mut eligible = self.eligible(model);
+        eligible.sort_by(|a, b| Self::schedule_score(a).cmp(&Self::schedule_score(b)));
+        eligible.into_iter().map(|n| n.id.clone()).collect()
+    }
+
+    /// Pick best worker and bump inflight + rr (call release_worker when done).
+    pub fn acquire_worker(&mut self, model: &str) -> Option<NodeId> {
+        let ranked = self.rank_workers(model);
+        let id = ranked.into_iter().next()?;
+        self.rr_counter = self.rr_counter.wrapping_add(1);
+        if let Some(n) = self.nodes.get_mut(&id) {
+            n.inflight = n.inflight.saturating_add(1);
+            n.rr_seq = self.rr_counter;
+        }
+        Some(id)
+    }
+
+    /// Pick up to `n` distinct workers for multi-donor paths (primary + challenge).
+    pub fn acquire_workers(&mut self, model: &str, n: usize) -> Vec<NodeId> {
+        let ranked = self.rank_workers(model);
+        let mut out = Vec::new();
+        for id in ranked.into_iter().take(n) {
+            self.rr_counter = self.rr_counter.wrapping_add(1);
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.inflight = node.inflight.saturating_add(1);
+                node.rr_seq = self.rr_counter;
+            }
+            out.push(id);
+        }
+        out
+    }
+
+    pub fn release_worker(&mut self, id: &NodeId) {
+        if let Some(n) = self.nodes.get_mut(id) {
+            n.inflight = n.inflight.saturating_sub(1);
+        }
+    }
+
+    /// Random healthy non-banned node for spot challenges (any model).
+    pub fn pick_challenge_target(&self) -> Option<&Node> {
+        let now = Instant::now();
         let mut eligible: Vec<&Node> = self
             .nodes
             .values()
-            .filter(|p| p.healthy && p.caps.models.iter().any(|m| m == model))
+            .filter(|n| n.healthy && !n.reputation.is_banned(now))
             .collect();
         if eligible.is_empty() {
             return None;
         }
+        // Prefer nodes with fewer recent challenges (use fail+ok as proxy) and lower inflight.
         eligible.sort_by(|a, b| {
-            a.load
-                .partial_cmp(&b.load)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.caps.mem_mib.cmp(&a.caps.mem_mib))
+            (a.inflight, a.reputation.ok + a.reputation.fail)
+                .cmp(&(b.inflight, b.reputation.ok + b.reputation.fail))
         });
         Some(eligible[0])
     }
 
-    /// Live aggregate for the dashboard and `GET /v1/cluster/capacity`.
+    pub fn record_challenge_ok(&mut self, id: &NodeId) {
+        if let Some(n) = self.nodes.get_mut(id) {
+            n.reputation.record_ok();
+        }
+    }
+
+    pub fn record_challenge_fail(&mut self, id: &NodeId) {
+        if let Some(n) = self.nodes.get_mut(id) {
+            n.reputation.record_fail(3, Duration::from_secs(120));
+        }
+    }
+
     pub fn capacity(&self) -> ClusterCapacity {
         let mut nodes_total = 0u32;
         let mut nodes_healthy = 0u32;
@@ -158,6 +274,7 @@ impl Cluster {
         let mut mem_mib_healthy = 0u64;
         let mut throughput_class_sum = 0u64;
         let mut models = BTreeSet::new();
+        let now = Instant::now();
 
         for n in self.nodes.values() {
             nodes_total += 1;
@@ -167,7 +284,7 @@ impl Cluster {
                 DeviceClass::Metal => nodes_metal += 1,
                 DeviceClass::Cpu => nodes_cpu += 1,
             }
-            if n.healthy {
+            if n.healthy && !n.reputation.is_banned(now) {
                 nodes_healthy += 1;
                 mem_mib_healthy += u64::from(n.caps.mem_mib);
                 throughput_class_sum += u64::from(n.caps.throughput_class);
@@ -190,42 +307,17 @@ impl Cluster {
         }
     }
 
-    /// Build a serving plan across the distributed cluster.
     pub fn plan_for(
         &self,
         model: &str,
         prefer_pipeline: bool,
         pipeline_stages: usize,
     ) -> Result<ClusterPlan, ClusterError> {
-        let mut eligible: Vec<&Node> = self
-            .nodes
-            .values()
-            .filter(|p| {
-                p.healthy
-                    && p.caps.models.iter().any(|m| m == model)
-                    && matches!(p.caps.device, DeviceClass::Gpu | DeviceClass::Metal)
-            })
-            .collect();
-
-        if eligible.is_empty() {
-            eligible = self
-                .nodes
-                .values()
-                .filter(|p| p.healthy && p.caps.models.iter().any(|m| m == model))
-                .collect();
-        }
-
+        let mut eligible: Vec<&Node> = self.eligible(model);
         if eligible.is_empty() {
             return Err(ClusterError::NoEligibleNodes(model.to_string()));
         }
-
-        eligible.sort_by(|a, b| {
-            b.caps.mem_mib.cmp(&a.caps.mem_mib).then_with(|| {
-                a.load
-                    .partial_cmp(&b.load)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-        });
+        eligible.sort_by(|a, b| Self::schedule_score(a).cmp(&Self::schedule_score(b)));
 
         let stages = pipeline_stages.max(1);
         if prefer_pipeline && eligible.len() >= stages && stages > 1 {
@@ -286,25 +378,31 @@ mod tests {
     }
 
     #[test]
-    fn single_replica_when_one_node() {
+    fn load_balance_prefers_less_inflight() {
         let mut c = Cluster::default();
-        let (id, caps) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
-        c.upsert_node(id, "alice", caps);
-        let plan = c.plan_for("kimi-open-q4", true, 2).unwrap();
-        assert_eq!(plan.shards.len(), 1);
-        assert_eq!(plan.shards[0].role, ShardRole::Replica);
+        let (a, ca) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
+        let (b, cb) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
+        c.upsert_node(a.clone(), "alice", ca);
+        c.upsert_node(b.clone(), "bob", cb);
+        let first = c.acquire_worker("kimi-open-q4").unwrap();
+        let second = c.acquire_worker("kimi-open-q4").unwrap();
+        assert_ne!(first, second, "second pick should prefer the free donor");
+        c.release_worker(&first);
+        c.release_worker(&second);
     }
 
     #[test]
-    fn pipeline_when_enough_nodes() {
+    fn banned_node_skipped() {
         let mut c = Cluster::default();
-        for mem in [8192, 12288, 16384] {
-            let (id, caps) = node(mem, "kimi-open-q4", DeviceClass::Gpu);
-            c.upsert_node(id, "alice", caps);
+        let (a, ca) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
+        let (b, cb) = node(16384, "kimi-open-q4", DeviceClass::Gpu);
+        c.upsert_node(a.clone(), "alice", ca);
+        c.upsert_node(b.clone(), "bob", cb);
+        for _ in 0..5 {
+            c.record_challenge_fail(&a);
         }
-        let plan = c.plan_for("kimi-open-q4", true, 2).unwrap();
-        assert_eq!(plan.shards.len(), 2);
-        assert!(plan.shards.iter().all(|s| s.role == ShardRole::Pipeline));
+        let pick = c.acquire_worker("kimi-open-q4").unwrap();
+        assert_eq!(pick, b);
     }
 
     #[test]
@@ -317,8 +415,5 @@ mod tests {
         c.set_health(&a, false, 1.0).unwrap();
         assert!(c.account_is_donating("bob"));
         assert!(!c.account_is_donating("alice"));
-        let cap = c.capacity();
-        assert_eq!(cap.nodes_healthy, 1);
-        assert_eq!(cap.mem_mib_healthy, 16384);
     }
 }

@@ -49,6 +49,11 @@ impl StubEngine {
             loaded: std::sync::Mutex::new(None),
         }
     }
+
+    /// Deterministic expected output (used for anti-cheat challenges).
+    pub fn expected_text(model: &str, prompt: &str) -> String {
+        format!("[joule-stub:{model}] {prompt}")
+    }
 }
 
 impl Default for StubEngine {
@@ -75,7 +80,7 @@ impl Engine for StubEngine {
         if model != req.model {
             return Err(RuntimeError::NotLoaded(req.model));
         }
-        let reply = format!("[joule-stub:{model}] {}", req.prompt);
+        let reply = Self::expected_text(&model, &req.prompt);
         let completion_tokens = reply.split_whitespace().count() as u32;
         Ok(InferResponse {
             text: reply,

@@ -111,6 +111,8 @@
               <th>Device</th>
               <th>Mem MiB</th>
               <th>Load</th>
+              <th>Inflight</th>
+              <th>Rep OK/Fail</th>
               <th>Status</th>
               <th>Models</th>
             </tr>
@@ -154,18 +156,21 @@
         tb.innerHTML = "";
         (nodes.nodes || []).forEach(n => {
           const tr = document.createElement("tr");
+          let status = n.banned ? "banned" : (n.healthy ? "healthy" : "stale");
+          let pill = n.banned ? "bad" : (n.healthy ? "ok" : "bad");
           tr.innerHTML =
             "<td>" + n.account + "</td>" +
             "<td>" + n.device + "</td>" +
             "<td>" + n.mem_mib + "</td>" +
             "<td>" + (n.load != null ? n.load.toFixed(2) : "—") + "</td>" +
-            "<td><span class=\"pill " + (n.healthy ? "ok" : "bad") + "\">" +
-              (n.healthy ? "healthy" : "stale") + "</span></td>" +
+            "<td>" + (n.inflight != null ? n.inflight : 0) + "</td>" +
+            "<td>" + (n.reputation_ok || 0) + "/" + (n.reputation_fail || 0) + "</td>" +
+            "<td><span class=\"pill " + pill + "\">" + status + "</span></td>" +
             "<td class=\"models\">" + (n.models || []).join(", ") + "</td>";
           tb.appendChild(tr);
         });
         if (!(nodes.nodes || []).length) {
-          tb.innerHTML = "<tr><td colspan=\"6\" style=\"color:var(--muted)\">No donors yet — run <code>joule agent --account …</code></td></tr>";
+          tb.innerHTML = "<tr><td colspan=\"8\" style=\"color:var(--muted)\">No donors yet — run <code>joule agent --account …</code></td></tr>";
         }
         document.getElementById("updated").textContent =
           "updated " + new Date().toLocaleTimeString();

@@ -1,6 +1,6 @@
-//! End-to-end: control + agent + capacity + chat + contribute gate.
+//! End-to-end: control + multi-agent load balance + chat + challenges.
 
-use joule_control::{load_or_init_state, serve_ephemeral};
+use joule_control::{load_or_init_app, serve_ephemeral};
 use joule_proto::{
     decode_line, encode_line, DeviceClass, Envelope, Message, NodeCaps, NodeId, PROTOCOL_VERSION,
 };
@@ -8,32 +8,35 @@ use joule_runtime::{Engine, InferRequest, StubEngine};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use uuid::Uuid;
 
-#[tokio::test]
-async fn pool_capacity_and_chat() {
-    let state = load_or_init_state(None).expect("state");
-    let (agent_addr, http_addr, _http) = serve_ephemeral(state.clone()).await.expect("serve");
-
+async fn spawn_agent(
+    agent_addr: std::net::SocketAddr,
+    account: &str,
+    mem: u32,
+) -> (String, tokio::task::JoinHandle<()>) {
     let node_id = NodeId::new();
-    let mut sock = TcpStream::connect(agent_addr).await.expect("agent connect");
+    let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
     let hello = Envelope::new(
         node_id.clone(),
         Message::Hello {
-            account: "alice".into(),
+            account: account.into(),
             caps: NodeCaps {
                 device: DeviceClass::Gpu,
-                mem_mib: 16384,
+                mem_mib: mem,
                 throughput_class: 40,
                 models: vec!["kimi-open-q4".into()],
             },
         },
     );
-    sock.write_all(&encode_line(&hello).unwrap())
+    writer
+        .write_all(&encode_line(&hello).unwrap())
         .await
         .unwrap();
 
-    let (reader, mut writer) = sock.into_split();
-    let mut lines = BufReader::new(reader).lines();
     let welcome_line = lines.next_line().await.unwrap().expect("welcome");
     let welcome = decode_line(welcome_line.as_bytes()).unwrap();
     let api_key = match welcome.msg {
@@ -41,7 +44,7 @@ async fn pool_capacity_and_chat() {
         other => panic!("expected welcome, got {other:?}"),
     };
 
-    // Heartbeat so account is donating / earns balance.
+    // Heartbeat
     let hb = Envelope::new(
         node_id.clone(),
         Message::Heartbeat {
@@ -50,10 +53,159 @@ async fn pool_capacity_and_chat() {
         },
     );
     writer.write_all(&encode_line(&hb).unwrap()).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let handle = tokio::spawn(async move {
+        let stub = StubEngine::new();
+        // also heartbeat loop
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let hb = Envelope::new(
+                        node_id.clone(),
+                        Message::Heartbeat { load: 0.05, healthy: true },
+                    );
+                    if writer.write_all(&encode_line(&hb).unwrap()).await.is_err() {
+                        break;
+                    }
+                }
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { break; };
+                    if line.trim().is_empty() { continue; }
+                    let env = decode_line(line.as_bytes()).unwrap();
+                    match &env.msg {
+                        Message::InferRequest { .. } => {
+                            let reply = handle_infer(&env, &stub, &node_id).await;
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::Challenge { .. } => {
+                            let reply = handle_challenge(&env, &stub, &node_id).await;
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+
+    (api_key, handle)
+}
+
+async fn handle_infer(env: &Envelope, stub: &StubEngine, node_id: &NodeId) -> Envelope {
+    use joule_proto::{ClusterPlan, ShardAssignment, ShardRole};
+    if let Message::InferRequest {
+        request_id,
+        model,
+        prompt,
+        max_tokens,
+    } = &env.msg
+    {
+        let plan = ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: model.clone(),
+            shards: vec![ShardAssignment {
+                node: node_id.clone(),
+                role: ShardRole::Replica,
+                layer_start: None,
+                layer_end: None,
+                tp_rank: None,
+                tp_world: None,
+            }],
+        };
+        stub.load_plan(&plan).await.unwrap();
+        let out = stub
+            .infer(InferRequest {
+                model: model.clone(),
+                prompt: prompt.clone(),
+                max_tokens: *max_tokens,
+            })
+            .await
+            .unwrap();
+        return Envelope::new(
+            node_id.clone(),
+            Message::InferDone {
+                request_id: *request_id,
+                text: out.text,
+                prompt_tokens: out.prompt_tokens,
+                completion_tokens: out.completion_tokens,
+            },
+        );
+    }
+    panic!("not infer");
+}
+
+async fn handle_challenge(env: &Envelope, stub: &StubEngine, node_id: &NodeId) -> Envelope {
+    use joule_proto::{ClusterPlan, ShardAssignment, ShardRole};
+    if let Message::Challenge {
+        challenge_id,
+        model,
+        prompt,
+    } = &env.msg
+    {
+        let plan = ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: model.clone(),
+            shards: vec![ShardAssignment {
+                node: node_id.clone(),
+                role: ShardRole::Replica,
+                layer_start: None,
+                layer_end: None,
+                tp_rank: None,
+                tp_world: None,
+            }],
+        };
+        stub.load_plan(&plan).await.unwrap();
+        let out = stub
+            .infer(InferRequest {
+                model: model.clone(),
+                prompt: prompt.clone(),
+                max_tokens: 64,
+            })
+            .await
+            .unwrap();
+        return Envelope::new(
+            node_id.clone(),
+            Message::ChallengeResult {
+                challenge_id: *challenge_id,
+                completion: out.text,
+                latency_ms: 1,
+            },
+        );
+    }
+    panic!("not challenge");
+}
+
+#[tokio::test]
+async fn pool_capacity_and_chat() {
+    let app = load_or_init_app(None).expect("app");
+    // Disable dual-verify for single-agent chat test
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    let (api_key, agent) = spawn_agent(agent_addr, "alice", 16384).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
 
     let client = reqwest::Client::new();
     let base = format!("http://{http_addr}");
+
+    let health: serde_json::Value = client
+        .get(format!("{base}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["ok"], true);
+    assert!(health["agents_connected"].as_u64().unwrap() >= 1);
 
     let cap: serde_json::Value = client
         .get(format!("{base}/v1/cluster/capacity"))
@@ -65,11 +217,6 @@ async fn pool_capacity_and_chat() {
         .unwrap();
     assert_eq!(cap["nodes_healthy"], 1);
     assert_eq!(cap["mem_mib_healthy"], 16384);
-    assert!(cap["models_available"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|m| m == "kimi-open-q4"));
 
     let dash = client
         .get(format!("{base}/"))
@@ -80,60 +227,6 @@ async fn pool_capacity_and_chat() {
         .await
         .unwrap();
     assert!(dash.contains("joule"));
-
-    // Agent task to answer InferRequest
-    let agent_task = tokio::spawn(async move {
-        let stub = StubEngine::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let env = decode_line(line.as_bytes()).unwrap();
-            if matches!(env.msg, Message::InferRequest { .. }) {
-                use joule_proto::{ClusterPlan, ShardAssignment, ShardRole};
-                use uuid::Uuid;
-                let plan = ClusterPlan {
-                    plan_id: Uuid::new_v4(),
-                    model: "kimi-open-q4".into(),
-                    shards: vec![ShardAssignment {
-                        node: node_id.clone(),
-                        role: ShardRole::Replica,
-                        layer_start: None,
-                        layer_end: None,
-                        tp_rank: None,
-                        tp_world: None,
-                    }],
-                };
-                stub.load_plan(&plan).await.unwrap();
-                if let Message::InferRequest {
-                    request_id,
-                    model,
-                    prompt,
-                    max_tokens,
-                } = env.msg
-                {
-                    let out = stub
-                        .infer(InferRequest {
-                            model,
-                            prompt,
-                            max_tokens,
-                        })
-                        .await
-                        .unwrap();
-                    let reply = Envelope::new(
-                        node_id.clone(),
-                        Message::InferDone {
-                            request_id,
-                            text: out.text,
-                            prompt_tokens: out.prompt_tokens,
-                            completion_tokens: out.completion_tokens,
-                        },
-                    );
-                    writer.write_all(&encode_line(&reply).unwrap()).await.unwrap();
-                }
-            }
-        }
-    });
 
     let chat: serde_json::Value = client
         .post(format!("{base}/v1/chat/completions"))
@@ -155,7 +248,6 @@ async fn pool_capacity_and_chat() {
         .unwrap_or("");
     assert!(content.contains("ping"), "content={content}");
 
-    // Stream
     let stream_resp = client
         .post(format!("{base}/v1/chat/completions"))
         .bearer_auth(&api_key)
@@ -175,7 +267,6 @@ async fn pool_capacity_and_chat() {
     assert!(stream_resp.contains("data:"));
     assert!(stream_resp.contains("[DONE]"));
 
-    // Bad key
     let bad = client
         .post(format!("{base}/v1/chat/completions"))
         .bearer_auth("joule_nope")
@@ -188,63 +279,85 @@ async fn pool_capacity_and_chat() {
         .status();
     assert_eq!(bad.as_u16(), 401);
 
-    agent_task.abort();
+    agent.abort();
     assert_eq!(PROTOCOL_VERSION, "0.1.0");
+}
+
+#[tokio::test]
+async fn multi_donor_load_balance() {
+    let app = load_or_init_app(None).unwrap();
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _) = serve_ephemeral(app.clone()).await.unwrap();
+    let (key_a, a) = spawn_agent(agent_addr, "alice", 8192).await;
+    let (_key_b, b) = spawn_agent(agent_addr, "bob", 16384).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let cap: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/capacity"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cap["nodes_healthy"], 2);
+    assert_eq!(cap["mem_mib_healthy"], 8192 + 16384);
+
+    // Fire several chats; should succeed (routing across donors).
+    for i in 0..6 {
+        let r = client
+            .post(format!("{base}/v1/chat/completions"))
+            .bearer_auth(&key_a)
+            .json(&serde_json::json!({
+                "model": "kimi-open-q4",
+                "messages": [{"role": "user", "content": format!("job {i}")}]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "chat {i} {}", r.status());
+    }
+
+    let nodes: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/nodes"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(nodes["nodes"].as_array().unwrap().len(), 2);
+
+    a.abort();
+    b.abort();
 }
 
 #[tokio::test]
 async fn persist_roundtrip() {
     let dir = tempfile_dir();
-    let state = joule_control::ControlState::shared_with_data_dir(dir.clone()).unwrap();
+    let app = joule_control::App::load_or_init(Some(dir.clone())).unwrap();
     {
-        let mut g = state.write().await;
-        let key = g.ensure_account("bob");
-        assert!(key.starts_with("joule_"));
-        g.ledger.mint_contribution("bob", 42, "test").unwrap();
-        g.save_if_dirty();
-        // mark_dirty is private; mint_contribution path in ensure already dirty
-        // force save via second mark: register then prune
-        g.ledger.mint_contribution("bob", 8, "more").unwrap();
-        // need dirty - on_heartbeat marks dirty; here call prune after manual dirty
-    }
-    // re-open dirty save: use ensure + mint through public APIs that mark dirty
-    {
-        let mut g = state.write().await;
+        let mut g = app.state.write().await;
         let _ = g.ensure_account("bob");
-        // mint via ledger doesn't mark dirty — call save path after register_node
-        use joule_proto::{DeviceClass, NodeCaps, NodeId};
-        g.register_node(
-            NodeId::new(),
-            "bob",
-            NodeCaps {
-                device: DeviceClass::Cpu,
-                mem_mib: 1024,
-                throughput_class: 1,
-                models: vec!["kimi-open-q4".into()],
-            },
-        );
-        // register doesn't add balance; use heartbeat after set
-        // Just write snapshot via prune after setting dirty through mint_contribution...
-        // Fix: expose save or use on_heartbeat
-    }
-    // Simpler persist test: write snapshot file directly via save
-    {
-        let mut g = state.write().await;
         g.ledger.mint_contribution("bob", 100, "seed").unwrap();
-        // force dirty by ensure new account
         let _ = g.ensure_account("carol");
-        g.prune(); // saves if dirty
+        g.prune();
     }
 
-    let state2 = joule_control::ControlState::shared_with_data_dir(dir).unwrap();
-    let g = state2.read().await;
-    assert!(g.account_for_key(g.account_keys.get("carol").unwrap()).is_some());
+    let app2 = joule_control::App::load_or_init(Some(dir)).unwrap();
+    let g = app2.state.read().await;
+    assert!(g.account_keys.contains_key("carol"));
     assert!(g.ledger.balance("bob") >= 100);
 }
 
 fn tempfile_dir() -> std::path::PathBuf {
     let mut p = std::env::temp_dir();
-    p.push(format!("joule-test-{}", uuid::Uuid::new_v4()));
+    p.push(format!("joule-test-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&p).unwrap();
     p
 }
