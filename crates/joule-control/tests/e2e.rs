@@ -611,3 +611,119 @@ async fn operator_policy_and_software_fanout() {
     agent.abort();
     std::env::remove_var("JOULE_OPERATOR_PUBKEY");
 }
+
+/// model_update assigns digests (not full model) via FetchDigests.
+#[tokio::test]
+async fn model_update_assigns_digests() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use joule_control::{body_sha256_hex, now_ms, operator_preimage};
+    use joule_proto::{OperatorKind, SignedEnvelope};
+    use rand::rngs::OsRng;
+
+    let sk = SigningKey::generate(&mut OsRng);
+    let pk = hex::encode(sk.verifying_key().to_bytes());
+    std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
+
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    let got = Arc::new(Mutex::new(Vec::<String>::new()));
+    let node_id = NodeId::new();
+    let sock = TcpStream::connect(agent_addr).await.unwrap();
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::Hello {
+                    account: "chunker".into(),
+                    caps: NodeCaps::for_cluster(DeviceClass::Gpu, 16384, 40),
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = lines.next_line().await.unwrap();
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+    // heartbeat so node stays healthy
+    writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::Heartbeat {
+                    load: 0.0,
+                    healthy: true,
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let slot = got.clone();
+    let agent = tokio::spawn(async move {
+        loop {
+            let Ok(Some(line)) = lines.next_line().await else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let env = decode_line(line.as_bytes()).unwrap();
+            if let Message::FetchDigests { digests, reason, .. } = env.msg {
+                if reason.starts_with("model_update:") {
+                    *slot.lock().unwrap() = digests;
+                }
+            }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let body = r#"{"model_id":"kimi-open","replica_factor":1,"chunks":[{"path":"a","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":1},{"path":"b","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":1}]}"#;
+    let mut env = SignedEnvelope {
+        id: Uuid::new_v4(),
+        issued_at_unix_ms: now_ms(),
+        expires_at_unix_ms: None,
+        kind: OperatorKind::ModelUpdate,
+        body_json: body.into(),
+        body_sha256: body_sha256_hex(body),
+        sig_ed25519_hex: String::new(),
+        openpgp_sig: None,
+    };
+    let pre = operator_preimage(&env);
+    env.sig_ed25519_hex = hex::encode(sk.sign(&pre).to_bytes());
+    let client = reqwest::Client::new();
+    let r = client
+        .post(format!("http://{http_addr}/v1/broadcasts/inject"))
+        .json(&env)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if !got.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("model FetchDigests timeout");
+    let digests = got.lock().unwrap().clone();
+    // Single node + r=1: should get both digests (only one holder each).
+    assert_eq!(digests.len(), 2, "{digests:?}");
+    {
+        let g = app.state.read().await;
+        assert_eq!(g.active_chunks.len(), 2);
+        assert_eq!(g.active_replica_factor, 1);
+    }
+    agent.abort();
+    std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+}

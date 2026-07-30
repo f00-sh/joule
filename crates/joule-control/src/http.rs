@@ -77,6 +77,9 @@ async fn healthz(State(app): State<App>) -> impl IntoResponse {
         "stream_slots_free": sched.stream_slots_free,
         "stream_slots_used": sched.stream_slots_used,
         "can_accept_work": sched.can_accept_work,
+        "operator_paused": g.operator_paused,
+        "service_live": g.service_live,
+        "blob_digests": g.blobs.catalog().len(),
     }))
 }
 

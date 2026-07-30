@@ -138,8 +138,8 @@ pub struct ControlState {
     pub blobs: BlobDirectory,
     /// Operator-signed messages (deduped); peers flood these.
     pub broadcasts: BroadcastLog,
-    /// In-flight blob transfers: request_id → (requester, sha256).
-    pub pending_blob_xfers: HashMap<Uuid, (NodeId, String)>,
+    /// In-flight blob transfers: request_id → (requester, sha256, started).
+    pub pending_blob_xfers: HashMap<Uuid, (NodeId, String, Instant)>,
     /// Active model chunks from last model_update (for rebalance).
     pub active_chunks: Vec<joule_cluster::ModelChunk>,
     pub active_replica_factor: u32,
@@ -365,6 +365,9 @@ impl ControlState {
         let now = Instant::now();
         self.pending_challenges
             .retain(|_, c| now.duration_since(c.started) < Duration::from_secs(60));
+        // Drop stuck control-relayed blob transfers (lab path).
+        self.pending_blob_xfers
+            .retain(|_, (_, _, started)| now.duration_since(*started) < Duration::from_secs(120));
         self.save_if_dirty();
     }
 

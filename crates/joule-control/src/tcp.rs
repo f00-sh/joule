@@ -117,10 +117,18 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
             }
             Message::BlobsHave { blobs } => {
                 let id = env.from.clone();
-                let mut g = app.state.write().await;
-                // Full inventory replace from agent (authoritative local scan).
-                g.blobs.announce(id.clone(), blobs);
-                tracing::debug!(%id, "blob inventory updated");
+                let need_rebalance = {
+                    let mut g = app.state.write().await;
+                    // Full inventory replace from agent (authoritative local scan).
+                    g.blobs.announce(id.clone(), blobs);
+                    tracing::debug!(%id, "blob inventory updated");
+                    !g.active_chunks.is_empty()
+                };
+                if need_rebalance {
+                    // New seed may heal under-replication — schedule rebalance next loop
+                    // by running a light pass now.
+                    crate::model_update::rebalance_replicas(&app).await;
+                }
             }
             Message::BlobWant { sha256 } => {
                 let requester = env.from.clone();
@@ -152,8 +160,10 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                             warn!("BlobWant: too many in-flight transfers");
                             continue;
                         }
-                        g.pending_blob_xfers
-                            .insert(request_id, (requester.clone(), hash.clone()));
+                        g.pending_blob_xfers.insert(
+                            request_id,
+                            (requester.clone(), hash.clone(), std::time::Instant::now()),
+                        );
                     }
                     let routes = app.routes.lock().await;
                     if let Some(stx) = routes.get(&seeder_id) {
@@ -182,7 +192,9 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 // Forward chunk from seeder to requester.
                 let dest = {
                     let g = app.state.read().await;
-                    g.pending_blob_xfers.get(&request_id).cloned()
+                    g.pending_blob_xfers
+                        .get(&request_id)
+                        .map(|(n, h, _)| (n.clone(), h.clone()))
                 };
                 if let Some((to, want_hash)) = dest {
                     let got = sha256.to_lowercase();

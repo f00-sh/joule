@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Software update path**: peer-seed binary digests, stage under `~/.local/share/joule/software/stage`, `joule software status|apply`, `joule seed-blob`
 - **Operator bus actions**: pause/resume/policy allow-list; `GET /v1/notices`, `/v1/operator/status`; dashboard notices + blob strip
 - **Operator ceremony** doc: `docs/design/operator-ceremony-v0.md`
+- **Persist v4**: operator_paused / service_live / mint knobs survive restart
+- **CLI** `joule blobs` (local or `--api` swarm catalog); `scripts/demo-operator-bus.sh`
+- Transfer caps: 256 MiB control-relayed blob max; 64 concurrent xfers; 120s xfer TTL
 - **Weight download/verify**: HTTP(S) + `repo://` with sha256; `weights.published=true`
 - **lab-tiny** fixture + **kimi-k3-meta** (Moonshot HF configs); tensor-backed generate (`decode.rs`)
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
