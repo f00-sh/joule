@@ -69,6 +69,12 @@ pub struct Node {
     pub reputation: Reputation,
     /// Round-robin salt updated when selected.
     pub rr_seq: u64,
+    /// Advertised VRAM (untrusted claim).
+    pub claimed_mem_mib: u32,
+    /// Protocol-trusted VRAM after challenges (self-govern). Starts 0.
+    pub verified_mem_mib: u32,
+    /// Consecutive challenge passes (unlock full claim).
+    pub challenge_streak: u32,
 }
 
 /// In-memory cluster registry fed by agent hellos/heartbeats.
@@ -96,8 +102,14 @@ impl Cluster {
 
     pub fn upsert_node(&mut self, id: NodeId, account: impl Into<String>, caps: NodeCaps) {
         let account = account.into();
+        let claim = caps.mem_mib;
         if let Some(existing) = self.nodes.get_mut(&id) {
             existing.account = account;
+            // Claim can rise; verified never exceeds claim and is never set from claim alone.
+            if claim < existing.verified_mem_mib {
+                existing.verified_mem_mib = claim;
+            }
+            existing.claimed_mem_mib = claim;
             existing.caps = caps;
             existing.healthy = true;
             existing.last_seen = Instant::now();
@@ -108,6 +120,9 @@ impl Cluster {
             Node {
                 id,
                 account,
+                claimed_mem_mib: claim,
+                verified_mem_mib: 0,
+                challenge_streak: 0,
                 caps,
                 healthy: true,
                 load: 0.0,
@@ -117,6 +132,72 @@ impl Cluster {
                 rr_seq: 0,
             },
         );
+    }
+
+    /// Effective memory for economics / readiness: verified only (anti fake VRAM).
+    pub fn verified_mem_mib(&self, id: &NodeId) -> u32 {
+        self.nodes.get(id).map(|n| n.verified_mem_mib).unwrap_or(0)
+    }
+
+    /// Record challenge outcome → adjust verified capacity (self-govern).
+    pub fn on_challenge_result(&mut self, id: &NodeId, ok: bool) {
+        let Some(n) = self.nodes.get_mut(id) else {
+            return;
+        };
+        if ok {
+            n.challenge_streak = n.challenge_streak.saturating_add(1);
+            // Progressive unlock toward claim.
+            let step = (n.claimed_mem_mib / 4).max(1024);
+            let raised = n
+                .verified_mem_mib
+                .saturating_add(step)
+                .min(n.claimed_mem_mib);
+            n.verified_mem_mib = raised;
+            if n.challenge_streak >= 3 {
+                n.verified_mem_mib = n.claimed_mem_mib;
+            }
+        } else {
+            n.challenge_streak = 0;
+            n.verified_mem_mib /= 2;
+        }
+    }
+
+    /// Sum of verified healthy VRAM (model readiness must not trust claims).
+    pub fn verified_pool_vram_mib(&self) -> u64 {
+        let now = Instant::now();
+        self.nodes
+            .values()
+            .filter(|n| n.healthy && !n.reputation.is_banned(now))
+            .map(|n| u64::from(n.verified_mem_mib))
+            .sum()
+    }
+
+    /// Test/ops helper: treat all current claims as fully verified (after real challenges in prod).
+    pub fn trust_all_claims_for_tests(&mut self) {
+        for n in self.nodes.values_mut() {
+            n.verified_mem_mib = n.claimed_mem_mib;
+            n.challenge_streak = 3;
+        }
+    }
+
+    /// Pick up to `k` healthy node ids as notaries (deterministic-ish from rr).
+    pub fn pick_notaries(&mut self, k: usize) -> Vec<String> {
+        let now = Instant::now();
+        let mut ids: Vec<NodeId> = self
+            .nodes
+            .values()
+            .filter(|n| n.healthy && !n.reputation.is_banned(now))
+            .map(|n| n.id.clone())
+            .collect();
+        ids.sort_by_key(|a| a.0);
+        if ids.is_empty() {
+            return vec![];
+        }
+        let start = (self.rr_counter as usize) % ids.len();
+        self.rr_counter = self.rr_counter.wrapping_add(1);
+        (0..k.min(ids.len()))
+            .map(|i| ids[(start + i) % ids.len()].to_string())
+            .collect()
     }
 
     pub fn set_health(
@@ -243,12 +324,14 @@ impl Cluster {
         if let Some(n) = self.nodes.get_mut(id) {
             n.reputation.record_ok();
         }
+        self.on_challenge_result(id, true);
     }
 
     pub fn record_challenge_fail(&mut self, id: &NodeId) {
         if let Some(n) = self.nodes.get_mut(id) {
             n.reputation.record_fail(3, Duration::from_secs(120));
         }
+        self.on_challenge_result(id, false);
     }
 
     pub fn capacity(&self) -> ClusterCapacity {
@@ -264,7 +347,8 @@ impl Cluster {
 
         for n in self.nodes.values() {
             nodes_total += 1;
-            mem_mib_total += u64::from(n.caps.mem_mib);
+            // Total shows claims; healthy for economics/readiness uses verified only.
+            mem_mib_total += u64::from(n.claimed_mem_mib.max(n.caps.mem_mib));
             match n.caps.device {
                 DeviceClass::Gpu => nodes_gpu += 1,
                 DeviceClass::Metal => nodes_metal += 1,
@@ -272,7 +356,7 @@ impl Cluster {
             }
             if n.healthy && !n.reputation.is_banned(now) {
                 nodes_healthy += 1;
-                mem_mib_healthy += u64::from(n.caps.mem_mib);
+                mem_mib_healthy += u64::from(n.verified_mem_mib);
                 throughput_class_sum += u64::from(n.caps.throughput_class);
             }
         }
@@ -358,6 +442,7 @@ mod tests {
         let (b, cb) = node(16384, DeviceClass::Gpu);
         c.upsert_node(a.clone(), "alice", ca);
         c.upsert_node(b.clone(), "bob", cb);
+        c.trust_all_claims_for_tests();
         let plan = c.try_acquire_stream().unwrap();
         assert_eq!(plan.shards.len(), 2);
         assert_eq!(plan.pool_mem_mib, 8192 + 16384);
@@ -404,6 +489,7 @@ mod tests {
             let (id, caps) = node(8192, DeviceClass::Gpu);
             c.upsert_node(id, "donor", caps);
         }
+        c.trust_all_claims_for_tests();
         let plan = c.plan_full_pool().unwrap();
         assert_eq!(plan.model, CLUSTER_MODEL);
         assert_eq!(plan.shards.len(), 3);

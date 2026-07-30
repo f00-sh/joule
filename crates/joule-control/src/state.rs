@@ -43,7 +43,7 @@ pub struct AccountEconomy {
     pub online_since: Option<Instant>,
     /// Accumulated continuous seconds at last disconnect (restored after reboot only partially).
     pub continuous_online_secs: u64,
-    /// Best healthy mem across this account's nodes (MiB).
+    /// Best *verified* mem across this account's nodes (MiB) — claims ignored.
     pub best_mem_mib: u32,
 }
 
@@ -53,6 +53,10 @@ pub struct NodeView {
     pub account: String,
     pub device: String,
     pub mem_mib: u32,
+    /// Untrusted advertisement.
+    pub claimed_mem_mib: u32,
+    /// Protocol-trusted VRAM (challenges).
+    pub verified_mem_mib: u32,
     pub throughput_class: u16,
     pub healthy: bool,
     pub load: f32,
@@ -198,10 +202,11 @@ impl ControlState {
         }
     }
 
-    fn note_online(&mut self, account: &str, mem_mib: u32, healthy: bool) {
+    fn note_online(&mut self, account: &str, verified_mem_mib: u32, healthy: bool) {
         let eco = self.economy_mut(account);
-        if mem_mib > eco.best_mem_mib {
-            eco.best_mem_mib = mem_mib;
+        // Only verified memory counts toward economic mem factor.
+        if verified_mem_mib > eco.best_mem_mib {
+            eco.best_mem_mib = verified_mem_mib;
         }
         if healthy {
             if eco.online_since.is_none() {
@@ -365,12 +370,18 @@ impl ControlState {
         let api_key = self.ensure_account(account);
         // Single-model law: every donor is compute for CLUSTER_MODEL only.
         caps.models = vec![CLUSTER_MODEL.to_string()];
-        let mem = caps.mem_mib;
         self.cluster
             .upsert_node(id.clone(), account.to_string(), caps);
+        let verified = self.cluster.verified_mem_mib(&id);
         self.node_account.insert(id, account.to_string());
-        self.note_online(account, mem, true);
+        self.note_online(account, verified, true);
+        self.mark_dirty();
         api_key
+    }
+
+    fn seal_and_checkpoint(&mut self) {
+        let notaries = self.cluster.pick_notaries(3);
+        let _ = self.ledger.maybe_checkpoint(notaries);
     }
 
     pub fn on_heartbeat(
@@ -385,8 +396,19 @@ impl ControlState {
             .get(id)
             .cloned()
             .unwrap_or_else(|| "unknown".into());
-        let mem = self.cluster.get(id).map(|n| n.caps.mem_mib).unwrap_or(256);
-        self.note_online(&account, mem, healthy);
+        let verified = self.cluster.verified_mem_mib(id);
+        self.note_online(&account, verified, healthy);
+        // Refresh best verified across all this account's nodes.
+        let best_v = self
+            .cluster
+            .nodes()
+            .filter(|n| n.account == account)
+            .map(|n| n.verified_mem_mib)
+            .max()
+            .unwrap_or(verified);
+        if let Some(eco) = self.account_economy.get_mut(&account) {
+            eco.best_mem_mib = best_v;
+        }
         if !healthy {
             self.mark_dirty();
             self.save_if_dirty();
@@ -407,9 +429,12 @@ impl ControlState {
             (breakdown.total_mj.saturating_mul(scale)) / 10
         }
         .max(1);
-        let reason = breakdown.reason_tag(&format!("heartbeat:{id}"));
-        let _ = self.ledger.mint_contribution(&account, mint, reason);
+        let reason = breakdown.reason_tag(&format!("heartbeat:{id}|vmem={verified}"));
+        let _ = self
+            .ledger
+            .mint_contribution_verified(&account, mint, reason, Some(verified));
         self.record_contribute(&account, mint);
+        self.seal_and_checkpoint();
         self.mark_dirty();
         self.save_if_dirty();
         Ok(Some(mint))
@@ -470,7 +495,9 @@ impl ControlState {
                         DeviceClass::Metal => "metal".into(),
                         DeviceClass::Cpu => "cpu".into(),
                     },
-                    mem_mib: n.caps.mem_mib,
+                    mem_mib: n.verified_mem_mib,
+                    claimed_mem_mib: n.claimed_mem_mib,
+                    verified_mem_mib: n.verified_mem_mib,
                     throughput_class: n.caps.throughput_class,
                     healthy: n.healthy,
                     load: n.load,
@@ -504,17 +531,13 @@ impl ControlState {
         worker: &NodeId,
         is_tail: bool,
     ) {
-        let mem = self
-            .cluster
-            .get(worker)
-            .map(|n| n.caps.mem_mib)
-            .unwrap_or(256);
+        let verified = self.cluster.verified_mem_mib(worker);
         let worker_account = self
             .node_account
             .get(worker)
             .cloned()
             .unwrap_or_else(|| "unknown".into());
-        self.note_online(&worker_account, mem, true);
+        self.note_online(&worker_account, verified, true);
         let fair = self.fairness_for(&worker_account);
         let breakdown = score_mint(
             EconomyEvent::Work {
@@ -523,9 +546,12 @@ impl ControlState {
             fair,
         );
         let mint = breakdown.total_mj;
-        let reason = breakdown.reason_tag(&format!("infer-shard:{request_id}"));
-        let _ = self.ledger.mint_contribution(&worker_account, mint, reason);
+        let reason = breakdown.reason_tag(&format!("infer-shard:{request_id}|vmem={verified}"));
+        let _ =
+            self.ledger
+                .mint_contribution_verified(&worker_account, mint, reason, Some(verified));
         self.record_contribute(&worker_account, mint);
+        self.seal_and_checkpoint();
         self.mark_dirty();
 
         let Some(pending) = self.pending.get_mut(&request_id) else {
@@ -583,6 +609,7 @@ impl ControlState {
                 return;
             }
             self.record_consume(&payer, burn.total_mj);
+            self.seal_and_checkpoint();
             self.mark_dirty();
         }
         if let Some(tx) = pending.tx.take() {
@@ -651,19 +678,23 @@ impl ControlState {
         if ok {
             self.cluster.record_challenge_ok(from);
             if let Some(account) = self.node_account.get(from).cloned() {
-                let mem = self
-                    .cluster
-                    .get(from)
-                    .map(|n| n.caps.mem_mib)
-                    .unwrap_or(256);
-                self.note_online(&account, mem, true);
+                let verified = self.cluster.verified_mem_mib(from);
+                self.note_online(&account, verified, true);
+                if let Some(eco) = self.account_economy.get_mut(&account) {
+                    eco.best_mem_mib = eco.best_mem_mib.max(verified);
+                }
                 let fair = self.fairness_for(&account);
                 let breakdown = score_mint(EconomyEvent::ChallengeOk, fair);
-                let reason = breakdown.reason_tag(&format!("challenge:{challenge_id}"));
-                let _ = self
-                    .ledger
-                    .mint_contribution(&account, breakdown.total_mj, reason);
+                let reason =
+                    breakdown.reason_tag(&format!("challenge:{challenge_id}|vmem={verified}"));
+                let _ = self.ledger.mint_contribution_verified(
+                    &account,
+                    breakdown.total_mj,
+                    reason,
+                    Some(verified),
+                );
                 self.record_contribute(&account, breakdown.total_mj);
+                self.seal_and_checkpoint();
                 self.mark_dirty();
             }
         } else {

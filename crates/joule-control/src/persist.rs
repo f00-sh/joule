@@ -1,7 +1,8 @@
-//! Disk persistence for accounts, API keys, millijoule balances, and economy windows.
+//! Disk persistence: accounts, keys, **sealed ledger chain**, economy windows.
 
 use crate::state::{AccountEconomy, ControlState};
 use anyhow::{Context, Result};
+use joule_ledger::SealedEntry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,13 +19,18 @@ pub struct EconomySnap {
 pub struct Snapshot {
     pub version: u32,
     pub account_keys: HashMap<String, String>,
+    /// Legacy field — ignored on load (balances only from chain).
+    #[serde(default)]
     pub balances: HashMap<String, i64>,
     #[serde(default)]
     pub economy: HashMap<String, EconomySnap>,
+    /// Authoritative sealed ledger events (self-govern v0).
+    #[serde(default)]
+    pub chain: Vec<SealedEntry>,
 }
 
 impl Snapshot {
-    pub const VERSION: u32 = 2;
+    pub const VERSION: u32 = 3;
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -77,8 +83,9 @@ pub fn save(dir: &Path, state: &ControlState) -> Result<()> {
     let snap = Snapshot {
         version: Snapshot::VERSION,
         account_keys: state.account_keys.clone(),
-        balances: state.ledger.balances().clone(),
+        balances: HashMap::new(), // not authoritative
         economy,
+        chain: state.ledger.sealed().entries().to_vec(),
     };
     let path = snapshot_path(dir);
     let tmp = path.with_extension("json.tmp");
@@ -94,7 +101,19 @@ pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
     for (account, key) in &state.account_keys {
         state.keys.insert(key.clone(), account.clone());
     }
-    state.ledger.restore_balances(snap.balances);
+    if !snap.chain.is_empty() {
+        if let Err(e) = state.ledger.restore_chain(snap.chain) {
+            tracing::error!(error = %e, "sealed chain restore failed — starting empty ledger");
+            state.ledger = joule_ledger::Ledger::new();
+        }
+    } else if !snap.balances.is_empty() {
+        // Migration: old v1/v2 snapshots had raw balances only — cannot verify.
+        // Refuse to rehydrate unverified balances (self-govern).
+        tracing::warn!(
+            "ignoring legacy balances without chain ({} accounts) — self-govern requires sealed ledger",
+            snap.balances.len()
+        );
+    }
     state.account_economy.clear();
     for (acct, e) in snap.economy {
         state.account_economy.insert(

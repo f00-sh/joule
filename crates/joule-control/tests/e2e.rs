@@ -107,6 +107,11 @@ async fn pool_capacity_and_chat() {
 
     let (api_key, agent) = spawn_agent(agent_addr, "alice", 16384).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
+    // Self-govern: production uses challenges to unlock verified VRAM; tests trust claims.
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
 
     let client = reqwest::Client::new();
     let base = format!("http://{http_addr}");
@@ -199,6 +204,10 @@ async fn multi_donor_sharded_plan() {
     let (_k, d) = spawn_agent(agent_addr, "dave", 16384).await;
     let (_k, e) = spawn_agent(agent_addr, "erin", 16384).await;
     tokio::time::sleep(Duration::from_millis(250)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
 
     let client = reqwest::Client::new();
     let base = format!("http://{http_addr}");

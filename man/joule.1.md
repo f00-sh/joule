@@ -57,6 +57,9 @@ HTTP routes:
 | GET | `/v1/account` | Balance + donating flag (Bearer key) |
 | GET | `/v1/public/snapshot` | Signed public pool snapshot (multi-source stats) |
 | GET | `/v1/public/pubkey` | Pool ed25519 verifying key |
+| GET | `/v1/public/ledger` | Sealed mJ chain (`from`, `limit`) — recompute balances |
+| GET | `/v1/public/ledger/head` | Chain head hash + integrity flag |
+| GET | `/v1/public/audit/{account}` | Account balance from chain + recent events |
 | POST | `/v1/chat/completions` | OpenAI-shaped chat; `stream: true` for SSE |
 
 ### joule agent

@@ -146,7 +146,11 @@ impl Cluster {
                 .then_with(|| a.id.0.cmp(&b.id.0))
         });
 
-        let pool_mem: u64 = donors.iter().map(|n| u64::from(n.caps.mem_mib)).sum();
+        // Self-govern: weight by verified mem (claims cannot inflate the logical GPU).
+        let pool_mem: u64 = donors
+            .iter()
+            .map(|n| u64::from(n.verified_mem_mib.max(256)))
+            .sum();
         if pool_mem == 0 {
             return Err(crate::ClusterError::NoEligibleNodes(
                 CLUSTER_MODEL.to_string(),
@@ -159,7 +163,8 @@ impl Cluster {
         let mut ppm_acc = 0u32;
 
         for (i, n) in donors.iter().enumerate() {
-            let mem = u64::from(n.caps.mem_mib);
+            let eff = n.verified_mem_mib.max(256);
+            let mem = u64::from(eff);
             let mut ppm = ((mem * 1_000_000) / pool_mem) as u32;
             let is_last = i + 1 == donors.len();
             if is_last {
@@ -190,7 +195,7 @@ impl Cluster {
                 layer_end: Some(layer_end),
                 tp_rank: None,
                 tp_world: None,
-                mem_share_mib: n.caps.mem_mib,
+                mem_share_mib: eff,
                 mem_fraction_ppm: ppm,
             });
         }
@@ -209,7 +214,7 @@ impl Cluster {
         let pool_mem = plan.as_ref().map(|p| p.pool_mem_mib).unwrap_or_else(|| {
             self.eligible()
                 .iter()
-                .map(|n| u64::from(n.caps.mem_mib))
+                .map(|n| u64::from(n.verified_mem_mib.max(256)))
                 .sum()
         });
         let stream_total = pool_max_streams(pool_mem);
@@ -414,6 +419,7 @@ mod tests {
         add(&mut c, 16384);
         add(&mut c, 16384);
         add(&mut c, 16384);
+        c.trust_all_claims_for_tests();
         let plan = c.plan_sharded_pool().unwrap();
         assert_eq!(plan.shards.len(), 5);
         assert_eq!(plan.pool_mem_mib, 8192 + 16384 * 4);

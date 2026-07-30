@@ -3,7 +3,7 @@
 use crate::app::App;
 use crate::state::{AccountInfo, NodeView};
 use crate::tcp::dispatch_infer;
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
@@ -13,6 +13,7 @@ use futures::stream::Stream;
 use joule_proto::{resolve_cluster_model, ClusterCapacity, CLUSTER_MODEL, CLUSTER_MODEL_LABEL};
 use joule_runtime::{readiness_for_pool_ex, RuntimeFlags};
 use serde::{Deserialize, Serialize};
+// Query + Path already imported above
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::Duration;
@@ -34,6 +35,9 @@ pub fn router(app: App) -> Router {
         .route("/v1/models/readiness", get(readiness))
         .route("/v1/public/snapshot", get(public_snapshot))
         .route("/v1/public/pubkey", get(public_pubkey))
+        .route("/v1/public/ledger", get(public_ledger))
+        .route("/v1/public/ledger/head", get(public_ledger_head))
+        .route("/v1/public/audit/{account}", get(public_audit))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -166,6 +170,59 @@ async fn public_snapshot(State(app): State<App>) -> impl IntoResponse {
 
 async fn public_pubkey(State(app): State<App>) -> impl IntoResponse {
     Json(json!(app.identity.public_info()))
+}
+
+#[derive(Debug, Deserialize)]
+struct LedgerQuery {
+    #[serde(default)]
+    from: u64,
+    #[serde(default = "default_ledger_limit")]
+    limit: usize,
+}
+
+fn default_ledger_limit() -> usize {
+    256
+}
+
+/// Paginated sealed millijoule chain — recompute balances yourself.
+async fn public_ledger(State(app): State<App>, Query(q): Query<LedgerQuery>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let limit = q.limit.clamp(1, 2000);
+    let slice = g.ledger.sealed().slice_from(q.from, limit);
+    Json(json!({
+        "ok": true,
+        "protocol": "joule-sealed-ledger-v0",
+        "no_money": true,
+        "head": g.ledger.head(),
+        "from": q.from,
+        "count": slice.len(),
+        "entries": slice,
+        "verify": "sha256 chain; balances = sum(delta) per account",
+    }))
+}
+
+async fn public_ledger_head(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let head = g.ledger.head();
+    let chain_ok = g.ledger.verify_chain().is_ok();
+    Json(json!({
+        "ok": true,
+        "chain_ok": chain_ok,
+        "head": head,
+        "no_money": true,
+        "law": "balances only from sealed chain replay; claims ≠ verified VRAM",
+    }))
+}
+
+async fn public_audit(State(app): State<App>, Path(account): Path<String>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let audit = g.ledger.sealed().audit_account(&account, 32);
+    Json(json!({
+        "ok": true,
+        "no_money": true,
+        "audit": audit,
+        "chain_ok": g.ledger.verify_chain().is_ok(),
+    }))
 }
 
 fn bearer_key(headers: &HeaderMap) -> Option<String> {

@@ -15,9 +15,10 @@
 
 ## Product laws
 
-1. Compute is the only currency (public pool).
+1. Compute is the only currency (public pool). **No money** accepted or required.
 2. No active contribution ⇒ no API access.
-3. Credits = verified useful work in **millijoules**, not idle theater. Fairness: √VRAM + tenure boost + leecher penalties (`eco=v0`, docs/design/economy-v0.md). Public pool is free (no cash).
+3. Credits = sealed hash-chain millijoules only (`docs/design/self-govern-v0.md`). Fairness: √VRAM + tenure + leecher (`eco=v0`). VRAM claims untrusted until challenges verify.
+4. Balances cannot be set by users/operators outside the protocol chain.
 4. Donor retains control (caps, pause, schedule, thermal/battery).
 5. Open weights, open agent, open protocol.
 6. **Distributed cluster across the internet** — connectivity medium is irrelevant.

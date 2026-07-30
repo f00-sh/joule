@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
 - **Live public pool on joule.f00.sh**: Pages Functions `/api/pool` + SSE `/api/pool/stream` + KV snapshot; control edge publish (`JOULE_EDGE_TOKEN` → `/api/ingest`)
+- **Self-govern v0**: sealed hash-chained millijoule ledger; balances only via chain replay; public audit APIs
+- **Verified VRAM**: claims untrusted until challenges; mint/placement/readiness use verified mem
 - **Decentralized stats v0**: signed `GET /v1/public/snapshot` (ed25519); multi-source site + open directory
 - **Auto-announce**: `POST /api/announce` (pool-key signature, no f00 token); `GET /api/sources`; `JOULE_PUBLIC_URL` makes control self-list
 - `/api/pool` aggregates announced sources (not just privileged ingest)
