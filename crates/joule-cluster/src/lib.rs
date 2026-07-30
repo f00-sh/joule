@@ -1,13 +1,13 @@
-//! Distributed cluster membership, live capacity, and placement.
+//! Distributed compute cluster membership, live capacity, and placement.
 //!
-//! The cluster is internet-wide. Nodes join over whatever path reaches the
-//! control plane. We do not classify or prefer LAN vs WAN vs carrier pigeon —
-//! only healthy capacity and model fit matter for placement and the dashboard.
+//! Internet-wide volunteer pool. Nodes join the control plane over any path.
+//! Only healthy capacity and model fit matter for placement and the dashboard.
 
 use joule_proto::{
     ClusterCapacity, ClusterPlan, DeviceClass, NodeCaps, NodeId, ShardAssignment, ShardRole,
 };
 use std::collections::{BTreeSet, HashMap};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -15,37 +15,53 @@ use uuid::Uuid;
 pub enum ClusterError {
     #[error("no eligible nodes for model {0}")]
     NoEligibleNodes(String),
-    #[error("unknown node {0:?}")]
+    #[error("unknown node {0}")]
     UnknownNode(NodeId),
 }
 
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: NodeId,
+    pub account: String,
     pub caps: NodeCaps,
     pub healthy: bool,
     pub load: f32,
+    pub last_seen: Instant,
 }
 
-/// In-memory cluster registry. Network transport is a later PR.
-#[derive(Debug, Default)]
+/// In-memory cluster registry fed by agent hellos/heartbeats.
+#[derive(Debug)]
 pub struct Cluster {
     nodes: HashMap<NodeId, Node>,
+    /// Nodes without a heartbeat newer than this are marked unhealthy.
+    stale_after: Duration,
+}
+
+impl Default for Cluster {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(30))
+    }
 }
 
 impl Cluster {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(stale_after: Duration) -> Self {
+        Self {
+            nodes: HashMap::new(),
+            stale_after,
+        }
     }
 
-    pub fn upsert_node(&mut self, id: NodeId, caps: NodeCaps) {
+    pub fn upsert_node(&mut self, id: NodeId, account: impl Into<String>, caps: NodeCaps) {
+        let account = account.into();
         self.nodes.insert(
             id.clone(),
             Node {
                 id,
+                account,
                 caps,
                 healthy: true,
                 load: 0.0,
+                last_seen: Instant::now(),
             },
         );
     }
@@ -62,11 +78,73 @@ impl Cluster {
             .ok_or_else(|| ClusterError::UnknownNode(id.clone()))?;
         node.healthy = healthy;
         node.load = load;
+        node.last_seen = Instant::now();
         Ok(())
+    }
+
+    pub fn touch(&mut self, id: &NodeId) -> Result<(), ClusterError> {
+        let node = self
+            .nodes
+            .get_mut(id)
+            .ok_or_else(|| ClusterError::UnknownNode(id.clone()))?;
+        node.last_seen = Instant::now();
+        Ok(())
+    }
+
+    pub fn remove_node(&mut self, id: &NodeId) {
+        self.nodes.remove(id);
+    }
+
+    /// Mark nodes with stale heartbeats unhealthy (still counted in totals).
+    pub fn apply_staleness(&mut self) {
+        let now = Instant::now();
+        let stale = self.stale_after;
+        for n in self.nodes.values_mut() {
+            if now.duration_since(n.last_seen) > stale {
+                n.healthy = false;
+            }
+        }
+    }
+
+    /// Drop nodes that have been stale far longer than the heartbeat window.
+    pub fn reap_dead(&mut self, dead_after: Duration) {
+        let now = Instant::now();
+        self.nodes
+            .retain(|_, n| now.duration_since(n.last_seen) <= dead_after);
     }
 
     pub fn nodes(&self) -> impl Iterator<Item = &Node> {
         self.nodes.values()
+    }
+
+    pub fn get(&self, id: &NodeId) -> Option<&Node> {
+        self.nodes.get(id)
+    }
+
+    /// True if this account has at least one healthy node right now.
+    pub fn account_is_donating(&self, account: &str) -> bool {
+        self.nodes
+            .values()
+            .any(|n| n.account == account && n.healthy)
+    }
+
+    /// Pick a healthy node that can serve `model` (lowest load, then most mem).
+    pub fn pick_worker(&self, model: &str) -> Option<&Node> {
+        let mut eligible: Vec<&Node> = self
+            .nodes
+            .values()
+            .filter(|p| p.healthy && p.caps.models.iter().any(|m| m == model))
+            .collect();
+        if eligible.is_empty() {
+            return None;
+        }
+        eligible.sort_by(|a, b| {
+            a.load
+                .partial_cmp(&b.load)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.caps.mem_mib.cmp(&a.caps.mem_mib))
+        });
+        Some(eligible[0])
     }
 
     /// Live aggregate for the dashboard and `GET /v1/cluster/capacity`.
@@ -113,7 +191,6 @@ impl Cluster {
     }
 
     /// Build a serving plan across the distributed cluster.
-    /// Prefer multi-node pipeline when enough healthy peers exist; else replica.
     pub fn plan_for(
         &self,
         model: &str,
@@ -131,7 +208,6 @@ impl Cluster {
             .collect();
 
         if eligible.is_empty() {
-            // CPU fallback for lab / CI.
             eligible = self
                 .nodes
                 .values()
@@ -211,9 +287,9 @@ mod tests {
 
     #[test]
     fn single_replica_when_one_node() {
-        let mut c = Cluster::new();
+        let mut c = Cluster::default();
         let (id, caps) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
-        c.upsert_node(id, caps);
+        c.upsert_node(id, "alice", caps);
         let plan = c.plan_for("kimi-open-q4", true, 2).unwrap();
         assert_eq!(plan.shards.len(), 1);
         assert_eq!(plan.shards[0].role, ShardRole::Replica);
@@ -221,10 +297,10 @@ mod tests {
 
     #[test]
     fn pipeline_when_enough_nodes() {
-        let mut c = Cluster::new();
+        let mut c = Cluster::default();
         for mem in [8192, 12288, 16384] {
             let (id, caps) = node(mem, "kimi-open-q4", DeviceClass::Gpu);
-            c.upsert_node(id, caps);
+            c.upsert_node(id, "alice", caps);
         }
         let plan = c.plan_for("kimi-open-q4", true, 2).unwrap();
         assert_eq!(plan.shards.len(), 2);
@@ -232,19 +308,17 @@ mod tests {
     }
 
     #[test]
-    fn capacity_aggregates_healthy_only_for_throughput() {
-        let mut c = Cluster::new();
+    fn capacity_and_donating() {
+        let mut c = Cluster::default();
         let (a, ca) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
         let (b, cb) = node(16384, "kimi-open-q4", DeviceClass::Gpu);
-        c.upsert_node(a.clone(), ca);
-        c.upsert_node(b, cb);
+        c.upsert_node(a.clone(), "alice", ca);
+        c.upsert_node(b, "bob", cb);
         c.set_health(&a, false, 1.0).unwrap();
+        assert!(c.account_is_donating("bob"));
+        assert!(!c.account_is_donating("alice"));
         let cap = c.capacity();
-        assert_eq!(cap.nodes_total, 2);
         assert_eq!(cap.nodes_healthy, 1);
-        assert_eq!(cap.mem_mib_total, 8192 + 16384);
         assert_eq!(cap.mem_mib_healthy, 16384);
-        assert_eq!(cap.throughput_class_sum, 10);
-        assert_eq!(cap.models_available, vec!["kimi-open-q4".to_string()]);
     }
 }

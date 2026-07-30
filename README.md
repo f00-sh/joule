@@ -56,24 +56,45 @@ cargo build --release -p joule
 ./target/release/joule lab
 ```
 
+## Quick start (local pool)
+
+Terminal 1 — control plane (capacity API + chat + agent registry):
+
+```text
+cargo run -p joule --release -- control
+# agents → 127.0.0.1:7701
+# http   → http://127.0.0.1:7700
+```
+
+Terminal 2 — donate compute (earn millijoules; prints API key):
+
+```text
+cargo run -p joule --release -- agent --account alice --model kimi-open-q4
+```
+
+Terminal 3 — live pool size + use the AI:
+
+```text
+joule capacity --api http://127.0.0.1:7700 --json
+joule whoami --key joule_…
+joule chat --key joule_… --prompt "hello from the pool"
+```
+
+**Law:** no active donor agent for that account → chat is forbidden. Invalid keys → 401.
+
+Inference is still a **stub engine** until a real model backend lands; the pool, capacity dashboard feed, and contribute-to-consume path are real.
+
 ## Usage
 
 ```text
-# Protocol + build identity
 joule version
-
-# Live capacity shape (dashboard feed) — synthetic peers for local demo
-joule capacity --peers 5
-joule capacity --peers 5 --json
-
-# Local cluster lab: capacity, placement plan, stub inference, ledger demo
-joule lab --model kimi-open-q4 --peers 3 --stages 2
-
-# Millijoule ledger demo
+joule control [--agent-listen ADDR] [--http-listen ADDR]
+joule agent --account NAME [--control HOST:PORT] [--model TAG] [--mem-mib N]
+joule capacity --api http://127.0.0.1:7700 --json
+joule chat --key joule_… --prompt "…"
+joule whoami --key joule_…
+joule lab --peers 3
 joule credits --account alice
-
-# Donor agent (network join: not implemented in 0.0.0)
-joule agent --model kimi-open-q4
 ```
 
 Full option reference: [man/joule.1.md](man/joule.1.md).
@@ -86,6 +107,7 @@ Full option reference: [man/joule.1.md](man/joule.1.md).
 | `joule-cluster` | Membership, capacity aggregate, placement |
 | `joule-runtime` | Inference `Engine` trait + stub |
 | `joule-ledger` | Millijoule mint/burn |
+| `joule-control` | Control plane: agents + HTTP API |
 | `joule` | CLI |
 
 See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 and the PR plan.

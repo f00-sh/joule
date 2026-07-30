@@ -41,13 +41,13 @@ cargo build --release -p joule
 ## Usage
 
 ```text
-joule version
-joule capacity --peers 5 --json
-joule lab --peers 3 --stages 2
-joule credits --account alice
+joule control
+joule agent --account alice
+joule capacity --api http://127.0.0.1:7700 --json
+joule chat --key joule_… --prompt "hello"
 ```
 
-See the man page for full options.
+See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 
 ## Documents
 

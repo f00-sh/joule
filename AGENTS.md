@@ -38,6 +38,7 @@ crates/joule-proto       wire types / ClusterCapacity / plans
 crates/joule-cluster     membership + capacity + placement
 crates/joule-runtime     Engine trait + StubEngine
 crates/joule-ledger      millijoule accounting
+crates/joule-control     control plane (agents + HTTP API)
 ```
 
 Design SoT: [docs/design/cluster-v0.md](docs/design/cluster-v0.md)
@@ -49,9 +50,11 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release
+cargo run -p joule --release -- control
+cargo run -p joule --release -- agent --account alice
+cargo run -p joule --release -- capacity --api http://127.0.0.1:7700 --json
+cargo run -p joule --release -- chat --key joule_… --prompt "hi"
 cargo run -p joule -- lab
-cargo run -p joule -- capacity --json
-cargo run -p joule -- version
 ```
 
 ## Install channels

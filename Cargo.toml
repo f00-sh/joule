@@ -6,6 +6,7 @@ members = [
     "crates/joule-cluster",
     "crates/joule-runtime",
     "crates/joule-ledger",
+    "crates/joule-control",
 ]
 default-members = ["crates/joule"]
 
@@ -23,6 +24,7 @@ joule-proto = { path = "crates/joule-proto" }
 joule-cluster = { path = "crates/joule-cluster" }
 joule-runtime = { path = "crates/joule-runtime" }
 joule-ledger = { path = "crates/joule-ledger" }
+joule-control = { path = "crates/joule-control" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -33,3 +35,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 bytes = "1"
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }

@@ -1,19 +1,27 @@
-//! joule — distributed cluster supercomputer CLI.
+//! joule — distributed compute cluster CLI.
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use joule_cluster::Cluster;
+use joule_control::ControlState;
 use joule_ledger::{estimate_contribution_millijoules, estimate_usage_millijoules, Ledger};
-use joule_proto::{ClusterCapacity, DeviceClass, NodeCaps, NodeId};
+use joule_proto::{
+    decode_line, encode_line, ClusterCapacity, DeviceClass, Envelope, Message, NodeCaps, NodeId,
+};
 use joule_runtime::{Engine, InferRequest, StubEngine};
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpStream;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "joule",
     version,
-    about = "Distributed internet-wide cluster: pool idle GPUs into open-weight AI inference"
+    about = "Distributed compute cluster: donate idle GPUs, earn millijoules, run open-weight AI"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -24,44 +32,85 @@ struct Cli {
 enum Commands {
     /// Print protocol and build identity.
     Version,
-    /// Local lab: synthetic nodes, capacity snapshot, placement, stub inference.
-    Lab {
-        /// Model tag to plan for.
+    /// Run the control plane (agent TCP + HTTP API).
+    Control {
+        /// Agent protocol listen address.
+        #[arg(long, default_value = "127.0.0.1:7701")]
+        agent_listen: SocketAddr,
+        /// HTTP API listen address (capacity + chat).
+        #[arg(long, default_value = "127.0.0.1:7700")]
+        http_listen: SocketAddr,
+    },
+    /// Join the cluster as a donor agent (earn millijoules).
+    Agent {
+        /// Control plane agent address (host:port).
+        #[arg(long, default_value = "127.0.0.1:7701")]
+        control: String,
+        /// Account that earns credits from this node.
+        #[arg(long)]
+        account: String,
+        /// Model tag this node can host.
         #[arg(long, default_value = "kimi-open-q4")]
         model: String,
-        /// Prompt text for stub inference.
-        #[arg(long, default_value = "status report from the cluster")]
-        prompt: String,
-        /// Prefer pipeline parallelism when enough nodes exist.
-        #[arg(long, default_value_t = true)]
-        pipeline: bool,
-        /// Pipeline stage count when pipeline is preferred.
-        #[arg(long, default_value_t = 2)]
-        stages: usize,
-        /// Number of synthetic GPU nodes.
-        #[arg(long, default_value_t = 3)]
-        peers: usize,
+        /// Advertised memory MiB.
+        #[arg(long, default_value_t = 8192)]
+        mem_mib: u32,
+        /// Device class: gpu | metal | cpu.
+        #[arg(long, default_value = "gpu")]
+        device: String,
+        /// Heartbeat interval seconds.
+        #[arg(long, default_value_t = 5)]
+        heartbeat_secs: u64,
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
-    /// Print cluster capacity (dashboard feed shape).
+    /// Live cluster capacity from a running control plane (or synthetic lab peers).
     Capacity {
-        /// Synthetic healthy GPU nodes for local demo (0 = empty cluster).
+        /// HTTP base of control plane (e.g. http://127.0.0.1:7700). Empty = synthetic.
+        #[arg(long, default_value = "")]
+        api: String,
+        /// Synthetic peers when --api is empty.
         #[arg(long, default_value_t = 5)]
         peers: usize,
-        /// Emit JSON (same schema as future GET /v1/cluster/capacity).
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    /// Show ledger demo (mint contribution, burn usage).
-    Credits {
-        #[arg(long, default_value = "donor")]
-        account: String,
-    },
-    /// Placeholder: run a donor agent (network join not wired yet).
-    Agent {
+    /// Call OpenAI-compatible chat (requires donating agent for the key's account).
+    Chat {
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        /// API key from agent welcome (joule_...).
+        #[arg(long)]
+        key: String,
         #[arg(long, default_value = "kimi-open-q4")]
         model: String,
         #[arg(long)]
-        config: Option<PathBuf>,
+        prompt: String,
+    },
+    /// Show account balance / donating status.
+    Whoami {
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        #[arg(long)]
+        key: String,
+    },
+    /// Local offline lab (no network).
+    Lab {
+        #[arg(long, default_value = "kimi-open-q4")]
+        model: String,
+        #[arg(long, default_value = "status report from the cluster")]
+        prompt: String,
+        #[arg(long, default_value_t = true)]
+        pipeline: bool,
+        #[arg(long, default_value_t = 2)]
+        stages: usize,
+        #[arg(long, default_value_t = 3)]
+        peers: usize,
+    },
+    /// Offline ledger demo.
+    Credits {
+        #[arg(long, default_value = "donor")]
+        account: String,
     },
 }
 
@@ -76,7 +125,46 @@ async fn main() -> Result<()> {
         Commands::Version => {
             println!("joule {}", env!("CARGO_PKG_VERSION"));
             println!("protocol {}", joule_proto::PROTOCOL_VERSION);
-            println!("distributed cluster (internet-wide)");
+            println!("distributed compute cluster");
+        }
+        Commands::Control {
+            agent_listen,
+            http_listen,
+        } => {
+            let state = ControlState::shared();
+            info!(%agent_listen, %http_listen, "starting control plane");
+            println!("joule control");
+            println!("  agents → {agent_listen}");
+            println!("  http   → http://{http_listen}");
+            println!("  capacity GET /v1/cluster/capacity");
+            println!("  chat     POST /v1/chat/completions");
+            joule_control::serve(state, agent_listen, http_listen).await?;
+        }
+        Commands::Agent {
+            control,
+            account,
+            model,
+            mem_mib,
+            device,
+            heartbeat_secs,
+            config,
+        } => {
+            let _ = config;
+            run_agent(control, account, model, mem_mib, device, heartbeat_secs).await?;
+        }
+        Commands::Capacity { api, peers, json } => {
+            run_capacity(api, peers, json).await?;
+        }
+        Commands::Chat {
+            api,
+            key,
+            model,
+            prompt,
+        } => {
+            run_chat(api, key, model, prompt).await?;
+        }
+        Commands::Whoami { api, key } => {
+            run_whoami(api, key).await?;
         }
         Commands::Lab {
             model,
@@ -87,29 +175,188 @@ async fn main() -> Result<()> {
         } => {
             run_lab(model, prompt, pipeline, stages, peers).await?;
         }
-        Commands::Capacity { peers, json } => {
-            run_capacity(peers, json)?;
-        }
         Commands::Credits { account } => {
             run_credits(&account)?;
-        }
-        Commands::Agent { model, config } => {
-            let _ = config;
-            bail!(
-                "agent network transport not implemented yet (model={model}). See docs/design/cluster-v0.md"
-            );
         }
     }
     Ok(())
 }
 
+fn parse_device(s: &str) -> Result<DeviceClass> {
+    match s.to_ascii_lowercase().as_str() {
+        "gpu" => Ok(DeviceClass::Gpu),
+        "metal" => Ok(DeviceClass::Metal),
+        "cpu" => Ok(DeviceClass::Cpu),
+        other => bail!("unknown device {other}; use gpu|metal|cpu"),
+    }
+}
+
+async fn run_agent(
+    control: String,
+    account: String,
+    model: String,
+    mem_mib: u32,
+    device: String,
+    heartbeat_secs: u64,
+) -> Result<()> {
+    let device = parse_device(&device)?;
+    let node_id = NodeId::new();
+    let caps = NodeCaps {
+        device,
+        mem_mib,
+        throughput_class: match device {
+            DeviceClass::Gpu => 40,
+            DeviceClass::Metal => 30,
+            DeviceClass::Cpu => 5,
+        },
+        models: vec![model.clone()],
+    };
+
+    info!(%control, %account, %node_id, "connecting agent");
+    let sock = TcpStream::connect(&control)
+        .await
+        .with_context(|| format!("connect agent port {control}"))?;
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let hello = Envelope::new(
+        node_id.clone(),
+        Message::Hello {
+            account: account.clone(),
+            caps,
+        },
+    );
+    writer.write_all(&encode_line(&hello)?).await?;
+
+    let stub = StubEngine::new();
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                let hb = Envelope::new(
+                    node_id.clone(),
+                    Message::Heartbeat { load: 0.1, healthy: true },
+                );
+                if writer.write_all(&encode_line(&hb)?).await.is_err() {
+                    bail!("control connection closed during heartbeat");
+                }
+            }
+            line = lines.next_line() => {
+                let Some(line) = line? else {
+                    bail!("control closed connection");
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let env = decode_line(line.as_bytes()).context("decode control line")?;
+                match env.msg {
+                    Message::Welcome { account: acc, api_key: key } => {
+                        println!("joined cluster as account={acc}");
+                        println!("API key (save this): {key}");
+                        println!("capacity: curl -s http://127.0.0.1:7700/v1/cluster/capacity");
+                        println!("chat:     joule chat --key {key} --prompt \"hello\"");
+                    }
+                    Message::InferRequest { .. } => {
+                        let reply = joule_control::agent_handle_infer(&env, &stub)
+                            .await
+                            .context("handle infer")?;
+                        let reply = Envelope::new(node_id.clone(), reply.msg);
+                        writer.write_all(&encode_line(&reply)?).await?;
+                    }
+                    Message::Error { error } => {
+                        warn!(%error, "control error");
+                    }
+                    Message::CreditEvent { delta_millijoules, reason, .. } => {
+                        info!(delta_millijoules, %reason, "credit event");
+                    }
+                    other => {
+                        warn!(msg = ?other, "ignored control message");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn run_capacity(api: String, peers: usize, json: bool) -> Result<()> {
+    let cap = if api.trim().is_empty() {
+        demo_cluster(peers, "kimi-open-q4").capacity()
+    } else {
+        let url = format!("{}/v1/cluster/capacity", api.trim_end_matches('/'));
+        let resp = reqwest::get(&url)
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .context("capacity status")?;
+        resp.json::<ClusterCapacity>()
+            .await
+            .context("capacity json")?
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&cap)?);
+    } else {
+        print_capacity(&cap);
+    }
+    Ok(())
+}
+
+async fn run_chat(api: String, key: String, model: String, prompt: String) -> Result<()> {
+    let url = format!("{}/v1/chat/completions", api.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .bearer_auth(key)
+        .json(&body)
+        .send()
+        .await
+        .context("chat request")?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        bail!("chat failed {status}: {text}");
+    }
+    let v: serde_json::Value = serde_json::from_str(&text)?;
+    if let Some(content) = v
+        .pointer("/choices/0/message/content")
+        .and_then(|c| c.as_str())
+    {
+        println!("{content}");
+    } else {
+        println!("{text}");
+    }
+    Ok(())
+}
+
+async fn run_whoami(api: String, key: String) -> Result<()> {
+    let url = format!("{}/v1/account", api.trim_end_matches('/'));
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .bearer_auth(key)
+        .send()
+        .await
+        .context("account request")?
+        .error_for_status()
+        .context("account status")?;
+    let v: serde_json::Value = resp.json().await?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
 fn demo_cluster(peers: usize, model: &str) -> Cluster {
-    let mut cluster = Cluster::new();
+    let mut cluster = Cluster::default();
     for i in 0..peers {
         let id = NodeId::new();
         let mem = 8192 + (i as u32) * 4096;
         cluster.upsert_node(
             id,
+            format!("lab-{i}"),
             NodeCaps {
                 device: DeviceClass::Gpu,
                 mem_mib: mem,
@@ -203,17 +450,6 @@ async fn run_lab(
         "ledger lab-donor balance={} mJ (minted {mint}, burned {burn})",
         ledger.balance("lab-donor")
     );
-    Ok(())
-}
-
-fn run_capacity(peers: usize, json: bool) -> Result<()> {
-    let cluster = demo_cluster(peers, "kimi-open-q4");
-    let cap = cluster.capacity();
-    if json {
-        println!("{}", serde_json::to_string_pretty(&cap)?);
-    } else {
-        print_capacity(&cap);
-    }
     Ok(())
 }
 

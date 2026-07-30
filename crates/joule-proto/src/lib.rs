@@ -1,8 +1,7 @@
-//! Protocol types for the joule distributed cluster.
+//! Protocol types for the joule distributed compute cluster.
 //!
-//! Nodes speak a versioned message set over authenticated channels.
-//! Transport and membership live in `joule-cluster`. Connectivity medium
-//! (fiber, cellular, satellite, whatever) is out of scope for the protocol.
+//! Donor agents speak a versioned message set to the control plane.
+//! Connectivity medium is out of scope — only reachability and capacity matter.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -26,6 +25,12 @@ impl Default for NodeId {
     }
 }
 
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Hardware class advertised by a donor for placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +41,16 @@ pub enum DeviceClass {
     Metal,
     /// CPU-only fallback (low credit weight).
     Cpu,
+}
+
+impl DeviceClass {
+    pub fn contribution_multiplier(self) -> u32 {
+        match self {
+            DeviceClass::Gpu => 8,
+            DeviceClass::Metal => 6,
+            DeviceClass::Cpu => 1,
+        }
+    }
 }
 
 /// Capability advertisement — what this node can host.
@@ -54,15 +69,10 @@ pub struct NodeCaps {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShardRole {
-    /// Full model replica on one node.
     Replica,
-    /// Pipeline stage (layer range).
     Pipeline,
-    /// Tensor-parallel rank.
     Tensor,
-    /// Prefill specialist.
     Prefill,
-    /// Decode specialist.
     Decode,
 }
 
@@ -71,7 +81,6 @@ pub enum ShardRole {
 pub struct ShardAssignment {
     pub node: NodeId,
     pub role: ShardRole,
-    /// Inclusive layer range when role is pipeline; ignored for replica.
     pub layer_start: Option<u32>,
     pub layer_end: Option<u32>,
     pub tp_rank: Option<u16>,
@@ -86,30 +95,21 @@ pub struct ClusterPlan {
     pub shards: Vec<ShardAssignment>,
 }
 
-/// Live aggregate of donated compute — power the public dashboard.
-///
-/// Built from node heartbeats. Medium of connectivity is irrelevant; only
-/// healthy, registered capacity counts.
+/// Live aggregate of donated compute — powers the public dashboard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterCapacity {
-    /// Nodes currently registered (including unhealthy).
     pub nodes_total: u32,
-    /// Nodes passing health checks / recent heartbeat.
     pub nodes_healthy: u32,
     pub nodes_gpu: u32,
     pub nodes_metal: u32,
     pub nodes_cpu: u32,
-    /// Sum of advertised mem_mib across all registered nodes.
     pub mem_mib_total: u64,
-    /// Sum of mem_mib for healthy nodes only (what the dashboard should highlight).
     pub mem_mib_healthy: u64,
-    /// Sum of throughput_class for healthy nodes (relative pool strength).
     pub throughput_class_sum: u64,
-    /// Distinct model tags offered by at least one healthy node.
     pub models_available: Vec<String>,
 }
 
-/// Envelope for all peer / control messages.
+/// Envelope for control ↔ agent messages (newline-delimited JSON on the wire).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub protocol: String,
@@ -117,39 +117,53 @@ pub struct Envelope {
     pub msg: Message,
 }
 
+impl Envelope {
+    pub fn new(from: NodeId, msg: Message) -> Self {
+        Self {
+            protocol: PROTOCOL_VERSION.to_string(),
+            from,
+            msg,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
+    /// Donor registers (or re-registers) with the control plane.
     Hello {
+        /// Account that earns millijoules from this node's contribution.
+        account: String,
         caps: NodeCaps,
+    },
+    /// Control acknowledges join and returns (or reissues) the API key.
+    Welcome {
+        account: String,
+        api_key: String,
     },
     Heartbeat {
         load: f32,
         healthy: bool,
     },
-    /// Request a cluster placement plan for a model.
     PlanRequest {
         model: String,
     },
     PlanOffer {
         plan: ClusterPlan,
     },
-    /// Publish or request live pool capacity (dashboard / status).
     CapacitySnapshot {
         capacity: ClusterCapacity,
     },
-    /// Inference request (OpenAI-shaped body later; opaque JSON for now).
+    /// Control asks a donor to run inference (stub path until real engine).
     InferRequest {
         request_id: Uuid,
         model: String,
-        body: serde_json::Value,
-    },
-    InferPartial {
-        request_id: Uuid,
-        delta: String,
+        prompt: String,
+        max_tokens: u32,
     },
     InferDone {
         request_id: Uuid,
+        text: String,
         prompt_tokens: u32,
         completion_tokens: u32,
     },
@@ -157,7 +171,6 @@ pub enum Message {
         request_id: Uuid,
         error: String,
     },
-    /// Challenge for anti-cheat / result verification.
     Challenge {
         challenge_id: Uuid,
         prompt: String,
@@ -167,13 +180,28 @@ pub enum Message {
         completion: String,
         latency_ms: u32,
     },
-    /// Credit event gossip (append-only event id).
     CreditEvent {
         event_id: Uuid,
         account: String,
         delta_millijoules: i64,
         reason: String,
     },
+    /// Control → agent: error string.
+    Error {
+        error: String,
+    },
+}
+
+/// Encode one envelope as a single newline-terminated JSON line.
+pub fn encode_line(env: &Envelope) -> Result<Vec<u8>, serde_json::Error> {
+    let mut v = serde_json::to_vec(env)?;
+    v.push(b'\n');
+    Ok(v)
+}
+
+/// Decode one JSON line (without trailing newline).
+pub fn decode_line(line: &[u8]) -> Result<Envelope, serde_json::Error> {
+    serde_json::from_slice(line)
 }
 
 #[cfg(test)]
@@ -182,10 +210,10 @@ mod tests {
 
     #[test]
     fn roundtrip_hello() {
-        let env = Envelope {
-            protocol: PROTOCOL_VERSION.to_string(),
-            from: NodeId::new(),
-            msg: Message::Hello {
+        let env = Envelope::new(
+            NodeId::new(),
+            Message::Hello {
+                account: "alice".into(),
                 caps: NodeCaps {
                     device: DeviceClass::Gpu,
                     mem_mib: 24576,
@@ -193,12 +221,14 @@ mod tests {
                     models: vec!["kimi-open-q4".into()],
                 },
             },
-        };
-        let s = serde_json::to_string(&env).unwrap();
-        let back: Envelope = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.protocol, PROTOCOL_VERSION);
+        );
+        let line = encode_line(&env).unwrap();
+        let back = decode_line(&line[..line.len() - 1]).unwrap();
         match back.msg {
-            Message::Hello { caps } => assert_eq!(caps.mem_mib, 24576),
+            Message::Hello { account, caps } => {
+                assert_eq!(account, "alice");
+                assert_eq!(caps.mem_mib, 24576);
+            }
             _ => panic!("expected hello"),
         }
     }

@@ -7,27 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Changed
-
-- Product language: **distributed internet-wide cluster** (not mesh/LAN-first)
-- Crate rename: `joule-mesh` → `joule-cluster`; `MeshPlan` → `ClusterPlan`
-- Design SoT: `docs/design/cluster-v0.md` (replaces mesh-v0)
-
 ### Added
 
-- `ClusterCapacity` aggregate + `Cluster::capacity()` for live dashboard feed
-- CLI: `joule capacity [--peers N] [--json]`
-- Capacity message type on the wire protocol
-- Dashboard requirement: always show live distributed compute
+- **Control plane** (`joule control`): agent TCP + HTTP API
+- **Donor agent** (`joule agent`): join, heartbeat, run assigned work, earn millijoules
+- Live capacity API: `GET /v1/cluster/capacity`
+- OpenAI-shaped chat: `POST /v1/chat/completions` (contribute-to-consume)
+- Account view: `GET /v1/account`
+- CLI: `chat`, `whoami`, live `capacity --api`
+- Crate `joule-control`
+- Heartbeat mint + infer mint; burn on API usage
+
+### Changed
+
+- Product language: **distributed compute cluster** (not mesh)
+- Crate rename: `joule-mesh` → `joule-cluster`
+- Design SoT: `docs/design/cluster-v0.md`
 
 ### Prior scaffold
 
-- Rust workspace: `joule`, `joule-proto`, `joule-cluster`, `joule-runtime`, `joule-ledger`
-- CLI: `joule version`, `joule lab`, `joule credits`, `joule agent` (stub)
-- Placement: replica + pipeline plans
-- Stub inference engine for CI/lab
-- Millijoule ledger mint/burn
-- CI workflow (fmt, clippy, test, release build)
+- Workspace crates, lab CLI, stub runtime, ledger, CI
 
 ## [0.0.0] - 2026-07-30
 
