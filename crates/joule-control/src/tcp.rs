@@ -223,8 +223,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                             let _ = peer_tx.send(out);
                         }
                         drop(routes);
-                        // Model updates: assign redundant chunk digests (not full model).
-                        crate::model_update::apply_model_update(&app, &envelope).await;
+                        // Allow-listed operator actions (model/software digests, pause, policy…).
+                        crate::operator_actions::apply_operator_actions(&app, &envelope).await;
                     }
                     Ok(false) => {
                         tracing::debug!(id = %envelope.id, "operator broadcast duplicate");

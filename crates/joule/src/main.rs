@@ -11,8 +11,9 @@ use joule_proto::{
     NodeId, OperatorKind, SignedEnvelope, CLUSTER_MODEL,
 };
 use joule_runtime::{
-    load_model, readiness_for_pool_ex, Engine, InferRequest, ManifestFile, RuntimeFlags,
-    StubEngine, WeightsStore,
+    apply_staged, load_model, match_target, parse_software_update, read_stage, readiness_for_pool_ex,
+    stage_blob, Engine, InferRequest, ManifestFile, RuntimeFlags, SoftwareTarget, StubEngine,
+    WeightsStore,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -162,6 +163,34 @@ enum Commands {
     Broadcast {
         #[command(subcommand)]
         cmd: BroadcastCmd,
+    },
+    /// Seed a local file into the content-addressed blob store (for peer swarm).
+    SeedBlob {
+        /// File to hash and store under blobs/sha256/<hex>.
+        #[arg(long)]
+        path: PathBuf,
+        /// Optional kind label for BlobsHave (weight|software|fixture).
+        #[arg(long, default_value = "blob")]
+        kind: String,
+        /// Optional human name.
+        #[arg(long, default_value = "")]
+        name: String,
+    },
+    /// Software update stage / apply (peer-seeded binaries only).
+    Software {
+        #[command(subcommand)]
+        cmd: SoftwareCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum SoftwareCmd {
+    /// Show staged software binary (if any).
+    Status,
+    /// Apply staged binary over a destination path (default: current executable).
+    Apply {
+        #[arg(long)]
+        dest: Option<PathBuf>,
     },
 }
 
@@ -328,7 +357,53 @@ async fn main() -> Result<()> {
                 json,
             } => broadcast_plan_chunks(chunks, nodes, replicas, json)?,
         },
+        Commands::SeedBlob { path, kind, name } => seed_blob(path, kind, name)?,
+        Commands::Software { cmd } => match cmd {
+            SoftwareCmd::Status => software_status()?,
+            SoftwareCmd::Apply { dest } => software_apply(dest)?,
+        },
     }
+    Ok(())
+}
+
+fn seed_blob(path: PathBuf, kind: String, name: String) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let data = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let hash = hex::encode(Sha256::digest(&data));
+    WeightsStore::store_blob(&hash, &data).map_err(|e| anyhow::anyhow!(e))?;
+    let display_name = if name.is_empty() {
+        path.file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "blob".into())
+    } else {
+        name
+    };
+    println!("seeded sha256={hash}");
+    println!("size={} kind={kind} name={display_name}", data.len());
+    println!("blob path={}", WeightsStore::blob_path(&hash).display());
+    println!("start `joule agent` so this node announces BlobsHave to the swarm");
+    Ok(())
+}
+
+fn software_status() -> Result<()> {
+    match read_stage() {
+        Some(st) => {
+            println!("{}", serde_json::to_string_pretty(&st)?);
+        }
+        None => {
+            println!(r#"{{"staged":false,"message":"nothing staged"}}"#);
+        }
+    }
+    Ok(())
+}
+
+fn software_apply(dest: Option<PathBuf>) -> Result<()> {
+    let dest = match dest {
+        Some(p) => p,
+        None => std::env::current_exe().context("current_exe")?,
+    };
+    let st = apply_staged(&dest).map_err(|e| anyhow::anyhow!(e))?;
+    println!("{}", serde_json::to_string_pretty(&st)?);
     Ok(())
 }
 
@@ -517,6 +592,8 @@ async fn run_agent(
     store.ensure_root().ok();
     let mut last_armed = false;
     let mut pending_recv: HashMap<Uuid, PendingBlobRecv> = HashMap::new();
+    // When software_update matches this host, stage once the digest lands.
+    let mut pending_software: Option<(String, SoftwareTarget)> = None;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -717,12 +794,60 @@ async fn run_agent(
                                 }
                             }
                             OperatorKind::SoftwareUpdate => {
-                                println!(
-                                    "software_update: peer-fetch matching target sha256 only"
-                                );
+                                match parse_software_update(&envelope.body_json) {
+                                    Ok(body) => {
+                                        println!(
+                                            "software_update v{} notes={}",
+                                            body.version,
+                                            if body.notes.is_empty() {
+                                                "(none)"
+                                            } else {
+                                                body.notes.as_str()
+                                            }
+                                        );
+                                        if let Some(t) = match_target(&body) {
+                                            println!(
+                                                "  match {}/{} sha256={} — peer seed only",
+                                                t.os, t.arch, t.sha256
+                                            );
+                                            if WeightsStore::has_blob(&t.sha256) {
+                                                match stage_blob(&body.version, t) {
+                                                    Ok(st) => println!("  {}", st.message),
+                                                    Err(e) => warn!(error = %e, "stage failed"),
+                                                }
+                                            } else {
+                                                pending_software =
+                                                    Some((body.version.clone(), t.clone()));
+                                                let want = Envelope::new(
+                                                    node_id.clone(),
+                                                    Message::BlobWant {
+                                                        sha256: t.sha256.to_lowercase(),
+                                                    },
+                                                );
+                                                writer.write_all(&encode_line(&want)?).await?;
+                                            }
+                                        } else {
+                                            println!(
+                                                "  no target for this host ({}/{})",
+                                                joule_runtime::current_os(),
+                                                joule_runtime::current_arch()
+                                            );
+                                        }
+                                    }
+                                    Err(e) => warn!(error = %e, "software_update parse"),
+                                }
+                            }
+                            OperatorKind::PauseService => {
+                                println!("PAUSE: operator paused public service");
+                            }
+                            OperatorKind::ResumeService => {
+                                println!("RESUME: operator resumed public service");
+                            }
+                            OperatorKind::Policy => {
+                                println!("policy: {}", envelope.body_json);
                             }
                             _ => {
-                                println!("  (stored/relayed; handler for this kind pending)");
+                                println!("  (stored/relayed; no local action for this kind)");
                             }
                         }
                     }
@@ -868,6 +993,30 @@ async fn run_agent(
                                     {
                                         warn!(error = %e, "BlobsHave after receive failed");
                                     }
+                                    // Stage software if this digest was the pending update.
+                                    if let Some((ver, tgt)) = pending_software.clone() {
+                                        if tgt.sha256.to_lowercase() == finished.sha256 {
+                                            match stage_blob(&ver, &tgt) {
+                                                Ok(st) => {
+                                                    println!("{}", st.message);
+                                                    pending_software = None;
+                                                }
+                                                Err(e) => {
+                                                    warn!(error = %e, "stage after receive failed")
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // If a weight digest landed, try prepare/load for primary quant.
+                                    try_load_after_blob(
+                                        &store,
+                                        &mut writer,
+                                        &node_id,
+                                        &finished.sha256,
+                                        mem_mib,
+                                        &mut last_armed,
+                                    )
+                                    .await?;
                                 }
                                 Err(e) => {
                                     warn!(
@@ -886,6 +1035,77 @@ async fn run_agent(
             }
         }
     }
+}
+
+/// After a peer seed lands, try to complete weight prepare + load if this hash is in the manifest.
+async fn try_load_after_blob(
+    store: &WeightsStore,
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    node_id: &NodeId,
+    sha256: &str,
+    mem_mib: u32,
+    last_armed: &mut bool,
+) -> Result<()> {
+    let Ok(manifest) = ManifestFile::load_default() else {
+        return Ok(());
+    };
+    let Some(spec) = manifest.primary() else {
+        return Ok(());
+    };
+    let hash = sha256.to_lowercase();
+    let mut matched_quant = None;
+    for q in &spec.weights.quants {
+        if q.files.iter().any(|f| f.sha256.to_lowercase() == hash) {
+            matched_quant = Some(q);
+            break;
+        }
+    }
+    let Some(q) = matched_quant.or_else(|| spec.pick_quant(mem_mib)) else {
+        return Ok(());
+    };
+    // Only auto-load if this blob is part of the quant we're considering.
+    if !q.files.iter().any(|f| f.sha256.to_lowercase() == hash) {
+        return Ok(());
+    }
+    match store.prepare(spec, q) {
+        Ok(st) => {
+            *last_armed = st.armed;
+            info!(%st.message, "prepare after peer seed");
+            let ok = Envelope::new(
+                node_id.clone(),
+                Message::PrepareOk {
+                    model: st.model.clone(),
+                    quant: st.quant.clone(),
+                    armed: st.armed,
+                    files_complete: st.files_complete,
+                    message: st.message.clone(),
+                },
+            );
+            writer.write_all(&encode_line(&ok)?).await?;
+            if st.files_complete {
+                match load_model(store, spec, q) {
+                    Ok(lm) => {
+                        let report = lm.report();
+                        println!("loaded after peer seed: {}", report.message);
+                        let loaded = Envelope::new(
+                            node_id.clone(),
+                            Message::ModelLoaded {
+                                model: report.model,
+                                quant: report.quant,
+                                bytes_resident: report.bytes_resident,
+                                tensors: report.tensors as u32,
+                                message: report.message,
+                            },
+                        );
+                        writer.write_all(&encode_line(&loaded)?).await?;
+                    }
+                    Err(e) => info!(error = %e, "load after seed deferred"),
+                }
+            }
+        }
+        Err(e) => warn!(error = %e, "prepare after seed failed"),
+    }
+    Ok(())
 }
 
 async fn announce_local_blobs(

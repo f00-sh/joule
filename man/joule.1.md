@@ -11,8 +11,13 @@ joule version
 joule control [--agent-listen ADDR] [--http-listen ADDR] [--data-dir PATH] [--ephemeral]
 joule agent --account NAME [--control HOST:PORT] [--model TAG] [--mem-mib N] [--device gpu|metal|cpu]
 joule capacity [--api URL] [--peers N] [--json]
-joule chat --key KEY [--api URL] [--model TAG] --prompt TEXT
+joule chat --key KEY [--api URL] [--model TAG] --prompt TEXT [--stream]
 joule whoami --key KEY [--api URL]
+joule ready [--api URL] [--pool-vram-gib N] [--backends N]
+joule load [--model TAG] [--quant ID] [--mem-mib N]
+joule seed-blob --path FILE [--kind KIND] [--name NAME]
+joule software status|apply [--dest PATH]
+joule broadcast keygen|sign|inject|plan-chunks …
 joule lab [options]
 joule credits [--account NAME]
 ```
@@ -29,9 +34,9 @@ pool is free of cash charges. No contribution ⇒ no API.
 
 How a node reaches the internet is irrelevant. This is not a mesh product.
 
-Version **0.0.0** uses a stub inference engine; real open weights (Kimi-class)
-land in a later milestone. Pool membership, capacity, and contribute-to-consume
-are implemented.
+Version **0.0.0** loads **lab-tiny** tensors when seeded and gates full Kimi on
+pool VRAM. Weights and software are **peer-seeded by sha256** (f00 is website
+only). Operator orders are **ed25519-signed** and flooded by the swarm.
 
 ## COMMANDS
 
@@ -61,11 +66,27 @@ HTTP routes:
 | GET | `/v1/public/ledger/head` | Chain head hash + integrity flag |
 | GET | `/v1/public/audit/{account}` | Account balance from chain + recent events |
 | POST | `/v1/chat/completions` | OpenAI-shaped chat; `stream: true` for SSE |
+| GET | `/v1/blobs` | Swarm content directory (who seeds which sha256) |
+| GET | `/v1/broadcasts` | Recent operator-signed envelopes |
+| POST | `/v1/broadcasts/inject` | Inject pre-signed operator order (flood + act) |
+| GET | `/v1/notices` | Notice-kind broadcasts for UI |
+| GET | `/v1/operator/status` | service_live, chunk plan, blob count |
 
 ### joule agent
 
 Join the pool. Prints an API key on welcome. Heartbeats mint millijoules.
-Assigned jobs run on the local stub engine and mint further credits.
+Handles infer/challenge, **BlobProvide/BlobChunk**, **FetchDigests**, and
+operator bus actions (model/software digests, notices).
+
+### joule seed-blob / software
+
+Hash a local file into `blobs/sha256/` for the swarm. After a signed
+`software_update`, agents stage the matching digest; `joule software apply`
+installs the staged binary (hash-checked).
+
+### joule broadcast
+
+Operator tools: keygen, sign body JSON, inject into control, demo chunk plan.
 
 ### joule capacity
 
@@ -93,6 +114,11 @@ Offline demos (no network).
 | Variable | Purpose |
 |---|---|
 | `RUST_LOG` | Tracing filter |
+| `JOULE_OPERATOR_PUBKEY` | ed25519 public key hex; required to verify operator bus in production |
+| `JOULE_ALLOW_EXTERNAL_FETCH` | `1` to allow third-party weight URL hints (never f00 origin) |
+| `JOULE_BLOBS_DIR` | Content-addressed blob store root |
+| `JOULE_WEIGHTS_DIR` | Weight cache root |
+| `JOULE_SOFTWARE_DIR` | Software stage root |
 | `JOULE_PUBLIC_URL` | Public HTTPS base of this control; enables signed **announce** to the open directory (no f00 token) |
 | `JOULE_ANNOUNCE_URL` | Override announce endpoint (default `https://joule.f00.sh/api/announce`) |
 | `JOULE_EDGE_TOKEN` | Optional bearer to push snapshots into edge KV (`/api/ingest`) |

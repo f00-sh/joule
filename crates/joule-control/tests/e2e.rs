@@ -6,6 +6,7 @@ use joule_proto::{
     PROTOCOL_VERSION,
 };
 use joule_runtime::StubEngine;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -470,4 +471,139 @@ async fn peer_blob_chunk_transfer() {
     }
 
     seeder.abort();
+}
+
+/// Operator policy pause flips service_live; software_update fans FetchDigests.
+#[tokio::test]
+async fn operator_policy_and_software_fanout() {
+    use ed25519_dalek::{Signer, SigningKey};
+    use joule_control::{body_sha256_hex, now_ms, operator_preimage};
+    use joule_proto::{OperatorKind, SignedEnvelope};
+    use rand::rngs::OsRng;
+
+    let sk = SigningKey::generate(&mut OsRng);
+    let pk = hex::encode(sk.verifying_key().to_bytes());
+    std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
+
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    // Agent that records FetchDigests digests.
+    let got_digests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let node_id = NodeId::new();
+    let sock = TcpStream::connect(agent_addr).await.unwrap();
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::Hello {
+                    account: "ops".into(),
+                    caps: NodeCaps::for_cluster(DeviceClass::Gpu, 8192, 40),
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = lines.next_line().await.unwrap();
+    let dig_slot = got_digests.clone();
+    let agent = tokio::spawn(async move {
+        loop {
+            let Ok(Some(line)) = lines.next_line().await else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let env = decode_line(line.as_bytes()).unwrap();
+            if let Message::FetchDigests { digests, reason, .. } = env.msg {
+                if reason.starts_with("software_update:") {
+                    *dig_slot.lock().unwrap() = digests;
+                }
+            }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+
+    // Pause via signed envelope (blocks chat)
+    let body = r#"{"service_live":false,"pause":true}"#;
+    let mut env = SignedEnvelope {
+        id: Uuid::new_v4(),
+        issued_at_unix_ms: now_ms(),
+        expires_at_unix_ms: None,
+        kind: OperatorKind::Policy,
+        body_json: body.into(),
+        body_sha256: body_sha256_hex(body),
+        sig_ed25519_hex: String::new(),
+        openpgp_sig: None,
+    };
+    let pre = operator_preimage(&env);
+    env.sig_ed25519_hex = hex::encode(sk.sign(&pre).to_bytes());
+    let r = client
+        .post(format!("{base}/v1/broadcasts/inject"))
+        .json(&env)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success());
+    {
+        let g = app.state.read().await;
+        assert!(!g.service_live);
+        assert!(g.operator_paused);
+    }
+
+    // Software update fanout
+    let sw_body = r#"{"version":"0.0.1","targets":[{"os":"linux","arch":"x86_64","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":1,"name":"joule"}]}"#;
+    let mut sw = SignedEnvelope {
+        id: Uuid::new_v4(),
+        issued_at_unix_ms: now_ms(),
+        expires_at_unix_ms: None,
+        kind: OperatorKind::SoftwareUpdate,
+        body_json: sw_body.into(),
+        body_sha256: body_sha256_hex(sw_body),
+        sig_ed25519_hex: String::new(),
+        openpgp_sig: None,
+    };
+    let pre = operator_preimage(&sw);
+    sw.sig_ed25519_hex = hex::encode(sk.sign(&pre).to_bytes());
+    let r = client
+        .post(format!("{base}/v1/broadcasts/inject"))
+        .json(&sw)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.text().await.unwrap());
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if !got_digests.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("FetchDigests timeout");
+    let d = got_digests.lock().unwrap().clone();
+    assert_eq!(d.len(), 1);
+    assert!(d[0].starts_with("ccc"));
+
+    let op: serde_json::Value = client
+        .get(format!("{base}/v1/operator/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(op["service_live"], false);
+
+    agent.abort();
+    std::env::remove_var("JOULE_OPERATOR_PUBKEY");
 }

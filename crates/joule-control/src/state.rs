@@ -130,6 +130,8 @@ pub struct ControlState {
     pub nodes_model_loaded: HashSet<NodeId>,
     /// Operator / automatic flag: public service serving real model.
     pub service_live: bool,
+    /// Operator pause (signed bus) — blocks chat even if donors online.
+    pub operator_paused: bool,
     /// Per-account rolling fairness + tenure (economy v0).
     pub account_economy: HashMap<String, AccountEconomy>,
     /// Swarm content directory (hash → seeders). Never stores payload bytes.
@@ -168,6 +170,7 @@ impl ControlState {
             vram_history: VecDeque::new(),
             nodes_model_loaded: HashSet::new(),
             service_live: false,
+            operator_paused: false,
             account_economy: HashMap::new(),
             blobs: BlobDirectory::new(),
             broadcasts: BroadcastLog::new(256),
@@ -332,7 +335,7 @@ impl ControlState {
         self.wake_scheduler();
     }
 
-    fn mark_dirty(&mut self) {
+    pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
 

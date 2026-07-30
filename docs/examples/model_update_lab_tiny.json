@@ -1,0 +1,18 @@
+{
+  "model_id": "kimi-open",
+  "replica_factor": 2,
+  "quants": [
+    {
+      "id": "lab-tiny",
+      "files": [
+        {
+          "path": "model.safetensors",
+          "sha256": "b937cbc2c6def42c46579c6caab3b1a881b451994d6382d298d66d67f1549b24",
+          "size": 32872,
+          "layer_start": 0,
+          "layer_end": 0
+        }
+      ]
+    }
+  ]
+}

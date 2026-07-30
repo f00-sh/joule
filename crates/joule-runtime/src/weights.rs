@@ -486,12 +486,25 @@ fn copy_from_repo(rel: &str, dest: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::{Mutex, OnceLock};
+    /// Serialize tests that mutate JOULE_* path env vars.
+    pub fn lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::manifest::ManifestFile;
 
     #[test]
     fn lab_tiny_from_repo_no_external() {
+        let _env = test_env::lock();
         // Default: external off; lab-tiny uses repo://
         std::env::remove_var("JOULE_ALLOW_EXTERNAL_FETCH");
         let dir = std::env::temp_dir().join(format!("joule-w-{}", std::process::id()));
@@ -533,6 +546,7 @@ mod tests {
 
     #[test]
     fn store_and_list_blob_roundtrip() {
+        let _env = test_env::lock();
         let dir = std::env::temp_dir().join(format!("joule-blobs-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

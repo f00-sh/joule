@@ -10,6 +10,7 @@ mod edge;
 mod http;
 mod identity;
 mod model_update;
+mod operator_actions;
 mod persist;
 mod state;
 mod tcp;

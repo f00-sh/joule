@@ -10,7 +10,7 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
-| Design | [docs/design/cluster-v0.md](docs/design/cluster-v0.md) · [economy-v0](docs/design/economy-v0.md) |
+| Design | [cluster](docs/design/cluster-v0.md) · [economy](docs/design/economy-v0.md) · [distribution](docs/design/distribution-v0.md) · [broadcast](docs/design/broadcast-v0.md) · [ceremony](docs/design/operator-ceremony-v0.md) |
 
 ## Why
 
@@ -119,7 +119,13 @@ joule chat --key joule_… --prompt "…"
 joule whoami --key joule_…
 joule lab --peers 3
 joule credits --account alice
+joule ready [--api URL]
+joule seed-blob --path FILE [--kind software]
+joule software status|apply
+joule broadcast keygen|sign|inject|plan-chunks
 ```
+
+**Operator bus (signed, peer-flooded):** pin `JOULE_OPERATOR_PUBKEY`, sign offline, inject once — swarm relays. Model/software updates carry **hashes**; bytes move peer→peer. Ceremony: [docs/design/operator-ceremony-v0.md](docs/design/operator-ceremony-v0.md).
 
 Full option reference: [man/joule.1.md](man/joule.1.md).
 
@@ -141,7 +147,7 @@ See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 an
 | Surface | Location |
 |---|---|
 | This README | [README.md](README.md) |
-| Design | [docs/design/cluster-v0.md](docs/design/cluster-v0.md) · [economy-v0](docs/design/economy-v0.md) |
+| Design | [cluster](docs/design/cluster-v0.md) · [economy](docs/design/economy-v0.md) · [distribution](docs/design/distribution-v0.md) · [broadcast](docs/design/broadcast-v0.md) · [ceremony](docs/design/operator-ceremony-v0.md) |
 | Man page | [man/joule.1.md](man/joule.1.md) |
 | GitHub Pages | [docs/](docs/) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |

@@ -7,6 +7,7 @@
 mod decode;
 mod load;
 mod manifest;
+mod software;
 mod weights;
 
 pub use decode::generate as generate_from_loaded;
@@ -14,6 +15,10 @@ pub use load::{load_model, LoadError, LoadReport, LoadedModel, TensorInfo};
 pub use manifest::{
     InferenceMode, ManifestFile, MilestoneStatus, ModelReadiness, ModelSpec, QuantSpec,
     RuntimeFlags, EMBEDDED_MANIFEST,
+};
+pub use software::{
+    apply_staged, current_arch, current_os, match_target, parse_software_update, read_stage,
+    stage_blob, SoftwareTarget, SoftwareUpdateBody, StageStatus,
 };
 pub use weights::{BlobAnnounce, PrepareStatus, WeightsStore};
 

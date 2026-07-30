@@ -1,0 +1,27 @@
+{
+  "version": "0.0.1",
+  "notes": "Example only — replace sha256 with output of: joule seed-blob --path ./target/release/joule --kind software",
+  "targets": [
+    {
+      "os": "linux",
+      "arch": "x86_64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "name": "joule"
+    },
+    {
+      "os": "linux",
+      "arch": "aarch64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "name": "joule"
+    },
+    {
+      "os": "macos",
+      "arch": "aarch64",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "size": 0,
+      "name": "joule"
+    }
+  ]
+}

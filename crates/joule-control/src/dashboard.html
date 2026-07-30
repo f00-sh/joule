@@ -103,6 +103,17 @@
     </div>
     <p class="sub" id="ready-msg" style="margin:0 0 1.25rem;"></p>
 
+    <section class="card" style="margin-bottom:1rem;">
+      <h2>Operator notices / bus</h2>
+      <p class="sub" id="op-status" style="margin:0 0 0.75rem;">—</p>
+      <ul id="notices" style="margin:0;padding-left:1.1rem;font-size:0.85rem;color:var(--fg);"></ul>
+    </section>
+
+    <section class="card" style="margin-bottom:1rem;">
+      <h2>Swarm blobs (seed directory · no payloads here)</h2>
+      <div id="blobs" class="sub">—</div>
+    </section>
+
     <section class="card">
       <h2>How the logical device is built (internal backends)</h2>
       <div id="nodes-wrap">
@@ -128,6 +139,8 @@
       API: <a href="/v1/cluster/capacity">capacity</a> ·
       <a href="/v1/cluster/scheduler">scheduler</a> ·
       <a href="/v1/models">models</a> ·
+      <a href="/v1/blobs">blobs</a> ·
+      <a href="/v1/broadcasts">broadcasts</a> ·
       chat <code>POST /v1/chat/completions</code> ·
       refresh 3s · single model · free/loaded slots
       <div id="error" class="err"></div>
@@ -141,10 +154,13 @@
     async function refresh() {
       const err = document.getElementById("error");
       try {
-        const [cap, nodes, sched] = await Promise.all([
+        const [cap, nodes, sched, op, notices, blobs] = await Promise.all([
           fetch("/v1/cluster/capacity").then(r => r.json()),
           fetch("/v1/cluster/nodes").then(r => r.json()),
           fetch("/v1/cluster/scheduler").then(r => r.json()),
+          fetch("/v1/operator/status").then(r => r.json()).catch(() => ({})),
+          fetch("/v1/notices").then(r => r.json()).catch(() => ({notices:[]})),
+          fetch("/v1/blobs").then(r => r.json()).catch(() => ({blobs:[]})),
         ]);
         const ld = cap.logical_device || {};
         document.getElementById("logical").textContent = ld.id || "joule-pool";
@@ -184,6 +200,32 @@
         if (!snodes.length) {
           tb.innerHTML = "<tr><td colspan=\"8\" style=\"color:var(--muted)\">No donors yet — run <code>joule agent --account …</code></td></tr>";
         }
+        document.getElementById("op-status").textContent =
+          "service_live=" + (op.service_live ? "yes" : "no") +
+          " · chunks=" + (op.active_chunks||0) +
+          " · blob digests=" + (op.blob_digests||0) +
+          " · operator key " + (op.operator_pubkey_configured ? "pinned" : "open (dev)");
+        const ul = document.getElementById("notices");
+        ul.innerHTML = "";
+        const ns = notices.notices || [];
+        if (!ns.length) {
+          ul.innerHTML = "<li style=\"color:var(--muted)\">No operator notices yet</li>";
+        } else {
+          ns.slice().reverse().slice(0, 8).forEach(n => {
+            let title = n.id;
+            try {
+              const b = JSON.parse(n.body_json || "{}");
+              title = b.title || b.body || n.id;
+            } catch (_) {}
+            const li = document.createElement("li");
+            li.textContent = title;
+            ul.appendChild(li);
+          });
+        }
+        const bl = blobs.blobs || [];
+        document.getElementById("blobs").textContent = bl.length
+          ? bl.slice(0, 12).map(b => b.sha256.slice(0,12) + "…×" + b.seeders).join(" · ")
+          : "no seeds announced — agents BlobsHave after prepare/seed-blob";
         document.getElementById("updated").textContent =
           "updated " + new Date().toLocaleTimeString();
         err.textContent = "";

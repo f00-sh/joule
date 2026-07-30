@@ -45,6 +45,8 @@ pub fn router(app: App) -> Router {
         .route("/v1/blobs/{sha256}", get(blob_locate))
         .route("/v1/broadcasts", get(list_broadcasts))
         .route("/v1/broadcasts/inject", post(inject_broadcast))
+        .route("/v1/notices", get(list_notices))
+        .route("/v1/operator/status", get(operator_status))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -264,7 +266,41 @@ async fn list_broadcasts(State(app): State<App>) -> impl IntoResponse {
     Json(json!({
         "ok": true,
         "law": "signed by operator key; swarm relays; f00 is not a push CDN",
+        "operator_pubkey_configured": crate::broadcast::operator_pubkey_hex().is_some(),
         "messages": g.broadcasts.recent(),
+    }))
+}
+
+/// Notices only (dashboard strip).
+async fn list_notices(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let notices: Vec<_> = g
+        .broadcasts
+        .recent()
+        .iter()
+        .filter(|e| e.kind == joule_proto::OperatorKind::Notice)
+        .cloned()
+        .collect();
+    Json(json!({
+        "ok": true,
+        "notices": notices,
+    }))
+}
+
+async fn operator_status(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    Json(json!({
+        "ok": true,
+        "service_live": g.service_live,
+        "operator_paused": g.operator_paused,
+        "heartbeat_mint_mj": g.heartbeat_mint_mj,
+        "dual_verify_every": g.dual_verify_every,
+        "active_chunks": g.active_chunks.len(),
+        "active_replica_factor": g.active_replica_factor,
+        "blob_digests": g.blobs.catalog().len(),
+        "broadcasts_recent": g.broadcasts.recent().len(),
+        "operator_pubkey_configured": crate::broadcast::operator_pubkey_hex().is_some(),
+        "law": "pause/resume/policy via signed operator bus; digests peer-seeded",
     }))
 }
 
@@ -293,7 +329,7 @@ async fn inject_broadcast(
                 }
             }
             drop(routes);
-            crate::model_update::apply_model_update(&app, &envelope).await;
+            crate::operator_actions::apply_operator_actions(&app, &envelope).await;
             Json(json!({
                 "ok": true,
                 "flooded_agents": n,
@@ -429,6 +465,15 @@ async fn chat_completions(
     })?;
     let account = {
         let g = app.state.read().await;
+        if g.operator_paused {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "error": "operator paused service (signed pause_service / policy)",
+                    "operator_paused": true,
+                })),
+            ));
+        }
         g.account_for_key(&key)
             .map(|s| s.to_string())
             .ok_or_else(|| {

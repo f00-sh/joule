@@ -61,6 +61,10 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 |---|---|
 | Design (cluster-v0) | [design/cluster-v0.md](design/cluster-v0.md) |
 | Economy (millijoules v0) | [design/economy-v0.md](design/economy-v0.md) |
+| Distribution (website only · peer seed) | [design/distribution-v0.md](design/distribution-v0.md) |
+| Broadcast bus | [design/broadcast-v0.md](design/broadcast-v0.md) |
+| Operator key ceremony | [design/operator-ceremony-v0.md](design/operator-ceremony-v0.md) |
+| Self-govern ledger | [design/self-govern-v0.md](design/self-govern-v0.md) |
 | Operator SOP (NASA PDF) | [sop-joule-ops.pdf](sop-joule-ops.pdf) — generated on release |
 | Release memos | [releases/](releases/) |
 | README | [../README.md](../README.md) |

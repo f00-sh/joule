@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Peer blob transfer**: `BlobWant` → `BlobProvide` → `BlobChunk` (base64); agents verify sha256 into content-addressed store; `FetchDigests` for assigned model/software digests only
+- **Redundant model chunks**: `plan_redundant_chunks` + rebalance when seeders drop; model_update never force-downloads full model
+- **Software update path**: peer-seed binary digests, stage under `~/.local/share/joule/software/stage`, `joule software status|apply`, `joule seed-blob`
+- **Operator bus actions**: pause/resume/policy allow-list; `GET /v1/notices`, `/v1/operator/status`; dashboard notices + blob strip
+- **Operator ceremony** doc: `docs/design/operator-ceremony-v0.md`
 - **Weight download/verify**: HTTP(S) + `repo://` with sha256; `weights.published=true`
 - **lab-tiny** fixture + **kimi-k3-meta** (Moonshot HF configs); tensor-backed generate (`decode.rs`)
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons

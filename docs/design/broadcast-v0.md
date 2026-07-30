@@ -1,6 +1,6 @@
 # joule — signed operator broadcast bus v0
 
-**Status:** active (design)  
+**Status:** active (design + v0 implementation: verify/flood, model_update digests, software stage, peer BlobChunk)  
 **Companion laws:** [distribution-v0](distribution-v0.md) (website only · peer seed) · [self-govern-v0](self-govern-v0.md) (ledger) · [cluster-v0](cluster-v0.md)
 
 ---
