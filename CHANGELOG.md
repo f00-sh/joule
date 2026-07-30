@@ -9,15 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **VRAM-sharded single model:** one `kimi-open` plan spans **all** healthy donors weighted by VRAM
-- A request fans out across the pool (not one exclusive GPU); concurrent users share **stream slots**
+- **Logical device view:** pool = one virtual GPU (`logical_device.vram_mib` = sum of donors)
+- **VRAM-sharded single model** under that device; requests share stream slots
 - `/v1/models` is one model; foreign ids rejected
 
 ### Added
 
-- `plan_sharded_pool` + multi-node `InferRequest` with full plan
-- `GET /v1/cluster/scheduler` shows pool VRAM, shards, stream slots, per-node layer ranges
-- Stream acquire/release across the mesh; wait when stream capacity is exhausted
+- `LogicalDevice` on capacity + dashboard “one supercomputer” framing
+- `plan_sharded_pool` + multi-node infer fan-out
+- `GET /v1/cluster/scheduler` (`view: one_logical_device`)
 - **Anti-cheat challenges**: spot challenges every ~12s + dual-verify every 3rd chat
 - **Reputation**: pass/fail scores; ban unhealthy cheaters from scheduling
 - **Localhost control hardened**: shared agent routes (fixed dispatch), bind errors, healthz shows agents_connected

@@ -22,7 +22,8 @@
 5. Open weights, open agent, open protocol.
 6. **Distributed cluster across the internet** — connectivity medium is irrelevant.
 7. **Dashboard always shows live cluster capacity** (nodes, healthy VRAM, throughput aggregate).
-8. **Single model:** the cluster runs only `kimi-open` (see `joule_proto::CLUSTER_MODEL`). All healthy donors are compute for that model — no multi-model marketplace.
+8. **Single model:** only `kimi-open` (`CLUSTER_MODEL`).
+9. **One logical device:** N physical donors = **one** virtual GPU whose VRAM is the **sum** of healthy donors (8+16×4 → one ~72 GiB device). Public APIs lead with `logical_device`, not five separate GPUs.
 
 ## Language / purity
 

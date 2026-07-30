@@ -167,6 +167,26 @@ fn default_model_layers() -> u32 {
     80
 }
 
+/// How joule presents the pool externally: **one logical device**.
+///
+/// Five home GPUs with 8+16+16+16+16 GiB are not five products — they are one
+/// supercomputer with ~72 GiB VRAM. Physical donors are internal plumbing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogicalDevice {
+    /// Always a single virtual accelerator for the public API.
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    /// Aggregate VRAM (MiB) = sum of healthy donor memory.
+    pub vram_mib: u64,
+    /// Same in GiB (rounded down).
+    pub vram_gib: u64,
+    /// Donors that make up this logical device (internal detail).
+    pub backends: u32,
+    pub model: String,
+    pub ready: bool,
+}
+
 /// Live aggregate of donated compute — powers the public dashboard.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterCapacity {
@@ -185,6 +205,9 @@ pub struct ClusterCapacity {
     /// Streams currently reserved.
     #[serde(default)]
     pub stream_slots_used: u32,
+    /// **The** public view: one device with aggregate VRAM.
+    #[serde(default)]
+    pub logical_device: Option<LogicalDevice>,
 }
 
 /// Envelope for control ↔ agent messages (newline-delimited JSON on the wire).
@@ -335,6 +358,7 @@ mod tests {
             models_available: vec![CLUSTER_MODEL.into()],
             stream_slots_total: 4,
             stream_slots_used: 1,
+            logical_device: None,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["nodes_healthy"], 2);

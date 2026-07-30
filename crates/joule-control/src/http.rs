@@ -46,13 +46,19 @@ async fn healthz(State(app): State<App>) -> impl IntoResponse {
     let cap = g.cluster.capacity();
     let agents = app.routes.lock().await.len();
     let sched = g.cluster.scheduler_snapshot();
+    let dev = cap.logical_device.as_ref();
     Json(json!({
         "ok": true,
         "service": "joule-control",
+        "logical_device": {
+            "id": dev.map(|d| d.id.as_str()).unwrap_or("joule-pool"),
+            "vram_gib": dev.map(|d| d.vram_gib).unwrap_or(0),
+            "backends": dev.map(|d| d.backends).unwrap_or(0),
+            "ready": dev.map(|d| d.ready).unwrap_or(false),
+        },
         "agents_connected": agents,
-        "nodes_healthy": cap.nodes_healthy,
-        "slots_free": sched.stream_slots_free,
-        "slots_used": sched.stream_slots_used,
+        "stream_slots_free": sched.stream_slots_free,
+        "stream_slots_used": sched.stream_slots_used,
         "can_accept_work": sched.can_accept_work,
     }))
 }

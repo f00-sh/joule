@@ -86,23 +86,23 @@
 <body>
   <header>
     <div>
-      <h1><span>joule</span> cluster</h1>
-      <div class="sub">live distributed compute · contribute to consume</div>
+      <h1><span>joule</span> supercomputer</h1>
+      <div class="sub">one logical GPU · aggregate donor VRAM · contribute to consume</div>
     </div>
     <div class="sub" id="updated">connecting…</div>
   </header>
   <main>
     <div class="grid" id="stats">
-      <div class="card"><div class="label">Healthy nodes</div><div class="value accent" id="n-healthy">—</div></div>
-      <div class="card"><div class="label">Pool VRAM</div><div class="value sky" id="pool-vram">—</div></div>
+      <div class="card"><div class="label">Logical device</div><div class="value accent" id="logical">joule-pool</div></div>
+      <div class="card"><div class="label">VRAM (one device)</div><div class="value sky" id="pool-vram">—</div></div>
+      <div class="card"><div class="label">Backends (internal)</div><div class="value" id="n-healthy">—</div></div>
       <div class="card"><div class="label">Stream slots free/used</div><div class="value" id="slots">—</div></div>
-      <div class="card"><div class="label">Healthy VRAM</div><div class="value" id="mem-healthy">—</div></div>
-      <div class="card"><div class="label">GPU / Metal / CPU</div><div class="value" id="devices">—</div></div>
-      <div class="card"><div class="label">Cluster model</div><div class="value models" id="models">—</div></div>
+      <div class="card"><div class="label">Model</div><div class="value models" id="models">—</div></div>
+      <div class="card"><div class="label">Ready</div><div class="value" id="ready">—</div></div>
     </div>
 
     <section class="card">
-      <h2>Donor nodes</h2>
+      <h2>How the logical device is built (internal backends)</h2>
       <div id="nodes-wrap">
         <table>
           <thead>
@@ -144,20 +144,20 @@
           fetch("/v1/cluster/nodes").then(r => r.json()),
           fetch("/v1/cluster/scheduler").then(r => r.json()),
         ]);
-        document.getElementById("n-healthy").textContent = cap.nodes_healthy + " shards";
-        document.getElementById("pool-vram").textContent = fmtGiB(sched.pool_mem_mib || cap.mem_mib_healthy);
+        const ld = cap.logical_device || {};
+        document.getElementById("logical").textContent = ld.id || "joule-pool";
+        document.getElementById("pool-vram").textContent =
+          (ld.vram_gib != null ? ld.vram_gib + " GiB" : fmtGiB(sched.pool_mem_mib || cap.mem_mib_healthy));
+        document.getElementById("n-healthy").textContent =
+          (ld.backends != null ? ld.backends : cap.nodes_healthy) + " machines";
         document.getElementById("slots").textContent =
           (sched.stream_slots_free||0) + " / " + (sched.stream_slots_used||0) +
           " (max " + (sched.stream_slots_total||0) + ")";
-        document.getElementById("mem-healthy").textContent = fmtGiB(cap.mem_mib_healthy);
-        document.getElementById("devices").textContent =
-          cap.nodes_gpu + " / " + cap.nodes_metal + " / " + cap.nodes_cpu;
-        document.getElementById("models").textContent =
-          (sched.model || (cap.models_available && cap.models_available[0]) || "(none)") +
-          " · " + (sched.shards||0) + " shards";
+        document.getElementById("models").textContent = ld.model || sched.model || "kimi-open";
+        document.getElementById("ready").textContent = ld.ready ? "yes" : "no";
         const tb = document.getElementById("nodes");
         tb.innerHTML = "";
-        const snodes = sched.nodes || [];
+        const snodes = sched.backends || sched.nodes || [];
         snodes.forEach(n => {
           const tr = document.createElement("tr");
           let pill = n.state === "full" || n.state === "unavailable" ? "bad" : "ok";

@@ -129,9 +129,20 @@ async fn pool_capacity_and_chat() {
         .json()
         .await
         .unwrap();
+    assert_eq!(sched["view"], "one_logical_device");
     assert_eq!(sched["mode"], "vram_sharded_pool");
     assert_eq!(sched["shards"], 1);
     assert!(sched["pool_mem_mib"].as_u64().unwrap() >= 16384);
+    let cap: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/capacity"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cap["logical_device"]["id"], "joule-pool");
+    assert_eq!(cap["logical_device"]["backends"], 1);
 
     let chat: serde_json::Value = client
         .post(format!("{base}/v1/chat/completions"))
@@ -183,8 +194,22 @@ async fn multi_donor_sharded_plan() {
         .json()
         .await
         .unwrap();
+    assert_eq!(sched["view"], "one_logical_device");
     assert_eq!(sched["shards"], 5);
     assert_eq!(sched["pool_mem_mib"], 8192 + 16384 * 4);
+    assert_eq!(sched["pool_mem_gib"], (8192 + 16384 * 4) / 1024);
+    let cap: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/capacity"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // joule sees ONE device whose VRAM is the sum of all backends
+    assert_eq!(cap["logical_device"]["id"], "joule-pool");
+    assert_eq!(cap["logical_device"]["backends"], 5);
+    assert_eq!(cap["logical_device"]["vram_mib"], 8192 + 16384 * 4);
 
     // One request fans across whole pool; still succeeds
     let r = client

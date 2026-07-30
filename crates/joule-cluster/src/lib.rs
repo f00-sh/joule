@@ -10,7 +10,10 @@ pub use scheduler::{
     ComputeState, NodeSchedule, SchedulerSnapshot, DEFAULT_MODEL_LAYERS, STREAM_BUDGET_MIB,
 };
 
-use joule_proto::{ClusterCapacity, ClusterPlan, DeviceClass, NodeCaps, NodeId, CLUSTER_MODEL};
+use joule_proto::{
+    ClusterCapacity, ClusterPlan, DeviceClass, LogicalDevice, NodeCaps, NodeId, CLUSTER_MODEL,
+    CLUSTER_MODEL_LABEL,
+};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -289,6 +292,31 @@ impl Cluster {
             .unwrap_or(0)
             .min(stream_slots_total);
 
+        // Public product view: one accelerator whose VRAM is the sum of donors.
+        let logical_device = if nodes_healthy > 0 {
+            Some(LogicalDevice {
+                id: "joule-pool".into(),
+                name: format!("joule supercomputer ({CLUSTER_MODEL_LABEL})"),
+                kind: "aggregate_gpu".into(),
+                vram_mib: mem_mib_healthy,
+                vram_gib: mem_mib_healthy / 1024,
+                backends: nodes_healthy,
+                model: CLUSTER_MODEL.to_string(),
+                ready: true,
+            })
+        } else {
+            Some(LogicalDevice {
+                id: "joule-pool".into(),
+                name: format!("joule supercomputer ({CLUSTER_MODEL_LABEL})"),
+                kind: "aggregate_gpu".into(),
+                vram_mib: 0,
+                vram_gib: 0,
+                backends: 0,
+                model: CLUSTER_MODEL.to_string(),
+                ready: false,
+            })
+        };
+
         ClusterCapacity {
             nodes_total,
             nodes_healthy,
@@ -301,6 +329,7 @@ impl Cluster {
             models_available,
             stream_slots_total,
             stream_slots_used,
+            logical_device,
         }
     }
 

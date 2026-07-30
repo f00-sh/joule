@@ -50,8 +50,11 @@ pub struct NodeSchedule {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulerSnapshot {
+    /// External story: one logical device, aggregate VRAM.
+    pub view: &'static str,
     pub mode: &'static str,
     pub pool_mem_mib: u64,
+    pub pool_mem_gib: u64,
     pub model: String,
     pub shards: u32,
     pub stream_slots_total: u32,
@@ -62,7 +65,8 @@ pub struct SchedulerSnapshot {
     pub nodes_loaded: u32,
     pub nodes_full: u32,
     pub nodes_unavailable: u32,
-    pub nodes: Vec<NodeSchedule>,
+    /// Internal: how the logical device is assembled (not separate public GPUs).
+    pub backends: Vec<NodeSchedule>,
     pub plan: Option<ClusterPlan>,
 }
 
@@ -265,8 +269,10 @@ impl Cluster {
         nodes.sort_by_key(|a| std::cmp::Reverse(a.mem_share_mib));
 
         SchedulerSnapshot {
+            view: "one_logical_device",
             mode: "vram_sharded_pool",
             pool_mem_mib: pool_mem,
+            pool_mem_gib: pool_mem / 1024,
             model: CLUSTER_MODEL.to_string(),
             shards: plan.as_ref().map(|p| p.shards.len() as u32).unwrap_or(0),
             stream_slots_total: stream_total,
@@ -277,7 +283,7 @@ impl Cluster {
             nodes_loaded,
             nodes_full,
             nodes_unavailable,
-            nodes,
+            backends: nodes,
             plan,
         }
     }

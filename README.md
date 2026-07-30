@@ -93,7 +93,7 @@ joule chat --key joule_… --stream --prompt "stream me"
 
 **Law:** no active donor agent for that account → chat forbidden. Invalid keys → 401.
 
-**Single model, sharded pool:** only **`kimi-open`**. Donors’ VRAM is **aggregated** (e.g. 8+16+16+16+16 GiB ≈ 72 GiB) and the model is **split across all healthy nodes** proportional to memory. One chat request rides that shared mesh — it does **not** monopolize one entire GPU. Concurrent users share **stream slots** on the same pool (`GET /v1/cluster/scheduler`).
+**One logical device:** if five machines give 8+16+16+16+16 GiB, joule sees **one GPU with ~72 GiB VRAM** (`capacity.logical_device`). Internally that memory is sharded to place **`kimi-open`**; publicly you are talking to one supercomputer. Concurrent users share stream slots on that device.
 
 Inference is still a **stub engine** until real weights land; the pool, dashboard, routing, and contribute-to-consume path are real.
 
