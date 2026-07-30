@@ -59,9 +59,13 @@ pub async fn apply_operator_actions(app: &App, envelope: &SignedEnvelope) {
         OperatorKind::Policy => {
             apply_policy(app, &envelope.body_json).await;
         }
-        OperatorKind::Notice | OperatorKind::Revoke | OperatorKind::Other => {
+        OperatorKind::Revoke => {
+            // Ids applied inside BroadcastLog::accept; log for ops.
+            info!("operator revoke processed (ids blacklisted)");
+        }
+        OperatorKind::Notice | OperatorKind::Other => {
             // Notice: already in broadcast log for dashboard; agents print locally.
-            // Revoke/Other: relay only in v0.
+            // Other: relay only.
         }
     }
 }

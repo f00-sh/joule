@@ -16,6 +16,7 @@ joule whoami --key KEY [--api URL]
 joule ready [--api URL] [--pool-vram-gib N] [--backends N]
 joule load [--model TAG] [--quant ID] [--mem-mib N]
 joule seed-blob --path FILE [--kind KIND] [--name NAME]
+joule blobs [--json] [--api URL]
 joule software status|apply [--dest PATH]
 joule broadcast keygen|sign|inject|plan-chunks …
 joule lab [options]

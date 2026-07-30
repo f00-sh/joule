@@ -805,6 +805,10 @@ async fn run_agent(
                             "operator message: {:?} id={} body_sha256={}",
                             envelope.kind, envelope.id, envelope.body_sha256
                         );
+                        // Append-only local journal (audit trail; not a second CDN).
+                        if let Err(e) = append_broadcast_journal(&envelope) {
+                            warn!(error = %e, "broadcast journal write failed");
+                        }
                         // Allow-listed actions: notices print; model/software updates
                         // trigger peer-seed of digests only (never full-model force-download).
                         match envelope.kind {
@@ -1094,6 +1098,28 @@ async fn run_agent(
 }
 
 /// After a peer seed lands, try to complete weight prepare + load if this hash is in the manifest.
+fn append_broadcast_journal(envelope: &SignedEnvelope) -> Result<()> {
+    use std::io::Write;
+    let dir = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".local/share/joule/broadcasts"))
+        .unwrap_or_else(|| PathBuf::from("./.joule-broadcasts"));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("journal.ndjson");
+    let line = serde_json::json!({
+        "id": envelope.id,
+        "kind": format!("{:?}", envelope.kind),
+        "issued_at_unix_ms": envelope.issued_at_unix_ms,
+        "body_sha256": envelope.body_sha256,
+        "body_json": envelope.body_json,
+    });
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(f, "{line}")?;
+    Ok(())
+}
+
 async fn try_load_after_blob(
     store: &WeightsStore,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,

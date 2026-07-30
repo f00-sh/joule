@@ -1,6 +1,6 @@
 # joule — distribution law v0 (website only · peer-seeded)
 
-**Status:** active  
+**Status:** active (v0 code: blob store, BlobsHave/Want/Provide/Chunk, seed-blob CLI, peer e2e)  
 **Product stance:** f00 / `joule.f00.sh` is a **project website** (story, stats glass, docs). It is **not** an app store, weight CDN, or update server.
 
 ---

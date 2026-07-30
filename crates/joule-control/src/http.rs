@@ -302,6 +302,7 @@ async fn operator_status(State(app): State<App>) -> impl IntoResponse {
         "active_replica_factor": g.active_replica_factor,
         "blob_digests": g.blobs.catalog().len(),
         "broadcasts_recent": g.broadcasts.recent().len(),
+        "revoked_envelopes": g.broadcasts.revoked_count(),
         "operator_pubkey_configured": crate::broadcast::operator_pubkey_hex().is_some(),
         "law": "pause/resume/policy via signed operator bus; digests peer-seeded",
     }))
