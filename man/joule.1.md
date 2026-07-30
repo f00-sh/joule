@@ -88,6 +88,8 @@ installs the staged binary (hash-checked).
 ### joule broadcast
 
 Operator tools: keygen, sign body JSON, inject into control, demo chunk plan.
+Pin `JOULE_OPERATOR_PUBKEY` in production. Agents re-verify body hash and
+signature. Joiners receive recent envelopes and re-planned digests.
 
 ### joule capacity
 
