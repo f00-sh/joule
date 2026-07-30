@@ -83,6 +83,14 @@ cargo run -p joule -- broadcast plan-chunks --chunks 12 --nodes 5
 - Every donor serves that model; schedulers use the full healthy pool.
 - Browser is dashboard only; compute is native `joule agent`.
 
+## Remote status (Proton)
+
+- **Standing order:** after material milestones, copy status / docs / verification logs into  
+  `/home/glenda/Documents/Proton/joule/` (remote-checkable via Proton sync).
+- Run: `/home/glenda/Documents/Proton/joule/sync-from-repo.sh`
+- Append dated entries to `STATUS_LOG.md` (secrets stay there / `~/.config/f00/joule/` — never git).
+- Layout: `docs/`, `evidence/implementer/`, `logs/`, `AGENT_STANDING_ORDERS.md`.
+
 ## f00 membership
 
 - Org: `f00-sh`
