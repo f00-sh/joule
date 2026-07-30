@@ -3,7 +3,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use joule_cluster::Cluster;
-use joule_control::ControlState;
 use joule_ledger::{estimate_contribution_millijoules, estimate_usage_millijoules, Ledger};
 use joule_proto::{
     decode_line, encode_line, ClusterCapacity, DeviceClass, Envelope, Message, NodeCaps, NodeId,
@@ -32,14 +31,20 @@ struct Cli {
 enum Commands {
     /// Print protocol and build identity.
     Version,
-    /// Run the control plane (agent TCP + HTTP API).
+    /// Run the control plane (agent TCP + HTTP API + dashboard).
     Control {
         /// Agent protocol listen address.
         #[arg(long, default_value = "127.0.0.1:7701")]
         agent_listen: SocketAddr,
-        /// HTTP API listen address (capacity + chat).
+        /// HTTP API listen address (capacity + chat + dashboard).
         #[arg(long, default_value = "127.0.0.1:7700")]
         http_listen: SocketAddr,
+        /// Persist accounts/keys/balances here (default: $JOULE_DATA_DIR or ~/.local/share/joule).
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Do not load/save state on disk.
+        #[arg(long, default_value_t = false)]
+        ephemeral: bool,
     },
     /// Join the cluster as a donor agent (earn millijoules).
     Agent {
@@ -86,6 +91,9 @@ enum Commands {
         model: String,
         #[arg(long)]
         prompt: String,
+        /// Request SSE stream (prints token chunks).
+        #[arg(long, default_value_t = false)]
+        stream: bool,
     },
     /// Show account balance / donating status.
     Whoami {
@@ -130,14 +138,27 @@ async fn main() -> Result<()> {
         Commands::Control {
             agent_listen,
             http_listen,
+            data_dir,
+            ephemeral,
         } => {
-            let state = ControlState::shared();
-            info!(%agent_listen, %http_listen, "starting control plane");
+            let dir = if ephemeral {
+                None
+            } else {
+                Some(data_dir.unwrap_or_else(joule_control::default_data_dir))
+            };
+            let state = joule_control::load_or_init_state(dir.clone())?;
+            info!(%agent_listen, %http_listen, ?dir, "starting control plane");
             println!("joule control");
-            println!("  agents → {agent_listen}");
-            println!("  http   → http://{http_listen}");
-            println!("  capacity GET /v1/cluster/capacity");
-            println!("  chat     POST /v1/chat/completions");
+            println!("  agents    → {agent_listen}");
+            println!("  http      → http://{http_listen}");
+            println!("  dashboard → http://{http_listen}/");
+            println!("  capacity  GET /v1/cluster/capacity");
+            println!("  chat      POST /v1/chat/completions");
+            if let Some(d) = &dir {
+                println!("  data      → {}", d.display());
+            } else {
+                println!("  data      → (ephemeral)");
+            }
             joule_control::serve(state, agent_listen, http_listen).await?;
         }
         Commands::Agent {
@@ -160,8 +181,9 @@ async fn main() -> Result<()> {
             key,
             model,
             prompt,
+            stream,
         } => {
-            run_chat(api, key, model, prompt).await?;
+            run_chat(api, key, model, prompt, stream).await?;
         }
         Commands::Whoami { api, key } => {
             run_whoami(api, key).await?;
@@ -302,11 +324,18 @@ async fn run_capacity(api: String, peers: usize, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_chat(api: String, key: String, model: String, prompt: String) -> Result<()> {
+async fn run_chat(
+    api: String,
+    key: String,
+    model: String,
+    prompt: String,
+    stream: bool,
+) -> Result<()> {
     let url = format!("{}/v1/chat/completions", api.trim_end_matches('/'));
     let body = serde_json::json!({
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
+        "stream": stream,
     });
     let client = reqwest::Client::new();
     let resp = client
@@ -317,10 +346,33 @@ async fn run_chat(api: String, key: String, model: String, prompt: String) -> Re
         .await
         .context("chat request")?;
     let status = resp.status();
-    let text = resp.text().await?;
     if !status.is_success() {
+        let text = resp.text().await?;
         bail!("chat failed {status}: {text}");
     }
+    if stream {
+        let text = resp.text().await?;
+        // SSE: data: {...}\n\n — print content deltas
+        for line in text.lines() {
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if data.trim() == "[DONE]" {
+                break;
+            }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(c) = v
+                    .pointer("/choices/0/delta/content")
+                    .and_then(|x| x.as_str())
+                {
+                    print!("{c}");
+                }
+            }
+        }
+        println!();
+        return Ok(());
+    }
+    let text = resp.text().await?;
     let v: serde_json::Value = serde_json::from_str(&text)?;
     if let Some(content) = v
         .pointer("/choices/0/message/content")

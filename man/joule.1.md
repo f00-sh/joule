@@ -8,7 +8,7 @@ joule — donate idle compute to a shared pool; earn millijoules; call open-weig
 
 ```text
 joule version
-joule control [--agent-listen ADDR] [--http-listen ADDR]
+joule control [--agent-listen ADDR] [--http-listen ADDR] [--data-dir PATH] [--ephemeral]
 joule agent --account NAME [--control HOST:PORT] [--model TAG] [--mem-mib N] [--device gpu|metal|cpu]
 joule capacity [--api URL] [--peers N] [--json]
 joule chat --key KEY [--api URL] [--model TAG] --prompt TEXT
@@ -35,21 +35,25 @@ are implemented.
 
 ### joule control
 
-Run the control plane: agent TCP registry + HTTP API.
+Run the control plane: agent TCP registry + HTTP API + live dashboard.
 
 ```text
 --agent-listen ADDR   default 127.0.0.1:7701
 --http-listen ADDR    default 127.0.0.1:7700
+--data-dir PATH       persist keys/balances (default ~/.local/share/joule)
+--ephemeral           no disk state
 ```
 
 HTTP routes:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/v1/cluster/capacity` | Live pool aggregate (dashboard) |
+| GET | `/` | Live HTML dashboard |
+| GET | `/v1/cluster/capacity` | Live pool aggregate |
+| GET | `/v1/cluster/nodes` | Donor node list |
 | GET | `/v1/models` | Models offered by healthy donors |
 | GET | `/v1/account` | Balance + donating flag (Bearer key) |
-| POST | `/v1/chat/completions` | OpenAI-shaped chat (Bearer key) |
+| POST | `/v1/chat/completions` | OpenAI-shaped chat; `stream: true` for SSE |
 
 ### joule agent
 
@@ -64,7 +68,7 @@ synthetic offline demo.
 ### joule chat / whoami
 
 Client helpers for the HTTP API. Chat requires a key whose account is
-**currently donating** (healthy agent online).
+**currently donating** (healthy agent online). Pass `--stream` for SSE chunks.
 
 ### joule lab / credits
 

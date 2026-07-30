@@ -97,6 +97,16 @@ impl Ledger {
     pub fn events(&self) -> &[CreditEvent] {
         &self.events
     }
+
+    /// Snapshot balances for persistence.
+    pub fn balances(&self) -> &HashMap<String, Millijoule> {
+        &self.balances
+    }
+
+    /// Restore balances from a snapshot (does not replay events).
+    pub fn restore_balances(&mut self, balances: HashMap<String, Millijoule>) {
+        self.balances = balances;
+    }
 }
 
 /// Rough default pricing: completion tokens cost more than prompt tokens.

@@ -42,9 +42,11 @@ cargo build --release -p joule
 
 ```text
 joule control
+# open http://127.0.0.1:7700/ for the live dashboard
 joule agent --account alice
 joule capacity --api http://127.0.0.1:7700 --json
 joule chat --key joule_… --prompt "hello"
+joule chat --key joule_… --stream --prompt "hello"
 ```
 
 See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.

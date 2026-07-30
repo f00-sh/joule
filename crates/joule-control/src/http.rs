@@ -1,29 +1,42 @@
-//! HTTP API: capacity dashboard feed + OpenAI-compatible chat.
+//! HTTP API: dashboard, capacity, OpenAI-compatible chat (incl. SSE stream).
 
-use crate::state::{AccountInfo, SharedState};
+use crate::state::{AccountInfo, NodeView, SharedState};
 use crate::tcp::dispatch_infer;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::stream::Stream;
 use joule_proto::ClusterCapacity;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::convert::Infallible;
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+
 pub fn router(state: SharedState) -> Router {
     Router::new()
+        .route("/", get(dashboard))
+        .route("/dashboard", get(dashboard))
         .route("/healthz", get(healthz))
         .route("/v1/cluster/capacity", get(capacity))
+        .route("/v1/cluster/nodes", get(nodes))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(state)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
+}
+
+async fn dashboard() -> Html<&'static str> {
+    Html(DASHBOARD_HTML)
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -34,6 +47,19 @@ async fn capacity(State(state): State<SharedState>) -> Json<ClusterCapacity> {
     let mut g = state.write().await;
     g.prune();
     Json(g.cluster.capacity())
+}
+
+#[derive(Serialize)]
+struct NodesResponse {
+    nodes: Vec<NodeView>,
+}
+
+async fn nodes(State(state): State<SharedState>) -> Json<NodesResponse> {
+    let mut g = state.write().await;
+    g.prune();
+    Json(NodesResponse {
+        nodes: g.node_views(),
+    })
 }
 
 async fn models(State(state): State<SharedState>) -> impl IntoResponse {
@@ -133,17 +159,31 @@ struct Usage {
     total_tokens: u32,
 }
 
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn map_err(e: String) -> (StatusCode, Json<Value>) {
+    let status = if e.contains("contribution required") {
+        StatusCode::FORBIDDEN
+    } else if e.contains("no healthy workers") {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if e.contains("insufficient balance") {
+        StatusCode::PAYMENT_REQUIRED
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    (status, Json(json!({"error": e})))
+}
+
 async fn chat_completions(
     State(state): State<SharedState>,
     headers: HeaderMap,
     Json(body): Json<ChatRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
-    if body.stream == Some(true) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "stream not implemented yet"})),
-        ));
-    }
+) -> Result<Response, (StatusCode, Json<Value>)> {
     let key = bearer_key(&headers).ok_or_else(|| {
         (
             StatusCode::UNAUTHORIZED,
@@ -170,43 +210,84 @@ async fn chat_completions(
         .collect::<Vec<_>>()
         .join("\n");
     let max_tokens = body.max_tokens.unwrap_or(256);
+    let stream = body.stream.unwrap_or(false);
 
-    match dispatch_infer(&state, &account, &model, &prompt, max_tokens).await {
-        Ok(out) => {
-            let created = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let resp = ChatResponse {
-                id: format!("chatcmpl-{}", Uuid::new_v4()),
-                object: "chat.completion",
-                created,
-                model,
-                choices: vec![Choice {
-                    index: 0,
-                    message: OutMessage {
-                        role: "assistant",
-                        content: out.text,
-                    },
-                    finish_reason: "stop",
-                }],
-                usage: Usage {
-                    prompt_tokens: out.prompt_tokens,
-                    completion_tokens: out.completion_tokens,
-                    total_tokens: out.prompt_tokens + out.completion_tokens,
-                },
-            };
-            Ok(Json(resp).into_response())
-        }
-        Err(e) => {
-            let status = if e.contains("contribution required") {
-                StatusCode::FORBIDDEN
-            } else if e.contains("no healthy workers") {
-                StatusCode::SERVICE_UNAVAILABLE
+    let out = dispatch_infer(&state, &account, &model, &prompt, max_tokens)
+        .await
+        .map_err(map_err)?;
+
+    let id = format!("chatcmpl-{}", Uuid::new_v4());
+    let created = now_secs();
+
+    if stream {
+        let stream = sse_chat_stream(id, created, model, out.text);
+        return Ok(Sse::new(stream)
+            .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+            .into_response());
+    }
+
+    let resp = ChatResponse {
+        id,
+        object: "chat.completion",
+        created,
+        model,
+        choices: vec![Choice {
+            index: 0,
+            message: OutMessage {
+                role: "assistant",
+                content: out.text,
+            },
+            finish_reason: "stop",
+        }],
+        usage: Usage {
+            prompt_tokens: out.prompt_tokens,
+            completion_tokens: out.completion_tokens,
+            total_tokens: out.prompt_tokens + out.completion_tokens,
+        },
+    };
+    Ok(Json(resp).into_response())
+}
+
+fn sse_chat_stream(
+    id: String,
+    created: u64,
+    model: String,
+    text: String,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    async_stream::stream! {
+        // OpenAI-style chunked deltas by whitespace tokens.
+        let tokens: Vec<&str> = text.split_inclusive(char::is_whitespace).collect();
+        for (i, tok) in tokens.iter().enumerate() {
+            let delta = if i == 0 {
+                json!({"role": "assistant", "content": tok})
             } else {
-                StatusCode::BAD_REQUEST
+                json!({"content": tok})
             };
-            Err((status, Json(json!({"error": e}))))
+            let chunk = json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": null
+                }]
+            });
+            yield Ok(Event::default().data(chunk.to_string()));
         }
+        let done = json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }]
+        });
+        yield Ok(Event::default().data(done.to_string()));
+        yield Ok(Event::default().data("[DONE]"));
     }
 }

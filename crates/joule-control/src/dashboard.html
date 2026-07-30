@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>joule — distributed compute</title>
+  <style>
+    :root {
+      --bg: #090909;
+      --fg: #ede6de;
+      --muted: #8a8580;
+      --accent: #d44a18;
+      --sky: #1e78c8;
+      --box: #141414;
+      --border: #2a2a2a;
+      --ok: #3d9a5f;
+      --bad: #a33;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--bg);
+      color: var(--fg);
+      min-height: 100vh;
+    }
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 1.25rem 1.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+    h1 { margin: 0; font-size: 1.25rem; letter-spacing: 0.04em; }
+    h1 span { color: var(--accent); }
+    .sub { color: var(--muted); font-size: 0.85rem; }
+    main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+    .card {
+      background: var(--box);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      padding: 1rem;
+    }
+    .card .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
+    .card .value { font-size: 1.75rem; margin-top: 0.35rem; color: var(--fg); }
+    .card .value.accent { color: var(--accent); }
+    .card .value.sky { color: var(--sky); }
+    section h2 {
+      font-size: 0.85rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin: 0 0 0.75rem;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    .pill {
+      display: inline-block;
+      padding: 0.1rem 0.45rem;
+      border-radius: 2px;
+      font-size: 0.75rem;
+    }
+    .pill.ok { background: #132a1c; color: var(--ok); }
+    .pill.bad { background: #2a1212; color: #e88; }
+    .models { color: var(--sky); }
+    footer {
+      margin-top: 2rem;
+      color: var(--muted);
+      font-size: 0.75rem;
+      border-top: 1px solid var(--border);
+      padding-top: 1rem;
+    }
+    a { color: var(--sky); }
+    .err { color: #e88; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1><span>joule</span> cluster</h1>
+      <div class="sub">live distributed compute · contribute to consume</div>
+    </div>
+    <div class="sub" id="updated">connecting…</div>
+  </header>
+  <main>
+    <div class="grid" id="stats">
+      <div class="card"><div class="label">Healthy nodes</div><div class="value accent" id="n-healthy">—</div></div>
+      <div class="card"><div class="label">Total nodes</div><div class="value" id="n-total">—</div></div>
+      <div class="card"><div class="label">Healthy VRAM</div><div class="value sky" id="mem-healthy">—</div></div>
+      <div class="card"><div class="label">Throughput class Σ</div><div class="value" id="tput">—</div></div>
+      <div class="card"><div class="label">GPU / Metal / CPU</div><div class="value" id="devices">—</div></div>
+      <div class="card"><div class="label">Models online</div><div class="value models" id="models">—</div></div>
+    </div>
+
+    <section class="card">
+      <h2>Donor nodes</h2>
+      <div id="nodes-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Account</th>
+              <th>Device</th>
+              <th>Mem MiB</th>
+              <th>Load</th>
+              <th>Status</th>
+              <th>Models</th>
+            </tr>
+          </thead>
+          <tbody id="nodes"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>
+      API: <a href="/v1/cluster/capacity">/v1/cluster/capacity</a> ·
+      <a href="/v1/models">/v1/models</a> ·
+      chat <code>POST /v1/chat/completions</code> ·
+      refresh 3s · engine may be stub until weights load
+      <div id="error" class="err"></div>
+    </footer>
+  </main>
+  <script>
+    function fmtGiB(mib) {
+      if (mib == null) return "—";
+      return (mib / 1024).toFixed(1) + " GiB";
+    }
+    async function refresh() {
+      const err = document.getElementById("error");
+      try {
+        const [cap, nodes] = await Promise.all([
+          fetch("/v1/cluster/capacity").then(r => r.json()),
+          fetch("/v1/cluster/nodes").then(r => r.json()),
+        ]);
+        document.getElementById("n-healthy").textContent = cap.nodes_healthy;
+        document.getElementById("n-total").textContent = cap.nodes_total;
+        document.getElementById("mem-healthy").textContent = fmtGiB(cap.mem_mib_healthy);
+        document.getElementById("tput").textContent = cap.throughput_class_sum;
+        document.getElementById("devices").textContent =
+          cap.nodes_gpu + " / " + cap.nodes_metal + " / " + cap.nodes_cpu;
+        document.getElementById("models").textContent =
+          (cap.models_available && cap.models_available.length)
+            ? cap.models_available.join(", ")
+            : "(none)";
+        const tb = document.getElementById("nodes");
+        tb.innerHTML = "";
+        (nodes.nodes || []).forEach(n => {
+          const tr = document.createElement("tr");
+          tr.innerHTML =
+            "<td>" + n.account + "</td>" +
+            "<td>" + n.device + "</td>" +
+            "<td>" + n.mem_mib + "</td>" +
+            "<td>" + (n.load != null ? n.load.toFixed(2) : "—") + "</td>" +
+            "<td><span class=\"pill " + (n.healthy ? "ok" : "bad") + "\">" +
+              (n.healthy ? "healthy" : "stale") + "</span></td>" +
+            "<td class=\"models\">" + (n.models || []).join(", ") + "</td>";
+          tb.appendChild(tr);
+        });
+        if (!(nodes.nodes || []).length) {
+          tb.innerHTML = "<tr><td colspan=\"6\" style=\"color:var(--muted)\">No donors yet — run <code>joule agent --account …</code></td></tr>";
+        }
+        document.getElementById("updated").textContent =
+          "updated " + new Date().toLocaleTimeString();
+        err.textContent = "";
+      } catch (e) {
+        err.textContent = "refresh failed: " + e;
+      }
+    }
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

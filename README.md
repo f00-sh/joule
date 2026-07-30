@@ -58,12 +58,14 @@ cargo build --release -p joule
 
 ## Quick start (local pool)
 
-Terminal 1 — control plane (capacity API + chat + agent registry):
+Terminal 1 — control plane (dashboard + capacity API + chat + agent registry):
 
 ```text
 cargo run -p joule --release -- control
-# agents → 127.0.0.1:7701
-# http   → http://127.0.0.1:7700
+# agents    → 127.0.0.1:7701
+# http      → http://127.0.0.1:7700
+# dashboard → http://127.0.0.1:7700/
+# data      → ~/.local/share/joule  (override with --data-dir / --ephemeral)
 ```
 
 Terminal 2 — donate compute (earn millijoules; prints API key):
@@ -75,14 +77,16 @@ cargo run -p joule --release -- agent --account alice --model kimi-open-q4
 Terminal 3 — live pool size + use the AI:
 
 ```text
+# open http://127.0.0.1:7700/  — live capacity + donor table (auto-refresh)
 joule capacity --api http://127.0.0.1:7700 --json
 joule whoami --key joule_…
 joule chat --key joule_… --prompt "hello from the pool"
+joule chat --key joule_… --stream --prompt "stream me"
 ```
 
 **Law:** no active donor agent for that account → chat is forbidden. Invalid keys → 401.
 
-Inference is still a **stub engine** until a real model backend lands; the pool, capacity dashboard feed, and contribute-to-consume path are real.
+Inference is still a **stub engine** until a real model backend lands; the pool, dashboard, streaming chat, and contribute-to-consume path are real.
 
 ## Usage
 

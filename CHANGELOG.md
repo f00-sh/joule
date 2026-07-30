@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Live dashboard** at `GET /` (capacity + donor table, 3s refresh)
+- `GET /v1/cluster/nodes` for dashboard node list
+- **SSE streaming** chat (`stream: true` / `joule chat --stream`)
+- **Persistence**: accounts, API keys, balances under `--data-dir` / `~/.local/share/joule`
+- Integration tests: control + agent + capacity + chat + stream + persist
 - **Control plane** (`joule control`): agent TCP + HTTP API
 - **Donor agent** (`joule agent`): join, heartbeat, run assigned work, earn millijoules
 - Live capacity API: `GET /v1/cluster/capacity`
