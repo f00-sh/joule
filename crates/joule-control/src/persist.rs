@@ -36,10 +36,13 @@ pub struct Snapshot {
     pub heartbeat_mint_mj: Option<i64>,
     #[serde(default)]
     pub dual_verify_every: Option<u64>,
+    /// Recent operator envelopes (for dashboard after restart; re-verify on load if key set).
+    #[serde(default)]
+    pub broadcasts: Vec<joule_proto::SignedEnvelope>,
 }
 
 impl Snapshot {
-    pub const VERSION: u32 = 4;
+    pub const VERSION: u32 = 5;
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -99,6 +102,7 @@ pub fn save(dir: &Path, state: &ControlState) -> Result<()> {
         service_live: state.service_live,
         heartbeat_mint_mj: Some(state.heartbeat_mint_mj),
         dual_verify_every: Some(state.dual_verify_every),
+        broadcasts: state.broadcasts.recent().to_vec(),
     };
     let path = snapshot_path(dir);
     let tmp = path.with_extension("json.tmp");
@@ -149,5 +153,10 @@ pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
     }
     if let Some(v) = snap.dual_verify_every {
         state.dual_verify_every = v;
+    }
+    // Re-accept stored broadcasts (sig checked if key pinned).
+    let now = crate::broadcast::now_ms();
+    for env in snap.broadcasts {
+        let _ = state.broadcasts.accept(env, now);
     }
 }
