@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Agents use ClusterEngine**: install lab-tiny tensors into infer/challenge path when peer-seeded/loaded; challenges accept tensor completions
 - Operator **revoke** envelope id blacklist; agent broadcast journal (ndjson)
 - **dual_verify** wired: every Nth chat runs a free second pool pass and logs mismatch
+- Joining agents receive recent operator envelopes + rebalance FetchDigests; agents verify body hash + operator sig locally when key pinned
 - **Weight download/verify**: HTTP(S) + `repo://` with sha256; `weights.published=true`
 - **lab-tiny** fixture + **kimi-k3-meta** (Moonshot HF configs); tensor-backed generate (`decode.rs`)
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
