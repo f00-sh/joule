@@ -100,10 +100,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     g.broadcasts.recent().to_vec()
                 };
                 for env in recent {
-                    let out = Envelope::new(
-                        id.clone(),
-                        Message::OperatorBroadcast { envelope: env },
-                    );
+                    let out =
+                        Envelope::new(id.clone(), Message::OperatorBroadcast { envelope: env });
                     let _ = tx.send(out);
                 }
                 // Re-nudge under-replicated digests (may assign this joiner).
