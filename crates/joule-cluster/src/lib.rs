@@ -3,8 +3,13 @@
 //! Internet-wide volunteer pool. Nodes join the control plane over any path.
 //! Scheduling of free/loaded compute lives in [`scheduler`].
 
+mod chunks;
 mod scheduler;
 
+pub use chunks::{
+    live_replica_counts, plan_redundant_chunks, plan_survives, required_digests_for_node,
+    ChunkHold, ChunkRole, ModelChunk, NodeChunkPlan, RedundantChunkPlan, DEFAULT_REPLICA_FACTOR,
+};
 pub use scheduler::{
     compute_state, free_slots, free_stream_slots, max_slots, max_streams, pool_max_streams,
     ComputeState, NodeSchedule, SchedulerSnapshot, DEFAULT_MODEL_LAYERS, STREAM_BUDGET_MIB,

@@ -2,11 +2,12 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use joule_cluster::Cluster;
+use joule_cluster::{plan_redundant_chunks, Cluster, ModelChunk};
+use joule_control::{body_sha256_hex, now_ms, operator_preimage};
 use joule_ledger::{estimate_contribution_millijoules, estimate_usage_millijoules, Ledger};
 use joule_proto::{
     decode_line, encode_line, BlobMeta, ClusterCapacity, DeviceClass, Envelope, Message, NodeCaps,
-    NodeId, CLUSTER_MODEL,
+    NodeId, OperatorKind, SignedEnvelope, CLUSTER_MODEL,
 };
 use joule_runtime::{
     load_model, readiness_for_pool_ex, Engine, InferRequest, ManifestFile, RuntimeFlags,
@@ -145,6 +146,59 @@ enum Commands {
         #[arg(long, default_value_t = 8192)]
         mem_mib: u32,
     },
+    /// Operator broadcast bus (sign / inject / plan chunk placement).
+    Broadcast {
+        #[command(subcommand)]
+        cmd: BroadcastCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum BroadcastCmd {
+    /// Generate operator ed25519 keypair (sec not for git).
+    Keygen {
+        #[arg(long, default_value = "operator.ed25519.sec")]
+        secret: PathBuf,
+        #[arg(long, default_value = "operator.ed25519.pub")]
+        public: PathBuf,
+    },
+    /// Sign a body JSON file into a SignedEnvelope.
+    Sign {
+        /// notice | software_update | model_update | policy | …
+        #[arg(long, default_value = "notice")]
+        kind: String,
+        /// Path to JSON body.
+        #[arg(long)]
+        body: PathBuf,
+        /// Secret key file (32-byte hex).
+        #[arg(long)]
+        secret: PathBuf,
+        /// Write envelope JSON here (default stdout).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Inject a signed envelope into a running control (floods agents).
+    Inject {
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        /// Path to SignedEnvelope JSON from `broadcast sign`.
+        #[arg(long)]
+        envelope: PathBuf,
+    },
+    /// Demo: print redundant chunk plan (who stores which digests — not full model).
+    PlanChunks {
+        /// Number of synthetic chunks.
+        #[arg(long, default_value_t = 12)]
+        chunks: u32,
+        /// Number of donor nodes.
+        #[arg(long, default_value_t = 5)]
+        nodes: u32,
+        /// Replicas per chunk (overlap).
+        #[arg(long, default_value_t = 2)]
+        replicas: u32,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -244,7 +298,159 @@ async fn main() -> Result<()> {
         } => {
             run_load(model, quant, mem_mib)?;
         }
+        Commands::Broadcast { cmd } => match cmd {
+            BroadcastCmd::Keygen { secret, public } => broadcast_keygen(secret, public)?,
+            BroadcastCmd::Sign {
+                kind,
+                body,
+                secret,
+                out,
+            } => broadcast_sign(kind, body, secret, out)?,
+            BroadcastCmd::Inject { api, envelope } => {
+                broadcast_inject(api, envelope).await?;
+            }
+            BroadcastCmd::PlanChunks {
+                chunks,
+                nodes,
+                replicas,
+                json,
+            } => broadcast_plan_chunks(chunks, nodes, replicas, json)?,
+        },
     }
+    Ok(())
+}
+
+fn broadcast_keygen(secret: PathBuf, public: PathBuf) -> Result<()> {
+    use ed25519_dalek::SigningKey;
+    use rand::rngs::OsRng;
+    let sk = SigningKey::generate(&mut OsRng);
+    let sec_hex = hex::encode(sk.to_bytes());
+    let pub_hex = hex::encode(sk.verifying_key().to_bytes());
+    std::fs::write(&secret, format!("{sec_hex}\n"))?;
+    std::fs::write(
+        &public,
+        format!("# joule operator ed25519 public key — pin in JOULE_OPERATOR_PUBKEY\n{pub_hex}\n"),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600));
+    }
+    println!("wrote secret {}", secret.display());
+    println!("wrote public {}", public.display());
+    println!("export JOULE_OPERATOR_PUBKEY={pub_hex}");
+    println!("(never commit the secret file)");
+    Ok(())
+}
+
+fn parse_operator_kind(s: &str) -> Result<OperatorKind> {
+    Ok(match s.to_ascii_lowercase().as_str() {
+        "notice" => OperatorKind::Notice,
+        "software_update" | "update" => OperatorKind::SoftwareUpdate,
+        "model_update" | "model" => OperatorKind::ModelUpdate,
+        "policy" => OperatorKind::Policy,
+        "pause_service" | "pause" => OperatorKind::PauseService,
+        "resume_service" | "resume" => OperatorKind::ResumeService,
+        "revoke" => OperatorKind::Revoke,
+        other => bail!("unknown kind {other}"),
+    })
+}
+
+fn broadcast_sign(
+    kind: String,
+    body: PathBuf,
+    secret: PathBuf,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    use ed25519_dalek::{Signer, SigningKey};
+    let kind = parse_operator_kind(&kind)?;
+    let body_json = std::fs::read_to_string(&body)?;
+    let sec_hex = std::fs::read_to_string(&secret)?;
+    let sec_bytes = hex::decode(sec_hex.trim()).context("secret key hex")?;
+    anyhow::ensure!(sec_bytes.len() == 32, "secret must be 32 bytes");
+    let mut sb = [0u8; 32];
+    sb.copy_from_slice(&sec_bytes);
+    let sk = SigningKey::from_bytes(&sb);
+    let mut env = SignedEnvelope {
+        id: uuid::Uuid::new_v4(),
+        issued_at_unix_ms: now_ms(),
+        expires_at_unix_ms: None,
+        kind,
+        body_sha256: body_sha256_hex(body_json.trim()),
+        body_json: body_json.trim().to_string(),
+        sig_ed25519_hex: String::new(),
+        openpgp_sig: None,
+    };
+    let pre = operator_preimage(&env);
+    env.sig_ed25519_hex = hex::encode(sk.sign(&pre).to_bytes());
+    let text = serde_json::to_string_pretty(&env)?;
+    if let Some(p) = out {
+        std::fs::write(p, format!("{text}\n"))?;
+    } else {
+        println!("{text}");
+    }
+    Ok(())
+}
+
+async fn broadcast_inject(api: String, envelope: PathBuf) -> Result<()> {
+    let raw = std::fs::read_to_string(&envelope)?;
+    let env: SignedEnvelope = serde_json::from_str(&raw)?;
+    let base = api.trim_end_matches('/');
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/v1/broadcasts/inject"))
+        .json(&env)
+        .send()
+        .await?
+        .error_for_status()?;
+    let v: serde_json::Value = resp.json().await?;
+    println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
+fn broadcast_plan_chunks(chunks: u32, nodes: u32, replicas: u32, json: bool) -> Result<()> {
+    anyhow::ensure!(nodes >= 1 && chunks >= 1, "need nodes>=1 chunks>=1");
+    let node_list: Vec<(NodeId, u32)> = (0..nodes)
+        .map(|i| (NodeId::new(), 8192 + i * 1024))
+        .collect();
+    let ch: Vec<ModelChunk> = (0..chunks)
+        .map(|i| ModelChunk {
+            index: i,
+            path: format!("chunk-{i:03}.safetensors"),
+            sha256: format!("{:064x}", i as u64 + 1),
+            size: 512 * 1024 * 1024, // 512 MiB illustrative
+            layer_start: i * 10,
+            layer_end: i * 10 + 9,
+        })
+        .collect();
+    let plan = plan_redundant_chunks(&node_list, &ch, replicas).map_err(|e| anyhow::anyhow!(e))?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&plan)?);
+        return Ok(());
+    }
+    println!(
+        "redundant chunk plan: {} chunks × {} nodes, replica_factor={}",
+        plan.chunk_count, plan.node_count, plan.replica_factor
+    );
+    println!("(no node stores the full model; each chunk has overlapping holders)\n");
+    for np in &plan.by_node {
+        let prim = np
+            .holds
+            .iter()
+            .filter(|h| matches!(h.role, joule_cluster::ChunkRole::Primary))
+            .count();
+        let rep = np.holds.len() - prim;
+        println!(
+            "node {}  mem≈{} MiB  holds {} chunks ({} primary + {} replica)  ~{:.1} GiB",
+            np.node,
+            np.verified_mem_mib,
+            np.holds.len(),
+            prim,
+            rep,
+            np.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+    }
+    println!("\nIf any single node drops, every chunk still has a live holder (r≥2).");
     Ok(())
 }
 
@@ -448,16 +654,60 @@ async fn run_agent(
                         info!(delta_millijoules, %reason, "credit event");
                     }
                     Message::OperatorBroadcast { envelope } => {
-                        // Flood is control-driven; log allow-listed kinds. Full handlers (update/model) next.
                         info!(
                             id = %envelope.id,
                             kind = ?envelope.kind,
-                            "operator broadcast (verified upstream if JOULE_OPERATOR_PUBKEY set)"
+                            "operator broadcast"
                         );
                         println!(
                             "operator message: {:?} id={} body_sha256={}",
                             envelope.kind, envelope.id, envelope.body_sha256
                         );
+                        // Allow-listed actions: notices print; model/software updates
+                        // trigger peer-seed of digests only (never full-model force-download).
+                        match envelope.kind {
+                            OperatorKind::Notice => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(
+                                    &envelope.body_json,
+                                ) {
+                                    if let Some(t) = v.get("title").and_then(|x| x.as_str()) {
+                                        println!("NOTICE: {t}");
+                                    }
+                                    if let Some(b) = v.get("body").and_then(|x| x.as_str()) {
+                                        println!("{b}");
+                                    }
+                                }
+                            }
+                            OperatorKind::ModelUpdate => {
+                                println!(
+                                    "model_update: fetch only YOUR assigned chunk digests from peers"
+                                );
+                                println!(
+                                    "(see joule broadcast plan-chunks — replica overlap, not full model)"
+                                );
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(
+                                    &envelope.body_json,
+                                ) {
+                                    if let Some(files) = v
+                                        .pointer("/quants/0/files")
+                                        .and_then(|x| x.as_array())
+                                    {
+                                        println!(
+                                            "  announced files: {} (sha256 each; seed/swarm)",
+                                            files.len()
+                                        );
+                                    }
+                                }
+                            }
+                            OperatorKind::SoftwareUpdate => {
+                                println!(
+                                    "software_update: peer-fetch matching target sha256 only"
+                                );
+                            }
+                            _ => {
+                                println!("  (stored/relayed; handler for this kind pending)");
+                            }
+                        }
                     }
                     other => {
                         warn!(msg = ?other, "ignored control message");

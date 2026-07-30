@@ -10,7 +10,10 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::Stream;
-use joule_proto::{resolve_cluster_model, ClusterCapacity, CLUSTER_MODEL, CLUSTER_MODEL_LABEL};
+use joule_proto::SignedEnvelope;
+use joule_proto::{
+    resolve_cluster_model, ClusterCapacity, Envelope, Message, CLUSTER_MODEL, CLUSTER_MODEL_LABEL,
+};
 use joule_runtime::{readiness_for_pool_ex, RuntimeFlags};
 use serde::{Deserialize, Serialize};
 // Query + Path already imported above
@@ -41,6 +44,7 @@ pub fn router(app: App) -> Router {
         .route("/v1/blobs", get(blob_catalog))
         .route("/v1/blobs/{sha256}", get(blob_locate))
         .route("/v1/broadcasts", get(list_broadcasts))
+        .route("/v1/broadcasts/inject", post(inject_broadcast))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -262,6 +266,52 @@ async fn list_broadcasts(State(app): State<App>) -> impl IntoResponse {
         "law": "signed by operator key; swarm relays; f00 is not a push CDN",
         "messages": g.broadcasts.recent(),
     }))
+}
+
+/// Inject a pre-signed operator envelope (any node with HTTP access to a control).
+/// Verifies signature when JOULE_OPERATOR_PUBKEY is configured, then floods agents.
+async fn inject_broadcast(
+    State(app): State<App>,
+    Json(envelope): Json<SignedEnvelope>,
+) -> impl IntoResponse {
+    let accept = {
+        let mut g = app.state.write().await;
+        let now = crate::broadcast::now_ms();
+        g.broadcasts.accept(envelope.clone(), now)
+    };
+    match accept {
+        Ok(true) => {
+            let routes = app.routes.lock().await;
+            let msg = Message::OperatorBroadcast {
+                envelope: envelope.clone(),
+            };
+            let mut n = 0u32;
+            for (node, peer_tx) in routes.iter() {
+                let out = Envelope::new(node.clone(), msg.clone());
+                if peer_tx.send(out).is_ok() {
+                    n += 1;
+                }
+            }
+            Json(json!({
+                "ok": true,
+                "flooded_agents": n,
+                "id": envelope.id,
+                "kind": envelope.kind,
+            }))
+            .into_response()
+        }
+        Ok(false) => Json(json!({
+            "ok": true,
+            "duplicate": true,
+            "id": envelope.id,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 fn bearer_key(headers: &HeaderMap) -> Option<String> {

@@ -90,7 +90,8 @@ impl BroadcastLog {
     }
 }
 
-fn operator_pubkey_hex() -> Option<String> {
+/// Public for CLI / inject path.
+pub fn operator_pubkey_hex() -> Option<String> {
     if let Ok(p) = std::env::var("JOULE_OPERATOR_PUBKEY") {
         let t = p.trim().to_string();
         if !t.is_empty() {
@@ -125,7 +126,7 @@ fn operator_pubkey_hex() -> Option<String> {
     None
 }
 
-fn verify_operator_sig(env: &SignedEnvelope, pubkey_hex: &str) -> Result<(), String> {
+pub fn verify_operator_sig(env: &SignedEnvelope, pubkey_hex: &str) -> Result<(), String> {
     use ed25519_dalek::{Signature, VerifyingKey};
     let pre = operator_preimage(env);
     let pk_bytes = hex::decode(pubkey_hex.trim()).map_err(|e| e.to_string())?;

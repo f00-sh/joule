@@ -14,6 +14,10 @@ mod state;
 mod tcp;
 
 pub use app::App;
+pub use broadcast::{
+    body_sha256_hex, now_ms, operator_preimage, operator_pubkey_hex, verify_operator_sig,
+    BroadcastLog,
+};
 pub use http::router;
 pub use identity::{verify_preimage, PoolIdentity};
 pub use persist::default_data_dir;

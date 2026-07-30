@@ -112,18 +112,59 @@ Agent:
 
 ## 5. Kind: model update — “how does my portion work?”
 
-### 5.1 What a distributed model is on joule
+### 5.0 The problem (why not “everyone downloads the whole model”)
 
-The pool is **one logical GPU**. Internally the model is **sharded** (pipeline layers / tensor slices) by the placement planner:
+A frontier open model can be **hundreds of GB**. Forcing every donor to store the full set would:
+
+- waste disk and bandwidth  
+- make joiners take forever  
+- still leave you brittle if only one node finishes  
+
+So: **split into content-addressed chunks**, give each node **only what it needs**, and **replicate each chunk onto several nodes** so nobody is single point of failure.
+
+### 5.1 Redundant overlapping chunks (the real design)
 
 ```text
-Logical model (all layers)
-    ├── Node A: layers 0–19   (shard files S0…S2)   ← A's portion
-    ├── Node B: layers 20–39  (shard files S3…S5)   ← B's portion
-    └── Node C: layers 40–79  (shard files S6…S11)  ← C's portion
+Chunks:   C0  C1  C2  C3  C4  C5     (each has sha256 + layer range)
+Nodes:    A   B   C   D
+
+With replica_factor = 2 (ring placement):
+
+  C0 → A (primary), B (replica)
+  C1 → B (primary), C (replica)
+  C2 → C (primary), D (replica)
+  C3 → D (primary), A (replica)
+  …
+
+If B dies:
+  C0 still on A, C1 still on C  → model intact
+  Plan rebalances: ask healthy nodes to pull under-replicated digests
 ```
 
-“Portion” = **the content-addressed files this node needs for its current (or next) assignment**, not a secret slice encrypted only for them.
+Code: `joule_cluster::plan_redundant_chunks` (`DEFAULT_REPLICA_FACTOR = 2`).
+
+| Idea | Meaning |
+|---|---|
+| **Chunk** | One file / layer band with a **sha256** (not “half a secret model per user”) |
+| **Primary** | Preferred holder for serving that band |
+| **Replica** | Overlapping copy on another node for survival |
+| **Required digests for node X** | Unique sha256 list X must fetch — **subset of the model** |
+| **Cannot rely on anyone** | Rely on **R independent holders per chunk** + re-seed when count &lt; R |
+
+**Erasure coding** (k-of-n fragments, less storage than full replicas) is Phase E — same announce/fetch machinery, different encoding.
+
+### 5.2 What a distributed model is on joule (inference view)
+
+The pool is **one logical GPU**. Internally the model is **sharded** for compute *and* stored with **redundancy**:
+
+```text
+Logical model (all layers / all chunks)
+    ├── Node A: primary C0,C3 + replica C5…   ← A's portion (not full)
+    ├── Node B: primary C1 + replica C0…     ← B's portion
+    └── …
+```
+
+“Portion” = **files this node is assigned to hold (primary and/or replica)**, not a personal encrypted half.
 
 ### 5.2 What the signed model_update carries
 
