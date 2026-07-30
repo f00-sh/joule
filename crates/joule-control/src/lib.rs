@@ -5,6 +5,7 @@
 
 mod app;
 mod blobs;
+mod broadcast;
 mod edge;
 mod http;
 mod identity;

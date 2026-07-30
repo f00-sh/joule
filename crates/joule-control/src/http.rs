@@ -40,6 +40,7 @@ pub fn router(app: App) -> Router {
         .route("/v1/public/audit/{account}", get(public_audit))
         .route("/v1/blobs", get(blob_catalog))
         .route("/v1/blobs/{sha256}", get(blob_locate))
+        .route("/v1/broadcasts", get(list_broadcasts))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -250,6 +251,16 @@ async fn blob_locate(State(app): State<App>, Path(sha256): Path<String>) -> impl
             "name": m.name,
         })).collect::<Vec<_>>(),
         "count": peers.len(),
+    }))
+}
+
+/// Recent operator-signed broadcasts (verify client-side with public key too).
+async fn list_broadcasts(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    Json(json!({
+        "ok": true,
+        "law": "signed by operator key; swarm relays; f00 is not a push CDN",
+        "messages": g.broadcasts.recent(),
     }))
 }
 

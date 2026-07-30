@@ -138,6 +138,39 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 );
                 let _ = tx.send(reply);
             }
+            Message::OperatorBroadcast { envelope } => {
+                let accept = {
+                    let mut g = app.state.write().await;
+                    let now = crate::broadcast::now_ms();
+                    g.broadcasts.accept(envelope.clone(), now)
+                };
+                match accept {
+                    Ok(true) => {
+                        info!(id = %envelope.id, "operator broadcast accepted — flooding agents");
+                        let routes = app.routes.lock().await;
+                        let msg = Message::OperatorBroadcast {
+                            envelope: envelope.clone(),
+                        };
+                        for (node, peer_tx) in routes.iter() {
+                            let out = Envelope::new(node.clone(), msg.clone());
+                            let _ = peer_tx.send(out);
+                        }
+                    }
+                    Ok(false) => {
+                        tracing::debug!(id = %envelope.id, "operator broadcast duplicate");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "operator broadcast rejected");
+                        let err = Envelope::new(
+                            env.from.clone(),
+                            Message::Error {
+                                error: format!("broadcast rejected: {e}"),
+                            },
+                        );
+                        let _ = tx.send(err);
+                    }
+                }
+            }
             Message::InferDone {
                 request_id,
                 text,

@@ -372,6 +372,45 @@ pub enum Message {
         data_b64: String,
         done: bool,
     },
+    /// Operator-signed order (update, model, notice, …). Peers verify + rebroadcast.
+    /// See docs/design/broadcast-v0.md. f00 is not a push server — swarm floods this.
+    OperatorBroadcast {
+        envelope: SignedEnvelope,
+    },
+}
+
+/// Kind of operator order (allow-listed actions only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorKind {
+    Notice,
+    SoftwareUpdate,
+    ModelUpdate,
+    Policy,
+    PauseService,
+    ResumeService,
+    Revoke,
+    /// Unknown kinds: verify + store + relay only (never execute).
+    #[serde(other)]
+    Other,
+}
+
+/// Authenticated operator message. Heavy payloads are **hashes**, not bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedEnvelope {
+    pub id: Uuid,
+    pub issued_at_unix_ms: u64,
+    #[serde(default)]
+    pub expires_at_unix_ms: Option<u64>,
+    pub kind: OperatorKind,
+    /// Canonical JSON body for this kind (string to keep hashing stable).
+    pub body_json: String,
+    pub body_sha256: String,
+    /// ed25519 signature hex over preimage (see broadcast-v0).
+    pub sig_ed25519_hex: String,
+    /// Optional OpenPGP detached signature (humans / GPG).
+    #[serde(default)]
+    pub openpgp_sig: Option<String>,
 }
 
 /// Content-addressed object a node can seed into the pool.

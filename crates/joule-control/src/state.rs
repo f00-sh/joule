@@ -1,6 +1,7 @@
 //! Shared control-plane state: cluster registry, ledger, accounts, pending jobs.
 
 use crate::blobs::BlobDirectory;
+use crate::broadcast::BroadcastLog;
 use crate::persist;
 use joule_cluster::Cluster;
 use joule_ledger::{score_burn, score_mint, EconomyEvent, FairnessSnapshot, Ledger, Millijoule};
@@ -133,6 +134,8 @@ pub struct ControlState {
     pub account_economy: HashMap<String, AccountEconomy>,
     /// Swarm content directory (hash → seeders). Never stores payload bytes.
     pub blobs: BlobDirectory,
+    /// Operator-signed messages (deduped); peers flood these.
+    pub broadcasts: BroadcastLog,
     dirty: bool,
 }
 
@@ -162,6 +165,7 @@ impl ControlState {
             service_live: false,
             account_economy: HashMap::new(),
             blobs: BlobDirectory::new(),
+            broadcasts: BroadcastLog::new(256),
             dirty: false,
         }
     }

@@ -447,6 +447,18 @@ async fn run_agent(
                     Message::CreditEvent { delta_millijoules, reason, .. } => {
                         info!(delta_millijoules, %reason, "credit event");
                     }
+                    Message::OperatorBroadcast { envelope } => {
+                        // Flood is control-driven; log allow-listed kinds. Full handlers (update/model) next.
+                        info!(
+                            id = %envelope.id,
+                            kind = ?envelope.kind,
+                            "operator broadcast (verified upstream if JOULE_OPERATOR_PUBKEY set)"
+                        );
+                        println!(
+                            "operator message: {:?} id={} body_sha256={}",
+                            envelope.kind, envelope.id, envelope.body_sha256
+                        );
+                    }
                     other => {
                         warn!(msg = ?other, "ignored control message");
                     }

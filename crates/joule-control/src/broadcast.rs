@@ -1,0 +1,186 @@
+//! Operator broadcast bus: verify signed envelopes, dedupe, flood agents.
+//!
+//! Authority is the **operator public key**, not the hostname of control.
+//! See docs/design/broadcast-v0.md.
+
+use joule_proto::{OperatorKind, SignedEnvelope};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Preimage signed by the operator ed25519 key:
+/// `sha256( id || "\n" || issued_at || "\n" || kind || "\n" || body_sha256 )`
+pub fn operator_preimage(env: &SignedEnvelope) -> [u8; 32] {
+    let kind = match env.kind {
+        OperatorKind::Notice => "notice",
+        OperatorKind::SoftwareUpdate => "software_update",
+        OperatorKind::ModelUpdate => "model_update",
+        OperatorKind::Policy => "policy",
+        OperatorKind::PauseService => "pause_service",
+        OperatorKind::ResumeService => "resume_service",
+        OperatorKind::Revoke => "revoke",
+        OperatorKind::Other => "other",
+    };
+    let mut h = Sha256::new();
+    h.update(env.id.to_string().as_bytes());
+    h.update(b"\n");
+    h.update(env.issued_at_unix_ms.to_string().as_bytes());
+    h.update(b"\n");
+    h.update(kind.as_bytes());
+    h.update(b"\n");
+    h.update(env.body_sha256.as_bytes());
+    h.finalize().into()
+}
+
+pub fn body_sha256_hex(body_json: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(body_json.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// In-memory dedupe + last-N log for joiners.
+#[derive(Debug, Default)]
+pub struct BroadcastLog {
+    seen: HashSet<uuid::Uuid>,
+    recent: Vec<SignedEnvelope>,
+    max_recent: usize,
+}
+
+impl BroadcastLog {
+    pub fn new(max_recent: usize) -> Self {
+        Self {
+            seen: HashSet::new(),
+            recent: Vec::new(),
+            max_recent: max_recent.max(16),
+        }
+    }
+
+    pub fn recent(&self) -> &[SignedEnvelope] {
+        &self.recent
+    }
+
+    /// Returns true if this is a newly accepted envelope (caller should flood).
+    pub fn accept(&mut self, env: SignedEnvelope, now_ms: u64) -> Result<bool, String> {
+        if self.seen.contains(&env.id) {
+            return Ok(false);
+        }
+        if let Some(exp) = env.expires_at_unix_ms {
+            if now_ms > exp {
+                return Err("envelope expired".into());
+            }
+        }
+        let expect = body_sha256_hex(&env.body_json);
+        if expect != env.body_sha256.to_lowercase() && expect != env.body_sha256 {
+            // allow either case
+            if expect != env.body_sha256.to_lowercase() {
+                return Err("body_sha256 mismatch".into());
+            }
+        }
+        // Signature check against pinned operator key (if configured).
+        if let Some(pk) = operator_pubkey_hex() {
+            verify_operator_sig(&env, &pk)?;
+        }
+        self.seen.insert(env.id);
+        self.recent.push(env);
+        if self.recent.len() > self.max_recent {
+            let drop_n = self.recent.len() - self.max_recent;
+            self.recent.drain(0..drop_n);
+        }
+        Ok(true)
+    }
+}
+
+fn operator_pubkey_hex() -> Option<String> {
+    if let Ok(p) = std::env::var("JOULE_OPERATOR_PUBKEY") {
+        let t = p.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    // Optional file next to data dir / f00 core
+    for path in [
+        std::env::var_os("HOME")
+            .map(|h| std::path::PathBuf::from(h).join(".config/f00/joule/operator.pub")),
+        Some(std::path::PathBuf::from("operator.pub")),
+        Some(std::path::PathBuf::from(
+            "docs/operator-keys/operator.ed25519.pub",
+        )),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(s) = std::fs::read_to_string(&path) {
+            let t = s.trim().to_string();
+            if !t.is_empty() && !t.starts_with('#') {
+                return Some(
+                    t.lines()
+                        .find(|l| !l.starts_with('#'))
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
+                );
+            }
+        }
+    }
+    None
+}
+
+fn verify_operator_sig(env: &SignedEnvelope, pubkey_hex: &str) -> Result<(), String> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let pre = operator_preimage(env);
+    let pk_bytes = hex::decode(pubkey_hex.trim()).map_err(|e| e.to_string())?;
+    if pk_bytes.len() != 32 {
+        return Err("operator pubkey must be 32 bytes hex".into());
+    }
+    let mut pk = [0u8; 32];
+    pk.copy_from_slice(&pk_bytes);
+    let vk = VerifyingKey::from_bytes(&pk).map_err(|e| e.to_string())?;
+    let sig_bytes = hex::decode(env.sig_ed25519_hex.trim()).map_err(|e| e.to_string())?;
+    let sig = Signature::from_slice(&sig_bytes).map_err(|e| e.to_string())?;
+    vk.verify_strict(&pre, &sig)
+        .map_err(|_| "operator signature invalid".to_string())?;
+    Ok(())
+}
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use joule_proto::OperatorKind;
+    use rand::rngs::OsRng;
+    use uuid::Uuid;
+
+    #[test]
+    fn sign_and_accept() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
+
+        let body = r#"{"title":"hello","body":"swarm"}"#;
+        let body_hash = body_sha256_hex(body);
+        let mut env = SignedEnvelope {
+            id: Uuid::new_v4(),
+            issued_at_unix_ms: now_ms(),
+            expires_at_unix_ms: None,
+            kind: OperatorKind::Notice,
+            body_json: body.into(),
+            body_sha256: body_hash,
+            sig_ed25519_hex: String::new(),
+            openpgp_sig: None,
+        };
+        let pre = operator_preimage(&env);
+        env.sig_ed25519_hex = hex::encode(sk.sign(&pre).to_bytes());
+
+        let mut log = BroadcastLog::new(32);
+        assert!(log.accept(env.clone(), now_ms()).unwrap());
+        assert!(!log.accept(env, now_ms()).unwrap()); // dedupe
+        std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+    }
+}
