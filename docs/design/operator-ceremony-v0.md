@@ -1,7 +1,7 @@
 # joule — operator key ceremony v0
 
 **Status:** active  
-**Companions:** [broadcast-v0](broadcast-v0.md) · [distribution-v0](distribution-v0.md)
+**Companions:** [**master-key-trust-v0**](master-key-trust-v0.md) (read first) · [broadcast-v0](broadcast-v0.md) · [distribution-v0](distribution-v0.md)
 
 ---
 

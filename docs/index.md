@@ -64,6 +64,7 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 | Distribution (website only · peer seed) | [design/distribution-v0.md](design/distribution-v0.md) |
 | Broadcast bus | [design/broadcast-v0.md](design/broadcast-v0.md) |
 | Operator key ceremony | [design/operator-ceremony-v0.md](design/operator-ceremony-v0.md) |
+| **Master key trust (GPG + embed)** | [design/master-key-trust-v0.md](design/master-key-trust-v0.md) · [operator-keys/](operator-keys/) |
 | Self-govern ledger | [design/self-govern-v0.md](design/self-govern-v0.md) |
 | Operator SOP (NASA PDF) | [sop-joule-ops.pdf](sop-joule-ops.pdf) — generated on release |
 | Release memos | [releases/](releases/) |
