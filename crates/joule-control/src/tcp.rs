@@ -563,7 +563,8 @@ pub async fn challenge_loop(app: App) {
 /// Agent-side: run this node's **shard** of a pool-wide inference.
 ///
 /// Non-tail shards only ACK (activation handoff stub). Tail produces tokens.
-pub async fn agent_handle_infer(env: &Envelope, stub: &StubEngine) -> Result<Envelope> {
+/// `engine` may be a stub or a [`joule_runtime::ClusterEngine`] with tensors loaded.
+pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
     match &env.msg {
         Message::InferRequest {
             request_id,
@@ -573,7 +574,7 @@ pub async fn agent_handle_infer(env: &Envelope, stub: &StubEngine) -> Result<Env
             plan,
             is_tail,
         } => {
-            stub.load_plan(plan).await.context("stub load")?;
+            engine.load_plan(plan).await.context("engine load_plan")?;
             if !*is_tail {
                 // Intermediate pipeline stage: consume compute, no user text yet.
                 return Ok(Envelope::new(
@@ -587,7 +588,7 @@ pub async fn agent_handle_infer(env: &Envelope, stub: &StubEngine) -> Result<Env
                     },
                 ));
             }
-            match stub
+            match engine
                 .infer(InferRequest {
                     model: model.clone(),
                     prompt: prompt.clone(),
@@ -619,7 +620,7 @@ pub async fn agent_handle_infer(env: &Envelope, stub: &StubEngine) -> Result<Env
 }
 
 /// Agent-side challenge handler.
-pub async fn agent_handle_challenge(env: &Envelope, stub: &StubEngine) -> Result<Envelope> {
+pub async fn agent_handle_challenge(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
     match &env.msg {
         Message::Challenge {
             challenge_id,
@@ -644,8 +645,8 @@ pub async fn agent_handle_challenge(env: &Envelope, stub: &StubEngine) -> Result
                 pool_mem_mib: 0,
                 model_layers: 1,
             };
-            stub.load_plan(&plan).await.context("stub load")?;
-            let out = stub
+            engine.load_plan(&plan).await.context("engine load_plan")?;
+            let out = engine
                 .infer(InferRequest {
                     model: model.clone(),
                     prompt: prompt.clone(),

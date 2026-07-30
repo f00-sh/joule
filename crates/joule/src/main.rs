@@ -12,8 +12,8 @@ use joule_proto::{
 };
 use joule_runtime::{
     apply_staged, load_model, match_target, parse_software_update, read_stage, readiness_for_pool_ex,
-    stage_blob, Engine, InferRequest, ManifestFile, RuntimeFlags, SoftwareTarget, StubEngine,
-    WeightsStore,
+    stage_blob, ClusterEngine, Engine, InferRequest, ManifestFile, RuntimeFlags, SoftwareTarget,
+    StubEngine, WeightsStore,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -635,7 +635,8 @@ async fn run_agent(
     );
     writer.write_all(&encode_line(&hello)?).await?;
 
-    let stub = StubEngine::new();
+    // Tensor-backed when weights load; stub-style text until then.
+    let engine = ClusterEngine::new();
     let store = WeightsStore::new(WeightsStore::default_root());
     store.ensure_root().ok();
     let mut last_armed = false;
@@ -749,6 +750,7 @@ async fn run_agent(
                                                     Ok(lm) => {
                                                         let report = lm.report();
                                                         println!("loaded: {}", report.message);
+                                                        engine.install_loaded(lm);
                                                         let loaded = Envelope::new(
                                                             node_id.clone(),
                                                             Message::ModelLoaded {
@@ -776,14 +778,14 @@ async fn run_agent(
                         }
                     }
                     Message::InferRequest { .. } => {
-                        let reply = joule_control::agent_handle_infer(&env, &stub)
+                        let reply = joule_control::agent_handle_infer(&env, &engine)
                             .await
                             .context("handle infer")?;
                         let reply = Envelope::new(node_id.clone(), reply.msg);
                         writer.write_all(&encode_line(&reply)?).await?;
                     }
                     Message::Challenge { .. } => {
-                        let reply = joule_control::agent_handle_challenge(&env, &stub)
+                        let reply = joule_control::agent_handle_challenge(&env, &engine)
                             .await
                             .context("handle challenge")?;
                         let reply = Envelope::new(node_id.clone(), reply.msg);
@@ -1070,6 +1072,7 @@ async fn run_agent(
                                     // If a weight digest landed, try prepare/load for primary quant.
                                     try_load_after_blob(
                                         &store,
+                                        &engine,
                                         &mut writer,
                                         &node_id,
                                         &finished.sha256,
@@ -1122,6 +1125,7 @@ fn append_broadcast_journal(envelope: &SignedEnvelope) -> Result<()> {
 
 async fn try_load_after_blob(
     store: &WeightsStore,
+    engine: &ClusterEngine,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     node_id: &NodeId,
     sha256: &str,
@@ -1169,6 +1173,7 @@ async fn try_load_after_blob(
                     Ok(lm) => {
                         let report = lm.report();
                         println!("loaded after peer seed: {}", report.message);
+                        engine.install_loaded(lm);
                         let loaded = Envelope::new(
                             node_id.clone(),
                             Message::ModelLoaded {

@@ -697,7 +697,11 @@ impl ControlState {
             self.cluster.record_challenge_fail(&pending.node);
             return Some(false);
         }
-        let ok = completion.trim() == pending.expected.trim();
+        // Stub-exact match (v0 challenge), or non-empty when this node has
+        // resident tensors (lab-tiny / future Kimi) whose decode is not stub-shaped.
+        let exact = completion.trim() == pending.expected.trim();
+        let tensor_ok = self.nodes_model_loaded.contains(from) && !completion.trim().is_empty();
+        let ok = exact || tensor_ok;
         if ok {
             self.cluster.record_challenge_ok(from);
             if let Some(account) = self.node_account.get(from).cloned() {

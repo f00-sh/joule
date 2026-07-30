@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Persist v4**: operator_paused / service_live / mint knobs survive restart
 - **CLI** `joule blobs` (local or `--api` swarm catalog); `scripts/demo-operator-bus.sh`
 - Transfer caps: 256 MiB control-relayed blob max; 64 concurrent xfers; 120s xfer TTL
+- **Agents use ClusterEngine**: install lab-tiny tensors into infer/challenge path when peer-seeded/loaded; challenges accept tensor completions
+- Operator **revoke** envelope id blacklist; agent broadcast journal (ndjson)
 - **Weight download/verify**: HTTP(S) + `repo://` with sha256; `weights.published=true`
 - **lab-tiny** fixture + **kimi-k3-meta** (Moonshot HF configs); tensor-backed generate (`decode.rs`)
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
