@@ -8,7 +8,8 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use clap::{Parser, Subcommand};
 use joule_client::{
     format_monitor_dash, format_status_human, generate_launchd_plist, generate_systemd_unit,
-    generate_windows_task_xml, InstallSpec, ServiceKind, ServicePlatform,
+    generate_windows_task_xml, generate_windows_task_xml_file_bytes, InstallSpec, ServiceKind,
+    ServicePlatform,
 };
 use joule_cluster::{plan_redundant_chunks, Cluster, ModelChunk};
 use joule_control::{
@@ -1591,13 +1592,39 @@ fn run_service_generate(
             ServiceKind::Tray => "joule status tray/monitor".into(),
         },
     };
-    let body = match platform {
-        ServicePlatform::LinuxSystemd => generate_systemd_unit(&spec),
-        ServicePlatform::MacosLaunchd => generate_launchd_plist(&spec),
-        ServicePlatform::WindowsTask => generate_windows_task_xml(&spec),
-    };
+    match platform {
+        ServicePlatform::LinuxSystemd => {
+            let body = generate_systemd_unit(&spec);
+            write_service_text(out, &body)?;
+        }
+        ServicePlatform::MacosLaunchd => {
+            let body = generate_launchd_plist(&spec);
+            write_service_text(out, &body)?;
+        }
+        ServicePlatform::WindowsTask => {
+            // schtasks /Create /XML requires UTF-16 LE (Unicode) when encoding="UTF-16".
+            let bytes = generate_windows_task_xml_file_bytes(&spec);
+            if let Some(p) = out {
+                std::fs::write(&p, &bytes).with_context(|| format!("write {}", p.display()))?;
+                println!(
+                    "wrote {} (UTF-16 LE + BOM for schtasks /Create /XML)",
+                    p.display()
+                );
+            } else {
+                // stdout is text-mode; print UTF-8 preview + note.
+                print!("{}", generate_windows_task_xml(&spec));
+                eprintln!(
+                    "note: for schtasks use --out FILE (writes UTF-16 LE + BOM, not plain UTF-8)"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_service_text(out: Option<PathBuf>, body: &str) -> Result<()> {
     if let Some(p) = out {
-        std::fs::write(&p, &body).with_context(|| format!("write {}", p.display()))?;
+        std::fs::write(&p, body).with_context(|| format!("write {}", p.display()))?;
         println!("wrote {}", p.display());
     } else {
         print!("{body}");
@@ -1649,6 +1676,7 @@ CLI status on macOS: joule status --api http://127.0.0.1:7700 --key joule_…
   joule service generate --platform windows --kind agent \
     --binary "C:\Program Files\joule\joule.exe" --account YOU \
     --out %TEMP%\joule-agent.xml
+  # --out writes UTF-16 LE + BOM (required by schtasks /Create /XML)
   schtasks /Create /TN joule-agent /XML %TEMP%\joule-agent.xml
 
 Tray:

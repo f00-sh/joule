@@ -168,6 +168,11 @@ pub fn generate_launchd_plist(spec: &InstallSpec) -> String {
 }
 
 /// Windows scheduled task XML (Task Scheduler user logon trigger).
+///
+/// **Encoding:** the XML declaration says UTF-16. Use
+/// [`generate_windows_task_xml_file_bytes`] when writing a file for
+/// `schtasks /Create /XML` (UTF-16 LE + BOM). Do not write the bare
+/// [`String`] as UTF-8 — Task Scheduler will reject it.
 pub fn generate_windows_task_xml(spec: &InstallSpec) -> String {
     let (name, args) = match spec.kind {
         ServiceKind::Agent => (
@@ -224,6 +229,21 @@ pub fn generate_windows_task_xml(spec: &InstallSpec) -> String {
         bin = xml_escape(&spec.binary_path),
         args = xml_escape(&args),
     )
+}
+
+/// UTF-16 LE with BOM — file bytes for `schtasks /Create /XML`.
+pub fn encode_utf16_le_bom(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + s.len() * 2);
+    out.extend_from_slice(&[0xFF, 0xFE]); // UTF-16 LE BOM
+    for unit in s.encode_utf16() {
+        out.extend_from_slice(&unit.to_le_bytes());
+    }
+    out
+}
+
+/// Windows task XML as file bytes (UTF-16 LE + BOM), matching the encoding= declaration.
+pub fn generate_windows_task_xml_file_bytes(spec: &InstallSpec) -> Vec<u8> {
+    encode_utf16_le_bom(&generate_windows_task_xml(spec))
 }
 
 fn shell_escape(s: &str) -> String {
@@ -291,5 +311,54 @@ mod tests {
         assert!(x.contains("LogonTrigger"));
         assert!(x.contains("joule.exe"));
         assert!(x.contains("agent"));
+        assert!(
+            x.contains("encoding=\"UTF-16\""),
+            "XML declaration must claim UTF-16"
+        );
+    }
+
+    /// schtasks requires Unicode file when encoding is UTF-16 — BOM + LE payload.
+    #[test]
+    fn windows_task_file_bytes_are_utf16_le_with_bom() {
+        let spec = InstallSpec {
+            platform: ServicePlatform::WindowsTask,
+            binary_path: r"C:\Program Files\joule\joule.exe".into(),
+            account: "alice".into(),
+            ..Default::default()
+        };
+        let bytes = generate_windows_task_xml_file_bytes(&spec);
+        assert!(
+            bytes.len() >= 4,
+            "must contain BOM + content, got {}",
+            bytes.len()
+        );
+        assert_eq!(
+            &bytes[0..2],
+            &[0xFF, 0xFE],
+            "must start with UTF-16 LE BOM (FF FE)"
+        );
+        // Must not be plain UTF-8 of the same string (UTF-8 has no FF FE BOM).
+        let utf8 = generate_windows_task_xml(&spec);
+        assert_ne!(bytes, utf8.as_bytes(), "file bytes must not be raw UTF-8");
+        // Decode UTF-16 LE (skip BOM) and re-check payload + declaration match.
+        assert_eq!(bytes.len() % 2, 0, "UTF-16 LE payload must be even length");
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let decoded = String::from_utf16(&units).expect("valid UTF-16 LE");
+        assert_eq!(
+            decoded, utf8,
+            "round-trip LE decode must equal generator string"
+        );
+        assert!(decoded.contains("encoding=\"UTF-16\""));
+        assert!(decoded.contains("LogonTrigger"));
+        assert!(decoded.contains("joule.exe"));
+        // If someone wrongly wrote UTF-8 with a UTF-16 declaration, first bytes
+        // after a fake BOM would not decode to '<?xml' as UTF-16 LE units.
+        assert!(
+            decoded.starts_with("<?xml"),
+            "decoded text must start with <?xml"
+        );
     }
 }
