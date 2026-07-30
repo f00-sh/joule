@@ -99,13 +99,26 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     let g = app.state.read().await;
                     g.broadcasts.recent().to_vec()
                 };
-                for env in recent {
-                    let out =
-                        Envelope::new(id.clone(), Message::OperatorBroadcast { envelope: env });
+                for env in recent.iter() {
+                    let out = Envelope::new(
+                        id.clone(),
+                        Message::OperatorBroadcast {
+                            envelope: env.clone(),
+                        },
+                    );
                     let _ = tx.send(out);
                 }
-                // Re-nudge under-replicated digests (may assign this joiner).
-                crate::model_update::rebalance_replicas(&app).await;
+                // Re-plan model digests so late joiners get a share of the mesh
+                // (not full model — redundant placement includes them).
+                if let Some(mu) = recent
+                    .iter()
+                    .rev()
+                    .find(|e| e.kind == joule_proto::OperatorKind::ModelUpdate)
+                {
+                    crate::model_update::apply_model_update(&app, mu).await;
+                } else {
+                    crate::model_update::rebalance_replicas(&app).await;
+                }
             }
             Message::Heartbeat { load, healthy } => {
                 let id = env.from.clone();
