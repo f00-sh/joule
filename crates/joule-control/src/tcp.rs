@@ -106,6 +106,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     );
                     let _ = tx.send(out);
                 }
+                // Re-nudge under-replicated digests (may assign this joiner).
+                crate::model_update::rebalance_replicas(&app).await;
             }
             Message::Heartbeat { load, healthy } => {
                 let id = env.from.clone();
