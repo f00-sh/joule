@@ -4,7 +4,9 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use clap::{Parser, Subcommand};
 use joule_cluster::{plan_redundant_chunks, Cluster, ModelChunk};
-use joule_control::{body_sha256_hex, now_ms, operator_preimage};
+use joule_control::{
+    body_sha256_hex, now_ms, operator_preimage, operator_pubkey_hex, verify_operator_sig,
+};
 use joule_ledger::{estimate_contribution_millijoules, estimate_usage_millijoules, Ledger};
 use joule_proto::{
     decode_line, encode_line, BlobMeta, ClusterCapacity, DeviceClass, Envelope, Message, NodeCaps,
@@ -795,6 +797,14 @@ async fn run_agent(
                         info!(delta_millijoules, %reason, "credit event");
                     }
                     Message::OperatorBroadcast { envelope } => {
+                        // Defense in depth: if operator key is pinned, verify even when
+                        // the message arrived via control flood (control may be untrusted).
+                        if let Some(pk) = operator_pubkey_hex() {
+                            if let Err(e) = verify_operator_sig(&envelope, &pk) {
+                                warn!(error = %e, id = %envelope.id, "reject operator broadcast (bad sig)");
+                                continue;
+                            }
+                        }
                         info!(
                             id = %envelope.id,
                             kind = ?envelope.kind,
