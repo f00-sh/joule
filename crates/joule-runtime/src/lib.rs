@@ -1,18 +1,23 @@
-//! Inference backends + model manifest + weight cache.
+//! Inference backends + model manifest + weight cache + **model loading**.
 //!
-//! Kimi is **not** loaded until the logical device (aggregate VRAM) is large
-//! enough and weights are published. Until then: stub inference + arm cache.
+//! Kimi is not loaded until the logical device is large enough. When the pool
+//! hits the load milestone (and weights exist), [`load_model`] maps tensors into
+//! RAM. Service-live is a separate control flag after the mesh has loaded.
 
+mod load;
 mod manifest;
 mod weights;
 
+pub use load::{load_model, LoadError, LoadReport, LoadedModel, TensorInfo};
 pub use manifest::{
-    InferenceMode, ManifestFile, ModelReadiness, ModelSpec, QuantSpec, EMBEDDED_MANIFEST,
+    InferenceMode, ManifestFile, MilestoneStatus, ModelReadiness, ModelSpec, QuantSpec,
+    RuntimeFlags, EMBEDDED_MANIFEST,
 };
 pub use weights::{PrepareStatus, WeightsStore};
 
 use async_trait::async_trait;
 use joule_proto::ClusterPlan;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -25,6 +30,8 @@ pub enum RuntimeError {
     Infer(String),
     #[error("pool not ready: {0}")]
     PoolNotReady(String),
+    #[error("load: {0}")]
+    Load(String),
 }
 
 #[derive(Debug, Clone)]
@@ -41,31 +48,20 @@ pub struct InferResponse {
     pub completion_tokens: u32,
 }
 
-/// Local or multi-shard inference engine.
 #[async_trait]
 pub trait Engine: Send + Sync {
     async fn load_plan(&self, plan: &ClusterPlan) -> Result<(), RuntimeError>;
     async fn infer(&self, req: InferRequest) -> Result<InferResponse, RuntimeError>;
 }
 
-/// Deterministic stub used until weights exist and a real backend is wired.
 pub struct StubEngine {
-    loaded: std::sync::Mutex<Option<String>>,
-    mode_label: String,
+    loaded: Mutex<Option<String>>,
 }
 
 impl StubEngine {
     pub fn new() -> Self {
         Self {
-            loaded: std::sync::Mutex::new(None),
-            mode_label: "stub".into(),
-        }
-    }
-
-    pub fn with_mode_label(label: impl Into<String>) -> Self {
-        Self {
-            loaded: std::sync::Mutex::new(None),
-            mode_label: label.into(),
+            loaded: Mutex::new(None),
         }
     }
 
@@ -102,64 +98,65 @@ impl Engine for StubEngine {
         if model != req.model {
             return Err(RuntimeError::NotLoaded(req.model));
         }
-        let reply = Self::expected_text_mode(&self.mode_label, &model, &req.prompt);
-        let completion_tokens = reply.split_whitespace().count() as u32;
+        let reply = Self::expected_text(&model, &req.prompt);
         Ok(InferResponse {
-            text: reply,
+            text: reply.clone(),
             prompt_tokens: req.prompt.split_whitespace().count() as u32,
-            completion_tokens,
+            completion_tokens: reply.split_whitespace().count() as u32,
         })
     }
 }
 
-/// Engine selected from pool readiness + local weight state.
+/// Engine that can hold a real [`LoadedModel`] in RAM and answer accordingly.
 pub struct ClusterEngine {
-    inner: StubEngine,
-    readiness: std::sync::Mutex<Option<ModelReadiness>>,
-    prepared: std::sync::Mutex<bool>,
+    plan_model: Mutex<Option<String>>,
+    readiness: Mutex<Option<ModelReadiness>>,
+    loaded: Mutex<Option<Arc<LoadedModel>>>,
 }
 
 impl ClusterEngine {
     pub fn new() -> Self {
         Self {
-            inner: StubEngine::with_mode_label("stub-awaiting-pool"),
-            readiness: std::sync::Mutex::new(None),
-            prepared: std::sync::Mutex::new(false),
+            plan_model: Mutex::new(None),
+            readiness: Mutex::new(None),
+            loaded: Mutex::new(None),
         }
     }
 
-    pub fn update_readiness(&self, r: ModelReadiness, prepared: bool) {
-        let label = match r.inference_mode {
-            InferenceMode::StubAwaitingPool => "stub-awaiting-pool",
-            InferenceMode::StubPoolReady => {
-                if prepared {
-                    "stub-pool-ready-armed"
-                } else {
-                    "stub-pool-ready"
-                }
-            }
-            InferenceMode::WeightsReady => {
-                if prepared {
-                    "weights-ready"
-                } else {
-                    "stub-weights-pending"
-                }
-            }
-        };
-        // Swap mode label via replacement of inner is hard; encode in expected text via stored readiness.
+    pub fn update_readiness(&self, r: ModelReadiness) {
         *self.readiness.lock().expect("lock") = Some(r);
-        *self.prepared.lock().expect("lock") = prepared;
-        let _ = label;
-        // Keep using stub path until a real backend is plugged in.
-        let _ = &self.inner;
     }
 
-    pub fn readiness(&self) -> Option<ModelReadiness> {
-        self.readiness.lock().expect("lock").clone()
+    pub fn install_loaded(&self, model: LoadedModel) {
+        *self.loaded.lock().expect("lock") = Some(Arc::new(model));
     }
 
-    pub fn is_prepared(&self) -> bool {
-        *self.prepared.lock().expect("lock")
+    pub fn clear_loaded(&self) {
+        *self.loaded.lock().expect("lock") = None;
+    }
+
+    pub fn loaded_report(&self) -> Option<LoadReport> {
+        self.loaded
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .map(|m| m.report())
+    }
+
+    pub fn is_model_loaded(&self) -> bool {
+        self.loaded
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .is_some_and(|m| !m.tensors.contains_key("__joule_armed__") || m.tensors.len() > 1)
+            || self.loaded.lock().expect("lock").as_ref().is_some_and(|m| {
+                m.bytes_resident > 32 && !m.tensors.contains_key("__joule_armed__")
+            })
+    }
+
+    /// True if any LoadedModel is installed (including armed marker load).
+    pub fn has_resident_weights(&self) -> bool {
+        self.loaded.lock().expect("lock").is_some()
     }
 }
 
@@ -172,10 +169,41 @@ impl Default for ClusterEngine {
 #[async_trait]
 impl Engine for ClusterEngine {
     async fn load_plan(&self, plan: &ClusterPlan) -> Result<(), RuntimeError> {
-        self.inner.load_plan(plan).await
+        if plan.shards.is_empty() {
+            return Err(RuntimeError::UnsupportedPlan("empty shards".into()));
+        }
+        *self.plan_model.lock().expect("lock") = Some(plan.model.clone());
+        Ok(())
     }
 
     async fn infer(&self, req: InferRequest) -> Result<InferResponse, RuntimeError> {
+        let plan_model = self.plan_model.lock().expect("lock").clone();
+        let Some(model) = plan_model else {
+            return Err(RuntimeError::NotLoaded(req.model));
+        };
+        if model != req.model {
+            return Err(RuntimeError::NotLoaded(req.model));
+        }
+
+        let loaded = self.loaded.lock().expect("lock").clone();
+        if let Some(lm) = loaded {
+            // Real weights resident: still no full Kimi decoder — answer with load proof.
+            // When a decoder is wired, this branch runs matmul/attention over `lm.tensors`.
+            let reply = format!(
+                "[joule-loaded:{}/{} bytes={} tensors={}] {}",
+                lm.model_id,
+                lm.quant,
+                lm.bytes_resident,
+                lm.tensors.len(),
+                req.prompt
+            );
+            return Ok(InferResponse {
+                text: reply.clone(),
+                prompt_tokens: req.prompt.split_whitespace().count() as u32,
+                completion_tokens: reply.split_whitespace().count() as u32,
+            });
+        }
+
         let mode = self
             .readiness
             .lock()
@@ -184,26 +212,35 @@ impl Engine for ClusterEngine {
             .map(|r| match r.inference_mode {
                 InferenceMode::StubAwaitingPool => "stub-awaiting-pool",
                 InferenceMode::StubPoolReady => "stub-pool-ready",
-                InferenceMode::WeightsReady => "weights-pending-engine",
+                InferenceMode::LoadingWeights => "loading-weights",
+                InferenceMode::ModelLoaded => "model-loaded",
+                InferenceMode::ServiceLive => "service-live",
             })
-            .unwrap_or("stub")
-            .to_string();
-        let mut out = self.inner.infer(req).await?;
-        // Annotate mode so clients can see pool-gate state in stub replies.
-        if let Some(rest) = out.text.strip_prefix("[joule-stub:") {
-            out.text = format!("[joule-{mode}:{rest}");
-        }
-        Ok(out)
+            .unwrap_or("stub");
+        let reply = StubEngine::expected_text_mode(mode, &model, &req.prompt);
+        Ok(InferResponse {
+            text: reply.clone(),
+            prompt_tokens: req.prompt.split_whitespace().count() as u32,
+            completion_tokens: reply.split_whitespace().count() as u32,
+        })
     }
 }
 
-/// Compute readiness for the primary model given pool stats.
 pub fn readiness_for_pool(pool_vram_mib: u64, backends: u32) -> Result<ModelReadiness, String> {
+    readiness_for_pool_ex(pool_vram_mib, backends, RuntimeFlags::default(), None)
+}
+
+pub fn readiness_for_pool_ex(
+    pool_vram_mib: u64,
+    backends: u32,
+    flags: RuntimeFlags,
+    vram_growth_mib_per_sec: Option<f64>,
+) -> Result<ModelReadiness, String> {
     let m = ManifestFile::load_default()?;
     let spec = m
         .primary()
         .ok_or_else(|| "manifest has no models".to_string())?;
-    Ok(spec.readiness(pool_vram_mib, backends))
+    Ok(spec.readiness(pool_vram_mib, backends, flags, vram_growth_mib_per_sec))
 }
 
 #[cfg(test)]
@@ -235,18 +272,19 @@ mod tests {
         let out = eng
             .infer(InferRequest {
                 model: CLUSTER_MODEL.into(),
-                prompt: "hello cluster".into(),
-                max_tokens: 16,
+                prompt: "hello".into(),
+                max_tokens: 8,
             })
             .await
             .unwrap();
-        assert!(out.text.contains("hello cluster"));
+        assert!(out.text.contains("hello"));
     }
 
     #[test]
     fn readiness_gates_kimi() {
         let r = readiness_for_pool(10 * 1024, 2).unwrap();
         assert!(!r.pool_ready);
+        assert!(r.next_milestone.is_some());
         let r = readiness_for_pool(72 * 1024, 5).unwrap();
         assert!(r.pool_ready);
         assert!(!r.weights_published);

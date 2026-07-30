@@ -1,6 +1,8 @@
 # joule
 
-**Distributed supercomputer cluster for open-weight AI.** Idle GPUs anywhere on the internet join one pool. Access is earned in millijoules — compute in, tokens out. The dashboard shows **live** how much distributed compute is online.
+**Open supercomputer.** One logical GPU (sum of donor VRAM). One model (`kimi-open`). Contribute compute → use the AI.
+
+**Live site UI:** open [`index.html`](index.html) (milestones, countdown, aggregate compute). Point it at control with `?api=http://127.0.0.1:7700`.
 
 | | |
 |---|---|

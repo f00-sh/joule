@@ -9,7 +9,8 @@ use joule_proto::{
     CLUSTER_MODEL,
 };
 use joule_runtime::{
-    readiness_for_pool, Engine, InferRequest, ManifestFile, StubEngine, WeightsStore,
+    load_model, readiness_for_pool_ex, Engine, InferRequest, ManifestFile, RuntimeFlags,
+    StubEngine, WeightsStore,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -123,7 +124,7 @@ enum Commands {
         #[arg(long, default_value = "donor")]
         account: String,
     },
-    /// Show model pool-readiness (Kimi waits for a large enough logical device).
+    /// Show model pool-readiness, milestones, and countdown.
     Ready {
         /// Optional live control HTTP base (e.g. http://127.0.0.1:7700).
         #[arg(long, default_value = "")]
@@ -133,6 +134,16 @@ enum Commands {
         pool_vram_gib: u64,
         #[arg(long, default_value_t = 0)]
         backends: u32,
+    },
+    /// Load model weights into this process (from local weight cache).
+    Load {
+        #[arg(long, default_value = CLUSTER_MODEL)]
+        model: String,
+        /// Quant id (default: best fit for --mem-mib).
+        #[arg(long, default_value = "")]
+        quant: String,
+        #[arg(long, default_value_t = 8192)]
+        mem_mib: u32,
     },
 }
 
@@ -225,6 +236,13 @@ async fn main() -> Result<()> {
             backends,
         } => {
             run_ready(api, pool_vram_gib, backends).await?;
+        }
+        Commands::Load {
+            model,
+            quant,
+            mem_mib,
+        } => {
+            run_load(model, quant, mem_mib)?;
         }
     }
     Ok(())
@@ -350,14 +368,37 @@ async fn run_agent(
                                                 let ok = Envelope::new(
                                                     node_id.clone(),
                                                     Message::PrepareOk {
-                                                        model: st.model,
-                                                        quant: st.quant,
+                                                        model: st.model.clone(),
+                                                        quant: st.quant.clone(),
                                                         armed: st.armed,
                                                         files_complete: st.files_complete,
-                                                        message: st.message,
+                                                        message: st.message.clone(),
                                                     },
                                                 );
                                                 writer.write_all(&encode_line(&ok)?).await?;
+                                                // Actual load into RAM when possible.
+                                                match load_model(&store, spec, q) {
+                                                    Ok(lm) => {
+                                                        let report = lm.report();
+                                                        println!("loaded: {}", report.message);
+                                                        let loaded = Envelope::new(
+                                                            node_id.clone(),
+                                                            Message::ModelLoaded {
+                                                                model: report.model,
+                                                                quant: report.quant,
+                                                                bytes_resident: report.bytes_resident,
+                                                                tensors: report.tensors as u32,
+                                                                message: report.message,
+                                                            },
+                                                        );
+                                                        writer
+                                                            .write_all(&encode_line(&loaded)?)
+                                                            .await?;
+                                                    }
+                                                    Err(e) => {
+                                                        info!(error = %e, "model load deferred")
+                                                    }
+                                                }
                                             }
                                             Err(e) => warn!(error = %e, "prepare failed"),
                                         }
@@ -407,9 +448,39 @@ async fn run_ready(api: String, pool_vram_gib: u64, backends: u32) -> Result<()>
         println!("{text}");
         return Ok(());
     }
-    let r = readiness_for_pool(pool_vram_gib.saturating_mul(1024), backends)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    let r = readiness_for_pool_ex(
+        pool_vram_gib.saturating_mul(1024),
+        backends,
+        RuntimeFlags::default(),
+        None,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     println!("{}", serde_json::to_string_pretty(&r)?);
+    Ok(())
+}
+
+fn run_load(model: String, quant: String, mem_mib: u32) -> Result<()> {
+    let manifest = ManifestFile::load_default().map_err(|e| anyhow::anyhow!(e))?;
+    let spec = manifest
+        .model(&model)
+        .or_else(|| manifest.primary())
+        .ok_or_else(|| anyhow::anyhow!("no model in manifest"))?;
+    let q = if quant.is_empty() {
+        spec.pick_quant(mem_mib)
+            .ok_or_else(|| anyhow::anyhow!("no quant"))?
+    } else {
+        spec.weights
+            .quants
+            .iter()
+            .find(|x| x.id == quant)
+            .ok_or_else(|| anyhow::anyhow!("unknown quant {quant}"))?
+    };
+    let store = WeightsStore::new(WeightsStore::default_root());
+    store.ensure_root().map_err(|e| anyhow::anyhow!(e))?;
+    let prep = store.prepare(spec, q).map_err(|e| anyhow::anyhow!(e))?;
+    println!("prepare: {}", prep.message);
+    let loaded = load_model(&store, spec, q).map_err(|e| anyhow::anyhow!(e))?;
+    println!("{}", serde_json::to_string_pretty(&loaded.report())?);
     Ok(())
 }
 

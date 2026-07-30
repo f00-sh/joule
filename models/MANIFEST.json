@@ -1,16 +1,63 @@
 {
-  "version": 1,
+  "version": 2,
   "models": [
     {
       "id": "kimi-open",
       "label": "Kimi (open weights)",
-      "description": "Single cluster model. Weights are not loaded until the logical device (aggregate donor VRAM) is large enough. Inference stays stub until weights are published and the pool is ready.",
+      "description": "Single model on one logical GPU (sum of donor VRAM). Not loaded until the pool hits the load milestone. Service goes live after weights load on the mesh.",
       "min_pool_vram_mib": 65536,
       "min_backends": 3,
       "model_layers": 80,
+      "milestones": [
+        {
+          "id": "spark",
+          "title": "First light",
+          "description": "At least one donor is online. The logical device exists.",
+          "min_pool_vram_mib": 1,
+          "min_backends": 1
+        },
+        {
+          "id": "cluster",
+          "title": "Cluster formed",
+          "description": "Multiple machines contribute. Pool is a real multi-backend device.",
+          "min_pool_vram_mib": 16384,
+          "min_backends": 2
+        },
+        {
+          "id": "kimi-eligible",
+          "title": "Kimi eligible",
+          "description": "Aggregate VRAM and backend count meet the Kimi load gate. Agents arm weight cache.",
+          "min_pool_vram_mib": 65536,
+          "min_backends": 3
+        },
+        {
+          "id": "weights-published",
+          "title": "Weights published",
+          "description": "Open checkpoint URLs and hashes are pinned in the manifest.",
+          "requires_weights_published": true,
+          "min_pool_vram_mib": 65536,
+          "min_backends": 3
+        },
+        {
+          "id": "model-loaded",
+          "title": "Model loaded",
+          "description": "Weights are resident on the mesh (loaded into the logical device).",
+          "requires_model_loaded": true,
+          "min_pool_vram_mib": 65536,
+          "min_backends": 3
+        },
+        {
+          "id": "service-live",
+          "title": "Service live",
+          "description": "Public API serves real Kimi completions from the joule supercomputer.",
+          "requires_service_live": true,
+          "min_pool_vram_mib": 65536,
+          "min_backends": 3
+        }
+      ],
       "weights": {
         "published": false,
-        "note": "Pin redistributable open Kimi checkpoint URLs/hashes here when the public pool routinely exceeds min_pool_vram_mib. Until then agents only arm the cache.",
+        "note": "Pin redistributable open Kimi checkpoint URLs/hashes when the pool routinely exceeds kimi-eligible. Until then agents arm the cache only.",
         "quants": [
           {
             "id": "q4_k_m",

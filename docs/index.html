@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>joule — open supercomputer</title>
+  <link rel="stylesheet" href="https://f00.sh/theme/f00-theme.css" />
+  <style>
+    :root {
+      --bg: #090909;
+      --fg: #ede6de;
+      --muted: #8a8580;
+      --accent: #d44a18;
+      --sky: #1e78c8;
+      --box: #141414;
+      --border: #2a2a2a;
+      --ok: #3d9a5f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.45;
+    }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+    h1 { font-size: 1.75rem; letter-spacing: 0.04em; margin: 0 0 0.35rem; }
+    h1 span { color: var(--accent); }
+    .sub { color: var(--muted); margin-bottom: 2rem; }
+    .hero {
+      border: 1px solid var(--border);
+      background: var(--box);
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .big {
+      font-size: clamp(2rem, 6vw, 3.25rem);
+      color: var(--sky);
+      margin: 0.25rem 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 0.75rem;
+      margin: 1rem 0 1.5rem;
+    }
+    .card {
+      border: 1px solid var(--border);
+      background: var(--box);
+      padding: 0.9rem 1rem;
+    }
+    .label { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    .value { font-size: 1.35rem; margin-top: 0.3rem; }
+    .value.accent { color: var(--accent); }
+    .milestones { list-style: none; padding: 0; margin: 0; }
+    .milestones li {
+      border: 1px solid var(--border);
+      background: var(--box);
+      padding: 1rem 1.1rem;
+      margin-bottom: 0.6rem;
+      display: grid;
+      gap: 0.35rem;
+    }
+    .milestones li.done { border-color: #1e4a2e; }
+    .milestones li.next { border-color: var(--accent); }
+    .bar {
+      height: 6px;
+      background: #222;
+      margin-top: 0.4rem;
+    }
+    .bar > i {
+      display: block;
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+    }
+    .pill {
+      display: inline-block;
+      font-size: 0.7rem;
+      padding: 0.15rem 0.45rem;
+      border: 1px solid var(--border);
+      color: var(--muted);
+    }
+    .pill.ok { color: var(--ok); border-color: #1e4a2e; }
+    .pill.go { color: var(--accent); border-color: var(--accent); }
+    a { color: var(--sky); }
+    footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.8rem; }
+    .countdown {
+      font-size: 1.1rem;
+      color: var(--fg);
+      margin: 0.75rem 0 0;
+    }
+    .err { color: #e88; }
+    code { color: var(--fg); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1><span>joule</span> supercomputer</h1>
+    <p class="sub">
+      One logical GPU. Aggregate donor compute. Single open model (Kimi).
+      Contribute machines → earn millijoules → use the AI.
+    </p>
+
+    <div class="hero">
+      <div class="label">Logical device VRAM</div>
+      <div class="big" id="vram">—</div>
+      <div class="sub" id="device-line">connecting to control…</div>
+      <p class="countdown" id="countdown">—</p>
+      <div class="bar" title="progress to Kimi load gate"><i id="bar"></i></div>
+      <div class="label" style="margin-top:0.5rem" id="progress-label">progress</div>
+    </div>
+
+    <div class="grid">
+      <div class="card"><div class="label">Backends</div><div class="value" id="backends">—</div></div>
+      <div class="card"><div class="label">Model</div><div class="value" id="model">kimi-open</div></div>
+      <div class="card"><div class="label">Mode</div><div class="value accent" id="mode">—</div></div>
+      <div class="card"><div class="label">Service</div><div class="value" id="service">—</div></div>
+    </div>
+
+    <h2 class="label" style="margin-bottom:0.75rem">Milestones to load &amp; run Kimi</h2>
+    <ol class="milestones" id="milestones"></ol>
+    <p class="sub" id="msg"></p>
+    <p class="err" id="err"></p>
+
+    <footer>
+      Live API:
+      <a href="#" id="link-cap">/v1/cluster/capacity</a> ·
+      <a href="#" id="link-ready">/v1/models/readiness</a> ·
+      <a href="https://github.com/f00-sh/joule">github.com/f00-sh/joule</a>
+      <br />
+      Set control base: <code>?api=http://127.0.0.1:7700</code> (default).
+      <span id="updated"></span>
+    </footer>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const API = (params.get("api") || "http://127.0.0.1:7700").replace(/\/$/, "");
+    document.getElementById("link-cap").href = API + "/v1/cluster/capacity";
+    document.getElementById("link-ready").href = API + "/v1/models/readiness";
+
+    function fmtGib(mib) {
+      if (mib == null) return "—";
+      return (mib / 1024).toFixed(1) + " GiB";
+    }
+
+    async function tick() {
+      const err = document.getElementById("err");
+      try {
+        const [cap, ready] = await Promise.all([
+          fetch(API + "/v1/cluster/capacity").then(r => r.json()),
+          fetch(API + "/v1/models/readiness").then(r => r.json()),
+        ]);
+        const ld = cap.logical_device || {};
+        document.getElementById("vram").textContent =
+          (ld.vram_gib != null ? ld.vram_gib + " GiB" : fmtGib(cap.mem_mib_healthy));
+        document.getElementById("device-line").textContent =
+          (ld.id || "joule-pool") + " · " + (ld.backends || 0) + " machines · one logical GPU";
+        document.getElementById("backends").textContent = ld.backends ?? cap.nodes_healthy ?? 0;
+        document.getElementById("model").textContent = ready.model || "kimi-open";
+        document.getElementById("mode").textContent = ready.inference_mode || "—";
+        document.getElementById("service").textContent = ready.service_live
+          ? "LIVE"
+          : (ready.model_loaded ? "loaded" : "not yet");
+        document.getElementById("countdown").textContent = ready.countdown_label || "—";
+        const pct = ready.pool_progress_pct || 0;
+        document.getElementById("bar").style.width = pct + "%";
+        document.getElementById("progress-label").textContent =
+          pct + "% toward Kimi pool gate (" +
+          (ready.required_vram_gib || 64) + " GiB / " +
+          (ready.required_backends || 3) + " backends)";
+        document.getElementById("msg").textContent = ready.message || "";
+
+        const ol = document.getElementById("milestones");
+        ol.innerHTML = "";
+        const ms = ready.milestones || [];
+        let foundNext = false;
+        ms.forEach(m => {
+          const li = document.createElement("li");
+          if (m.reached) li.className = "done";
+          else if (!foundNext) { li.className = "next"; foundNext = true; }
+          const pill = m.reached
+            ? '<span class="pill ok">reached</span>'
+            : (li.className === "next" ? '<span class="pill go">next</span>' : '<span class="pill">locked</span>');
+          li.innerHTML =
+            "<div><strong>" + m.title + "</strong> " + pill + "</div>" +
+            "<div class=\"sub\" style=\"margin:0\">" + (m.description || "") + "</div>" +
+            "<div class=\"bar\"><i style=\"width:" + (m.progress_pct || 0) + "%\"></i></div>";
+          ol.appendChild(li);
+        });
+        document.getElementById("updated").textContent =
+          " · updated " + new Date().toLocaleTimeString();
+        err.textContent = "";
+      } catch (e) {
+        err.textContent = "Cannot reach control at " + API + " — start: joule control  (" + e + ")";
+      }
+    }
+    tick();
+    setInterval(tick, 4000);
+  </script>
+</body>
+</html>

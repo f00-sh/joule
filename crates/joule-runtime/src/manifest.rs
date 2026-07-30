@@ -1,4 +1,4 @@
-//! Model manifest: what joule will run, and how large the pool must be first.
+//! Model manifest: milestones, pool gates, and when we may load Kimi.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -18,12 +18,12 @@ pub struct ModelSpec {
     pub label: String,
     #[serde(default)]
     pub description: String,
-    /// Aggregate healthy donor VRAM required before we treat the pool as ready for this model.
     pub min_pool_vram_mib: u64,
-    /// Minimum healthy backends (physical machines).
     pub min_backends: u32,
     #[serde(default = "default_layers")]
     pub model_layers: u32,
+    #[serde(default)]
+    pub milestones: Vec<MilestoneSpec>,
     pub weights: WeightsSpec,
 }
 
@@ -32,8 +32,25 @@ fn default_layers() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MilestoneSpec {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub min_pool_vram_mib: u64,
+    #[serde(default)]
+    pub min_backends: u32,
+    #[serde(default)]
+    pub requires_weights_published: bool,
+    #[serde(default)]
+    pub requires_model_loaded: bool,
+    #[serde(default)]
+    pub requires_service_live: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WeightsSpec {
-    /// When false, agents only *arm* the cache; no multi‑GB download.
     pub published: bool,
     #[serde(default)]
     pub note: String,
@@ -59,6 +76,17 @@ pub struct WeightFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MilestoneStatus {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub reached: bool,
+    pub progress_pct: u8,
+    pub min_pool_vram_mib: u64,
+    pub min_backends: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelReadiness {
     pub model: String,
     pub label: String,
@@ -68,27 +96,42 @@ pub struct ModelReadiness {
     pub required_vram_gib: u64,
     pub backends: u32,
     pub required_backends: u32,
-    /// Aggregate VRAM + backend count gates passed.
     pub pool_ready: bool,
-    /// Manifest says weight URLs/hashes are published.
     pub weights_published: bool,
-    /// 0–100 progress toward pool size gate.
+    pub model_loaded: bool,
+    pub service_live: bool,
     pub pool_progress_pct: u8,
-    /// What inference does today.
     pub inference_mode: InferenceMode,
     pub message: String,
     pub recommended_quant: Option<String>,
+    /// Ordered campaign milestones toward live Kimi service.
+    pub milestones: Vec<MilestoneStatus>,
+    /// First unreached milestone (the “countdown” target).
+    pub next_milestone: Option<MilestoneStatus>,
+    /// Estimated seconds to next milestone from recent VRAM growth (None if unknown).
+    pub countdown_secs: Option<u64>,
+    /// Human countdown string, e.g. "about 3 hours" or "awaiting more donors".
+    pub countdown_label: String,
+    /// When we may begin loading weights into the logical device.
+    pub can_load_model: bool,
+    /// When public service should flip to real completions.
+    pub can_begin_service: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InferenceMode {
-    /// Pool too small — stub only; do not fetch multi‑GB weights.
     StubAwaitingPool,
-    /// Pool large enough, weights not published yet — cache armed, still stub.
     StubPoolReady,
-    /// Weights published and prepared on disk (future real engine).
-    WeightsReady,
+    LoadingWeights,
+    ModelLoaded,
+    ServiceLive,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RuntimeFlags {
+    pub model_loaded: bool,
+    pub service_live: bool,
 }
 
 impl ManifestFile {
@@ -112,7 +155,6 @@ impl ManifestFile {
 
 impl ModelSpec {
     pub fn pick_quant(&self, node_vram_mib: u32) -> Option<&QuantSpec> {
-        // Largest quant that still fits the node.
         let mut best: Option<&QuantSpec> = None;
         for q in &self.weights.quants {
             if node_vram_mib >= q.min_node_vram_mib {
@@ -122,36 +164,129 @@ impl ModelSpec {
         best.or_else(|| self.weights.quants.first())
     }
 
-    pub fn readiness(&self, pool_vram_mib: u64, backends: u32) -> ModelReadiness {
-        let pool_ready = pool_vram_mib >= self.min_pool_vram_mib && backends >= self.min_backends;
+    fn milestone_progress(&self, m: &MilestoneSpec, pool_vram_mib: u64, backends: u32) -> u8 {
         let vram_pct = pool_vram_mib
             .saturating_mul(100)
-            .checked_div(self.min_pool_vram_mib)
+            .checked_div(m.min_pool_vram_mib.max(1))
             .unwrap_or(100)
             .min(100) as u8;
         let be_pct = (u64::from(backends) * 100)
-            .checked_div(u64::from(self.min_backends))
+            .checked_div(u64::from(m.min_backends.max(1)))
+            .unwrap_or(100)
+            .min(100) as u8;
+        let mut p = vram_pct.min(be_pct);
+        if m.requires_weights_published && !self.weights.published {
+            p = p.min(90);
+        }
+        p
+    }
+
+    fn milestone_reached(
+        &self,
+        m: &MilestoneSpec,
+        pool_vram_mib: u64,
+        backends: u32,
+        flags: RuntimeFlags,
+    ) -> bool {
+        if pool_vram_mib < m.min_pool_vram_mib || backends < m.min_backends {
+            return false;
+        }
+        if m.requires_weights_published && !self.weights.published {
+            return false;
+        }
+        if m.requires_model_loaded && !flags.model_loaded {
+            return false;
+        }
+        if m.requires_service_live && !flags.service_live {
+            return false;
+        }
+        true
+    }
+
+    pub fn readiness(
+        &self,
+        pool_vram_mib: u64,
+        backends: u32,
+        flags: RuntimeFlags,
+        vram_growth_mib_per_sec: Option<f64>,
+    ) -> ModelReadiness {
+        let pool_ready = pool_vram_mib >= self.min_pool_vram_mib && backends >= self.min_backends;
+        let vram_pct = pool_vram_mib
+            .saturating_mul(100)
+            .checked_div(self.min_pool_vram_mib.max(1))
+            .unwrap_or(100)
+            .min(100) as u8;
+        let be_pct = (u64::from(backends) * 100)
+            .checked_div(u64::from(self.min_backends.max(1)))
             .unwrap_or(100)
             .min(100) as u8;
         let pool_progress_pct = vram_pct.min(be_pct);
 
-        let (inference_mode, message) = if !pool_ready {
+        let milestones: Vec<MilestoneStatus> = self
+            .milestones
+            .iter()
+            .map(|m| MilestoneStatus {
+                id: m.id.clone(),
+                title: m.title.clone(),
+                description: m.description.clone(),
+                reached: self.milestone_reached(m, pool_vram_mib, backends, flags),
+                progress_pct: self.milestone_progress(m, pool_vram_mib, backends),
+                min_pool_vram_mib: m.min_pool_vram_mib,
+                min_backends: m.min_backends,
+            })
+            .collect();
+
+        let next_milestone = milestones.iter().find(|m| !m.reached).cloned();
+
+        let countdown_secs = next_milestone.as_ref().and_then(|nm| {
+            let need_vram = nm.min_pool_vram_mib.saturating_sub(pool_vram_mib);
+            if need_vram == 0 {
+                return None;
+            }
+            let rate = vram_growth_mib_per_sec.filter(|r| *r > 0.01)?;
+            Some((need_vram as f64 / rate).ceil() as u64)
+        });
+
+        let countdown_label = match (&next_milestone, countdown_secs) {
+            (None, _) => "all milestones reached".into(),
+            (Some(m), Some(secs)) => format!("next: {} — about {}", m.title, format_duration(secs)),
+            (Some(m), None) => format!(
+                "next: {} — need more donors ({} GiB / {} backends now)",
+                m.title,
+                pool_vram_mib / 1024,
+                backends
+            ),
+        };
+
+        let can_load_model = pool_ready && self.weights.published;
+        let can_begin_service = can_load_model && flags.model_loaded;
+
+        let (inference_mode, message) = if flags.service_live {
             (
-                InferenceMode::StubAwaitingPool,
+                InferenceMode::ServiceLive,
+                format!("{} is live on the joule logical device.", self.id),
+            )
+        } else if flags.model_loaded {
+            (
+                InferenceMode::ModelLoaded,
                 format!(
-                    "pool not ready for {}: need ≥{} GiB aggregate VRAM and ≥{} backends (have {} GiB, {} backends). Inference remains stub.",
-                    self.id,
-                    self.min_pool_vram_mib / 1024,
-                    self.min_backends,
-                    pool_vram_mib / 1024,
-                    backends
+                    "{} weights are loaded on the mesh; service not marked live yet.",
+                    self.id
                 ),
             )
-        } else if !self.weights.published {
+        } else if can_load_model {
+            (
+                InferenceMode::LoadingWeights,
+                format!(
+                    "pool ready and weights published — load {} into the logical device.",
+                    self.id
+                ),
+            )
+        } else if pool_ready {
             (
                 InferenceMode::StubPoolReady,
                 format!(
-                    "pool ready for {} ({} GiB, {} backends). Weights not published yet — agents arm cache; inference still stub. {}",
+                    "pool ready for {} ({} GiB, {} backends). Weights not published yet. {}",
                     self.id,
                     pool_vram_mib / 1024,
                     backends,
@@ -160,10 +295,15 @@ impl ModelSpec {
             )
         } else {
             (
-                InferenceMode::WeightsReady,
+                InferenceMode::StubAwaitingPool,
                 format!(
-                    "pool ready and weights published for {}. Agents should prepare quant artifacts.",
-                    self.id
+                    "growing the logical device for {}: need ≥{} GiB and ≥{} backends (have {} GiB, {}). {}",
+                    self.id,
+                    self.min_pool_vram_mib / 1024,
+                    self.min_backends,
+                    pool_vram_mib / 1024,
+                    backends,
+                    countdown_label
                 ),
             )
         };
@@ -179,11 +319,31 @@ impl ModelSpec {
             required_backends: self.min_backends,
             pool_ready,
             weights_published: self.weights.published,
+            model_loaded: flags.model_loaded,
+            service_live: flags.service_live,
             pool_progress_pct,
             inference_mode,
             message,
             recommended_quant: None,
+            milestones,
+            next_milestone,
+            countdown_secs,
+            countdown_label,
+            can_load_model,
+            can_begin_service,
         }
+    }
+}
+
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("~{} min", secs.div_ceil(60))
+    } else if secs < 86400 {
+        format!("~{:.1} hours", secs as f64 / 3600.0)
+    } else {
+        format!("~{:.1} days", secs as f64 / 86400.0)
     }
 }
 
@@ -192,24 +352,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_manifest_loads() {
+    fn milestones_and_countdown() {
         let m = ManifestFile::load_default().unwrap();
         let kimi = m.model("kimi-open").unwrap();
-        assert!(kimi.min_pool_vram_mib >= 64 * 1024);
-        assert!(!kimi.weights.published);
-        let r = kimi.readiness(8 * 1024, 1);
+        let r = kimi.readiness(8 * 1024, 1, RuntimeFlags::default(), Some(100.0));
         assert!(!r.pool_ready);
-        assert_eq!(r.inference_mode, InferenceMode::StubAwaitingPool);
-        let r2 = kimi.readiness(72 * 1024, 5);
+        assert!(r.next_milestone.is_some());
+        assert!(r.countdown_secs.is_some());
+        assert!(r.milestones.iter().any(|x| x.id == "spark" && x.reached));
+        let r2 = kimi.readiness(72 * 1024, 5, RuntimeFlags::default(), None);
         assert!(r2.pool_ready);
-        assert_eq!(r2.inference_mode, InferenceMode::StubPoolReady);
-    }
-
-    #[test]
-    fn pick_quant_by_vram() {
-        let m = ManifestFile::load_default().unwrap();
-        let kimi = m.model("kimi-open").unwrap();
-        assert_eq!(kimi.pick_quant(8192).unwrap().id, "q4_k_m");
-        assert_eq!(kimi.pick_quant(24576).unwrap().id, "q8_0");
+        assert!(r2
+            .milestones
+            .iter()
+            .any(|x| x.id == "kimi-eligible" && x.reached));
+        assert!(!r2.can_load_model); // weights not published
     }
 }

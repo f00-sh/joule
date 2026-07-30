@@ -7,7 +7,7 @@ use joule_ledger::{
 };
 use joule_proto::{ClusterPlan, DeviceClass, NodeCaps, NodeId, CLUSTER_MODEL};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -96,6 +96,12 @@ pub struct ControlState {
     pub data_dir: Option<PathBuf>,
     /// Wake waiters when a compute slot frees.
     pub schedule_notify: Option<Arc<Notify>>,
+    /// Ring buffer of (time, healthy_vram_mib) for countdown ETA.
+    pub vram_history: VecDeque<(Instant, u64)>,
+    /// Nodes that reported successful model load (weights resident).
+    pub nodes_model_loaded: HashSet<NodeId>,
+    /// Operator / automatic flag: public service serving real model.
+    pub service_live: bool,
     dirty: bool,
 }
 
@@ -120,7 +126,70 @@ impl ControlState {
             chat_count: 0,
             data_dir: None,
             schedule_notify: None,
+            vram_history: VecDeque::new(),
+            nodes_model_loaded: HashSet::new(),
+            service_live: false,
             dirty: false,
+        }
+    }
+
+    pub fn record_vram_sample(&mut self, healthy_vram_mib: u64) {
+        let now = Instant::now();
+        self.vram_history.push_back((now, healthy_vram_mib));
+        while self.vram_history.len() > 120 {
+            self.vram_history.pop_front();
+        }
+        // Drop samples older than 2 hours.
+        while self
+            .vram_history
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(7200))
+        {
+            self.vram_history.pop_front();
+        }
+    }
+
+    /// Recent aggregate VRAM growth (MiB/s), if observable.
+    pub fn vram_growth_mib_per_sec(&self) -> Option<f64> {
+        if self.vram_history.len() < 2 {
+            return None;
+        }
+        let (t0, v0) = *self.vram_history.front()?;
+        let (t1, v1) = *self.vram_history.back()?;
+        let dt = t1.duration_since(t0).as_secs_f64();
+        if dt < 5.0 {
+            return None;
+        }
+        let dv = v1 as f64 - v0 as f64;
+        if dv <= 0.0 {
+            return None;
+        }
+        Some(dv / dt)
+    }
+
+    pub fn runtime_flags(&self) -> joule_runtime::RuntimeFlags {
+        joule_runtime::RuntimeFlags {
+            model_loaded: !self.nodes_model_loaded.is_empty(),
+            service_live: self.service_live,
+        }
+    }
+
+    pub fn mark_node_loaded(&mut self, id: NodeId) {
+        self.nodes_model_loaded.insert(id);
+        // Auto service-live when enough of the mesh has loaded and pool gate ok.
+        let backends = self.cluster.pool_size() as u32;
+        let vram = self.cluster.capacity().mem_mib_healthy;
+        if let Ok(r) = joule_runtime::readiness_for_pool_ex(
+            vram,
+            backends,
+            self.runtime_flags(),
+            self.vram_growth_mib_per_sec(),
+        ) {
+            if r.can_begin_service && self.nodes_model_loaded.len() >= r.required_backends as usize
+            {
+                self.service_live = true;
+                info!("service marked live — model loaded on mesh");
+            }
         }
     }
 
@@ -180,6 +249,11 @@ impl ControlState {
     pub fn prune(&mut self) {
         self.cluster.apply_staleness();
         self.cluster.reap_dead(Duration::from_secs(120));
+        // Drop load flags for dead nodes.
+        let alive: HashSet<_> = self.cluster.nodes().map(|n| n.id.clone()).collect();
+        self.nodes_model_loaded.retain(|id| alive.contains(id));
+        let vram = self.cluster.capacity().mem_mib_healthy;
+        self.record_vram_sample(vram);
         // Expire old challenges.
         let now = Instant::now();
         self.pending_challenges

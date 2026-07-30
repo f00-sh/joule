@@ -278,6 +278,14 @@ pub enum Message {
         files_complete: bool,
         message: String,
     },
+    /// Agent → control: weights are resident in process memory (model loaded).
+    ModelLoaded {
+        model: String,
+        quant: String,
+        bytes_resident: u64,
+        tensors: u32,
+        message: String,
+    },
     PlanRequest {
         model: String,
     },

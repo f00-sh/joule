@@ -119,14 +119,19 @@ pub fn load_or_init_state(data_dir: Option<PathBuf>) -> Result<App> {
 /// Push pool readiness to every connected agent so they can arm/prepare weights.
 pub async fn broadcast_pool_status(app: &App) {
     use joule_proto::{Envelope, Message, NodeId};
-    use joule_runtime::{readiness_for_pool, ManifestFile};
+    use joule_runtime::ManifestFile;
 
-    let (vram, backends) = {
+    let (vram, backends, flags, growth) = {
         let g = app.state.read().await;
         let cap = g.cluster.capacity();
-        (cap.mem_mib_healthy, cap.nodes_healthy)
+        (
+            cap.mem_mib_healthy,
+            cap.nodes_healthy,
+            g.runtime_flags(),
+            g.vram_growth_mib_per_sec(),
+        )
     };
-    let Ok(r) = readiness_for_pool(vram, backends) else {
+    let Ok(r) = joule_runtime::readiness_for_pool_ex(vram, backends, flags, growth) else {
         return;
     };
     let quant = ManifestFile::load_default()

@@ -156,6 +156,9 @@ async fn pool_capacity_and_chat() {
         .unwrap();
     assert_eq!(ready["pool_ready"], false);
     assert_eq!(ready["inference_mode"], "stub_awaiting_pool");
+    assert!(ready["milestones"].as_array().unwrap().len() >= 3);
+    assert!(ready["next_milestone"].is_object());
+    assert!(ready["countdown_label"].as_str().unwrap().contains("next"));
 
     let chat: serde_json::Value = client
         .post(format!("{base}/v1/chat/completions"))

@@ -166,6 +166,23 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     "{message}"
                 );
             }
+            Message::ModelLoaded {
+                model,
+                quant,
+                bytes_resident,
+                tensors,
+                message,
+            } => {
+                info!(
+                    %model,
+                    %quant,
+                    bytes_resident,
+                    tensors,
+                    from = %env.from,
+                    "{message}"
+                );
+                app.state.write().await.mark_node_loaded(env.from.clone());
+            }
             other => {
                 warn!(msg = ?other, "ignored agent→control message");
             }
