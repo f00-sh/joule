@@ -3,218 +3,126 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#d44a18" />
-  <meta name="description" content="joule — free open-weight AI by pooling idle GPUs. Pay only in donated compute. No cash. Millijoules." />
+  <meta name="theme-color" content="#1E78C8" />
+  <meta name="description" content="joule — free open-weight AI by pooling idle GPUs. Pay only in donated compute. Live cluster capacity on joule.f00.sh." />
   <meta property="og:title" content="joule — free supercomputer, paid in compute" />
-  <meta property="og:description" content="Donate idle machines. Earn millijoules. Use open Kimi-class AI. Free forever on the public pool — no credit card." />
+  <meta property="og:description" content="Donate idle machines. Earn millijoules. Use open Kimi-class AI. Free on the public pool — no credit card. Live pool stats." />
   <meta property="og:url" content="https://joule.f00.sh/" />
   <meta property="og:type" content="website" />
-  <title>joule — free AI supercomputer (pay in compute)</title>
+  <link rel="canonical" href="https://joule.f00.sh/" />
+  <title>joule — free AI supercomputer (live pool)</title>
   <link rel="icon" href="https://f00.sh/favicon.svg" type="image/svg+xml" />
+  <!-- f00 SSOT theme (Heartbox / Onyx / zine mono). Project CSS = layout only. -->
   <link rel="stylesheet" href="https://f00.sh/theme/f00-theme.css" data-f00-theme="1" />
-  <style>
-    :root {
-      --bg: #090909;
-      --fg: #ede6de;
-      --muted: #8a8580;
-      --accent: #d44a18;
-      --sky: #1e78c8;
-      --box: #141414;
-      --border: #2a2a2a;
-      --ok: #3d9a5f;
-      --warn: #c9a227;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      background: var(--bg);
-      color: var(--fg);
-      line-height: 1.5;
-    }
-    a { color: var(--sky); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    .wrap { max-width: 880px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
-    header {
-      display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
-      gap: 0.75rem; margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem;
-    }
-    .brand { font-size: 1.1rem; letter-spacing: 0.06em; color: var(--fg); }
-    .brand span { color: var(--accent); }
-    nav { display: flex; flex-wrap: wrap; gap: 0.9rem; font-size: 0.85rem; color: var(--muted); }
-    nav a { color: var(--muted); }
-    nav a:hover { color: var(--fg); }
-    .pill-free {
-      display: inline-block;
-      border: 1px solid var(--ok);
-      color: var(--ok);
-      font-size: 0.72rem;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      padding: 0.2rem 0.55rem;
-      margin-bottom: 0.85rem;
-    }
-    h1 {
-      font-size: clamp(1.75rem, 5vw, 2.6rem);
-      line-height: 1.15;
-      margin: 0 0 0.85rem;
-      letter-spacing: -0.01em;
-      font-weight: 600;
-    }
-    h1 em { font-style: normal; color: var(--accent); }
-    .lead {
-      font-size: 1.05rem;
-      color: var(--muted);
-      max-width: 38em;
-      margin: 0 0 1.5rem;
-    }
-    .cta-row { display: flex; flex-wrap: wrap; gap: 0.65rem; margin: 1.25rem 0 2rem; }
-    .btn {
-      display: inline-block;
-      padding: 0.65rem 1.1rem;
-      border: 1px solid var(--accent);
-      background: var(--accent);
-      color: #0a0a0a;
-      font: inherit;
-      font-size: 0.9rem;
-      cursor: pointer;
-    }
-    .btn.ghost {
-      background: transparent;
-      color: var(--fg);
-      border-color: var(--border);
-    }
-    .btn:hover { filter: brightness(1.08); text-decoration: none; }
-    section { margin: 2.25rem 0; }
-    h2 {
-      font-size: 0.75rem;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin: 0 0 0.85rem;
-      font-weight: 500;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 0.75rem;
-    }
-    .card {
-      border: 1px solid var(--border);
-      background: var(--box);
-      padding: 1rem 1.05rem;
-    }
-    .card strong { display: block; color: var(--fg); margin-bottom: 0.35rem; }
-    .card p { margin: 0; color: var(--muted); font-size: 0.88rem; }
-    .hero-stat {
-      border: 1px solid var(--border);
-      background: var(--box);
-      padding: 1.1rem 1.25rem;
-      margin: 1.5rem 0;
-    }
-    .hero-stat .big {
-      font-size: clamp(1.8rem, 5vw, 2.75rem);
-      color: var(--sky);
-      margin: 0.2rem 0;
-    }
-    .muted { color: var(--muted); }
-    .steps { list-style: none; padding: 0; margin: 0; counter-reset: step; }
-    .steps li {
-      border: 1px solid var(--border);
-      background: var(--box);
-      padding: 0.95rem 1.05rem;
-      margin-bottom: 0.55rem;
-      counter-increment: step;
-      position: relative;
-      padding-left: 3rem;
-    }
-    .steps li::before {
-      content: counter(step);
-      position: absolute;
-      left: 1rem;
-      top: 0.95rem;
-      color: var(--accent);
-      font-weight: 600;
-    }
-    table.fair {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.85rem;
-    }
-    table.fair th, table.fair td {
-      border: 1px solid var(--border);
-      padding: 0.55rem 0.7rem;
-      text-align: left;
-    }
-    table.fair th { color: var(--muted); font-weight: 500; background: var(--box); }
-    .callout {
-      border-left: 3px solid var(--accent);
-      background: var(--box);
-      padding: 0.9rem 1.1rem;
-      margin: 1rem 0;
-      color: var(--muted);
-      font-size: 0.92rem;
-    }
-    .callout strong { color: var(--fg); }
-    code, .mono { font-family: inherit; color: var(--fg); }
-    pre {
-      background: var(--box);
-      border: 1px solid var(--border);
-      padding: 0.9rem 1rem;
-      overflow-x: auto;
-      font-size: 0.82rem;
-    }
-    footer {
-      margin-top: 3rem;
-      padding-top: 1.25rem;
-      border-top: 1px solid var(--border);
-      color: var(--muted);
-      font-size: 0.8rem;
-    }
-    .err { color: #e88; font-size: 0.85rem; }
-    .ok { color: var(--ok); }
-    .bar {
-      height: 6px; background: #222; margin-top: 0.45rem;
-    }
-    .bar > i { display: block; height: 100%; background: var(--accent); width: 0%; }
-    #milestones { list-style: none; padding: 0; margin: 0.75rem 0 0; }
-    #milestones li {
-      border: 1px solid var(--border);
-      background: var(--box);
-      padding: 0.7rem 0.9rem;
-      margin-bottom: 0.45rem;
-      font-size: 0.85rem;
-    }
-    #milestones li.done { border-color: #1e4a2e; }
-    #milestones li.next { border-color: var(--accent); }
-  </style>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="app.js" defer></script>
+  <script src="https://f00.sh/assets/f00-stars-v1.js" defer></script>
+  <script src="https://f00.sh/theme/f00-entropy.js" data-f00-entropy-script defer></script>
 </head>
 <body>
-  <div class="wrap">
-    <header>
-      <a class="brand" href="https://f00.sh/"><span>f00</span> / joule</a>
-      <nav>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="nav-shell">
+      <a class="brand" href="https://f00.sh/" aria-label="f00 home">
+        <span class="brand-mark">f00</span>
+        <span class="brand-sub">/joule</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="#pool">Live pool</a>
         <a href="#free">Free</a>
-        <a href="#how">How</a>
         <a href="#millijoules">Millijoules</a>
         <a href="#fair">Fairness</a>
-        <a href="#pool">Pool</a>
-        <a href="https://github.com/f00-sh/joule">GitHub</a>
+        <a href="#join">Join</a>
+        <a href="https://github.com/f00-sh/joule" rel="noopener">GitHub</a>
       </nav>
-    </header>
-
-    <p class="pill-free">100% free · no credit card · pay in compute</p>
-    <h1>Open AI on a shared supercomputer.<br /><em>You bring the watts.</em></h1>
-    <p class="lead">
-      joule pools idle machines across the internet into one logical GPU and runs open-weight
-      models (Kimi-class). Access is earned by donating compute — not by buying tokens.
-      Small GPUs count. Leechers pay more. Everyone can audit the math.
-    </p>
-    <div class="cta-row">
-      <a class="btn" href="https://github.com/f00-sh/joule#quick-start-local-pool">Run a donor agent</a>
-      <a class="btn ghost" href="#millijoules">How millijoules work</a>
-      <a class="btn ghost" href="https://github.com/f00-sh/joule">Source</a>
     </div>
+  </header>
+
+  <main id="main" class="wrap">
+    <div class="live-bar" aria-live="polite">
+      <span class="dot" id="live-dot" aria-hidden="true"></span>
+      <strong id="live-status">…</strong>
+      <span class="meta">cluster feed</span>
+      <span class="meta">updated <span id="live-age">—</span></span>
+      <span class="meta" id="live-hint">SSE /api/pool/stream · fallback poll</span>
+    </div>
+
+    <section class="hero" id="top">
+      <p class="pill-free">100% free · no credit card · pay in compute</p>
+      <h1>Open AI on a shared supercomputer.<br /><em>You bring the watts.</em></h1>
+      <p class="lead">
+        joule pools idle machines across the internet into <strong>one logical GPU</strong>
+        and runs open-weight models (Kimi-class). Access is earned by donating compute —
+        not by buying tokens. Small GPUs count. Leechers pay more. The numbers below are
+        the live cluster.
+      </p>
+      <div class="cta-row">
+        <a class="btn" href="#join">Run a donor agent</a>
+        <a class="btn ghost" href="#pool">Live pool</a>
+        <a class="btn ghost" href="https://github.com/f00-sh/joule">Source</a>
+      </div>
+    </section>
+
+    <section id="pool">
+      <h2>Live cluster</h2>
+      <div class="stat-grid" aria-label="Cluster statistics">
+        <div class="stat">
+          <div class="label">Healthy VRAM</div>
+          <div class="value" id="stat-vram">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">Backends</div>
+          <div class="value accent" id="stat-backends">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">Nodes (all / healthy)</div>
+          <div class="value" id="stat-nodes">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">Stream slots</div>
+          <div class="value" id="stat-streams">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">Throughput class Σ</div>
+          <div class="value" id="stat-throughput">—</div>
+        </div>
+        <div class="stat">
+          <div class="label">Inference mode</div>
+          <div class="value" id="stat-mode">—</div>
+        </div>
+      </div>
+
+      <div class="pool-panel">
+        <div class="muted">Aggregate healthy VRAM · one logical device</div>
+        <p class="big" id="vram">—</p>
+        <p class="countdown" id="countdown">countdown: connecting…</p>
+        <p class="muted" id="pool-meta"></p>
+        <ul class="milestones" id="milestones"></ul>
+        <p class="err" id="pool-err" hidden></p>
+      </div>
+
+      <h2 style="margin-top:1.5rem">Donors right now</h2>
+      <table class="nodes" aria-label="Donor nodes">
+        <thead>
+          <tr>
+            <th>Account</th>
+            <th>Device</th>
+            <th>VRAM</th>
+            <th>State</th>
+            <th>Slots</th>
+            <th>Health</th>
+          </tr>
+        </thead>
+        <tbody id="nodes-body">
+          <tr><td colspan="6" class="muted">Loading…</td></tr>
+        </tbody>
+      </table>
+      <p class="muted" style="font-size:0.78rem;margin-top:0.6rem">
+        Edge API: <code>/api/pool</code> · stream <code>/api/pool/stream</code>.
+        Lab override: <code>?api=http://127.0.0.1:7700</code>.
+      </p>
+    </section>
 
     <section id="free">
       <h2>It is free</h2>
@@ -225,55 +133,41 @@
         </div>
         <div class="card">
           <strong>Give ↔ get</strong>
-          <p>Mint millijoules while your agent is healthy in the cluster. Burn them when you chat. No live contribution and no balance → no API.</p>
+          <p>Mint millijoules while your agent is healthy. Burn them when you chat. No live contribution and no balance → no API.</p>
         </div>
         <div class="card">
           <strong>Small machines matter</strong>
-          <p>Rewards use √VRAM, not “only 4090s welcome.” A modest card that stays online earns real credit — and tenure boosts the loyal.</p>
+          <p>Rewards use √VRAM, not “only 4090s welcome.” A modest card that stays online earns real credit — tenure boosts the loyal.</p>
         </div>
-      </div>
-    </section>
-
-    <section id="how">
-      <h2>How it works</h2>
-      <ol class="steps">
-        <li>Install the native <code>joule agent</code> on a machine you control (not the browser).</li>
-        <li>It joins the internet-wide cluster and donates VRAM to one logical device.</li>
-        <li>You earn <strong>millijoules</strong> for heartbeats, honest challenges, and real shards.</li>
-        <li>Point any OpenAI-compatible client at the gateway with your key and spend mJ.</li>
-        <li>When the pool crosses milestones (VRAM + backends), we load open Kimi weights and go live.</li>
-      </ol>
-      <div class="callout">
-        <strong>Teaser status:</strong> product is 0.0.0 research / wip. Local lab works today.
-        Public pool capacity and model load unlock with enough donors — watch the strip below.
       </div>
     </section>
 
     <section id="millijoules">
-      <h2>Millijoules, explained</h2>
+      <h2>Millijoules</h2>
       <p class="muted">
-        A <strong class="mono">millijoule (mJ)</strong> is an integer credit on the ledger.
-        1000 mJ = 1 J (display only). You cannot buy them with money on the public pool.
+        A <strong>millijoule (mJ)</strong> is an integer credit. 1000 mJ = 1 J (display only).
+        You cannot buy them with money on the public pool.
       </p>
       <table class="fair">
         <thead>
           <tr><th>You do</th><th>Ledger</th></tr>
         </thead>
         <tbody>
-          <tr><td>Healthy heartbeat</td><td>Mint (small base × fairness factors)</td></tr>
+          <tr><td>Healthy heartbeat</td><td>Mint (base × fairness factors)</td></tr>
           <tr><td>Serve an inference shard</td><td>Mint (tokens × factors)</td></tr>
           <tr><td>Pass a spot challenge</td><td>Mint (anti-cheat honesty)</td></tr>
-          <tr><td>Call chat / completions</td><td>Burn (prompt + 4× completion tokens × leecher factor)</td></tr>
+          <tr><td>Call chat / completions</td><td>Burn (prompt + 4× completion × leecher factor)</td></tr>
         </tbody>
       </table>
       <p class="muted" style="margin-top:0.9rem">
-        Every ledger line embeds <code>eco=v0</code> and the basis-point factors so you can recompute the total.
-        Spec: <a href="https://github.com/f00-sh/joule/blob/main/docs/design/economy-v0.md">economy-v0.md</a>.
+        Every ledger line embeds <code>eco=v0</code>.
+        Spec:
+        <a href="https://github.com/f00-sh/joule/blob/main/docs/design/economy-v0.md">economy-v0.md</a>.
       </p>
     </section>
 
     <section id="fair">
-      <h2>Fairness algorithm (auditable)</h2>
+      <h2>Fairness (auditable)</h2>
       <div class="grid">
         <div class="card">
           <strong>√VRAM, not aristocracy</strong>
@@ -281,129 +175,50 @@
         </div>
         <div class="card">
           <strong>Tenure boost</strong>
-          <p>Continuous healthy time multiplies mint up to 1.5×. Offline resets the streak. Loyalty pays.</p>
+          <p>Continuous healthy time multiplies mint up to 1.5×. Offline resets the streak.</p>
         </div>
         <div class="card">
           <strong>Leecher penalty</strong>
-          <p>If consume ≫ contribute in the window: earn down to 0.25×, pay up to 4×. Pure freeloaders get crushed.</p>
+          <p>If consume ≫ contribute: earn down to 0.25×, pay up to 4×. Pure freeloaders get crushed.</p>
         </div>
         <div class="card">
           <strong>Open constants</strong>
-          <p>Pure Rust, integer math, unit tests. No hidden admin multipliers in the public scoring path.</p>
+          <p>Pure Rust, integer math, unit tests. No hidden admin multipliers on the public path.</p>
         </div>
       </div>
-      <pre aria-label="economy sketch">mint = base × mem_bp × tenure_bp × leecher_mint_bp
+      <pre class="cmd" aria-label="economy sketch">mint = base × mem_bp × tenure_bp × leecher_mint_bp
 burn = (prompt + 4×completion) × leecher_usage_bp
 # bp in 1/10000 units · eco=v0</pre>
     </section>
 
-    <section id="pool">
-      <h2>Pool teaser</h2>
-      <div class="hero-stat" id="pool-panel">
-        <div class="muted">Aggregate healthy VRAM (when a control API is reachable)</div>
-        <p class="big" id="vram">—</p>
-        <p class="muted" id="countdown">countdown: connecting…</p>
-        <p class="muted" id="pool-meta"></p>
-        <ul id="milestones"></ul>
-        <p class="err" id="pool-err" hidden></p>
-      </div>
-      <p class="muted" style="font-size:0.8rem">
-        Optional live API: append <code>?api=https://your-control:7700</code>.
-        Default tries same-origin then local control.
-      </p>
-    </section>
-
     <section id="join">
-      <h2>Join early</h2>
-      <pre>git clone https://github.com/f00-sh/joule.git
+      <h2>Join the pool</h2>
+      <div class="callout">
+        <strong>Publish live stats to this site:</strong>
+        run control with <code>JOULE_EDGE_TOKEN</code> set (matches the Pages ingest secret).
+        Default edge URL is <code>https://joule.f00.sh/api/ingest</code>.
+      </div>
+      <pre class="cmd">git clone https://github.com/f00-sh/joule.git
 cd joule && cargo build --release -p joule
+
+# terminal 1 — control (publishes to joule.f00.sh when token set)
+export JOULE_EDGE_TOKEN=…   # same as Cloudflare Pages INGEST_TOKEN
 ./target/release/joule control
+
+# terminal 2 — donate
 ./target/release/joule agent --account you --control 127.0.0.1:7701</pre>
-      <p class="muted">MIT · f00-sh · native agent only · browser is this page + dashboards, not the pool FLOPs.</p>
+      <p class="muted">MIT · f00-sh · native agent only · browser is this page, not pool FLOPs.</p>
     </section>
 
-    <footer>
+    <footer class="site-footer">
       <p>
         <a href="https://f00.sh/">f00</a> ·
         <a href="https://github.com/f00-sh/joule">github.com/f00-sh/joule</a> ·
         <a href="https://github.com/f00-sh/joule/blob/main/docs/design/economy-v0.md">economy-v0</a> ·
         <a href="https://github.com/f00-sh/joule/blob/main/LICENSE">MIT</a>
       </p>
-      <p>Teaser site. Model weights load when the pool hits published milestones. Stay online. Don’t leech.</p>
+      <p>Live capacity is the product. Stay online. Don’t leech.</p>
     </footer>
-  </div>
-
-  <script>
-    (function () {
-      const params = new URLSearchParams(location.search);
-      const candidates = [
-        params.get("api"),
-        "", // same origin (if reverse-proxied later)
-        "http://127.0.0.1:7700",
-      ].filter((x) => x !== null);
-
-      const el = (id) => document.getElementById(id);
-
-      function fmtGib(mib) {
-        if (mib == null || Number.isNaN(mib)) return "—";
-        return (mib / 1024).toFixed(1) + " GiB";
-      }
-
-      async function tryApi(base) {
-        const root = base.replace(/\/$/, "");
-        const url = root + "/v1/models/readiness";
-        const r = await fetch(url, { mode: "cors" });
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.json();
-      }
-
-      async function refresh() {
-        let data = null;
-        let lastErr = null;
-        for (const base of candidates) {
-          try {
-            data = await tryApi(base || location.origin);
-            lastErr = null;
-            break;
-          } catch (e) {
-            lastErr = e;
-          }
-        }
-        if (!data) {
-          el("vram").textContent = "pool offline";
-          el("countdown").textContent = "countdown: awaiting public control / local lab";
-          el("pool-meta").textContent = "Spin up joule control to see live numbers.";
-          el("pool-err").hidden = false;
-          el("pool-err").textContent = lastErr ? String(lastErr.message || lastErr) : "no api";
-          return;
-        }
-        el("pool-err").hidden = true;
-        el("vram").textContent = fmtGib(data.pool_vram_mib);
-        el("countdown").textContent = "countdown: " + (data.countdown_label || "—");
-        el("pool-meta").textContent =
-          (data.backends || 0) + " backends · " +
-          (data.model || "kimi-open") + " · " +
-          (data.inference_mode || "") +
-          (data.can_load_model ? " · can load" : "") +
-          (data.can_begin_service ? " · can serve" : "");
-        const list = el("milestones");
-        list.innerHTML = "";
-        (data.milestones || []).forEach((m) => {
-          const li = document.createElement("li");
-          if (m.reached) li.classList.add("done");
-          if (data.next_milestone && data.next_milestone.id === m.id) li.classList.add("next");
-          li.innerHTML =
-            "<div><strong>" + (m.title || m.id) + "</strong> " +
-            (m.reached ? '<span class="ok">reached</span>' : "") + "</div>" +
-            "<div class='muted'>" + (m.description || "") + "</div>" +
-            '<div class="bar"><i style="width:' + (m.progress_pct || 0) + '%"></i></div>';
-          list.appendChild(li);
-        });
-      }
-
-      refresh();
-      setInterval(refresh, 12000);
-    })();
-  </script>
+  </main>
 </body>
 </html>

@@ -88,6 +88,9 @@ Offline demos (no network).
 | Variable | Purpose |
 |---|---|
 | `RUST_LOG` | Tracing filter |
+| `JOULE_EDGE_TOKEN` | Bearer token to publish live pool snapshots to `joule.f00.sh/api/ingest` |
+| `JOULE_EDGE_URL` | Override ingest URL (default `https://joule.f00.sh/api/ingest`) |
+| `JOULE_EDGE_DISABLE` | Set to `1` to skip edge publish |
 
 ## SEE ALSO
 

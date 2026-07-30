@@ -28,7 +28,7 @@ Central API clouds concentrate power and cost. Consumer GPUs sit idle. joule tur
 5. Usage **burns millijoules**. No live contribution / balance ⇒ no access.
 6. **Dashboard** shows live aggregate compute (healthy nodes, VRAM, throughput class, models online).
 
-The website ([joule.f00.sh](https://joule.f00.sh/)) is a teaser + capacity strip + docs — **not** browser-side pool compute. Full economy: [docs/design/economy-v0.md](docs/design/economy-v0.md).
+The website ([joule.f00.sh](https://joule.f00.sh/)) is a f00-themed teaser with **real-time cluster data** (SSE `/api/pool/stream`, poll `/api/pool`) — **not** browser-side pool FLOPs. Control publishes with `JOULE_EDGE_TOKEN`. Full economy: [docs/design/economy-v0.md](docs/design/economy-v0.md).
 
 ## Requirements
 

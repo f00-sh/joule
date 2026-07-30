@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
-- **Teaser site** on Cloudflare Pages (`docs/index.html` → joule.f00.sh): free/compute pitch, economy explain, pool milestones strip
+- **Live public pool on joule.f00.sh**: Pages Functions `/api/pool` + SSE `/api/pool/stream` + KV snapshot; control edge publish (`JOULE_EDGE_TOKEN` → `/api/ingest`)
+- **Teaser site** (f00 theme shell): free/compute pitch, economy explain, real-time cluster stats + donors
 - **CI:** GitHub Actions Pages deploy (`pages.yml`) + economy/site sanity in `ci.yml`
 - Account fairness windows persisted (snapshot v2); `/v1/account` exposes leecher + tenure fields
 

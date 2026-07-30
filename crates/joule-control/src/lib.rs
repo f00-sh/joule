@@ -4,6 +4,7 @@
 //! - HTTP API: live dashboard + capacity + OpenAI-shaped chat (contribute-to-consume)
 
 mod app;
+mod edge;
 mod http;
 mod persist;
 mod state;
@@ -50,7 +51,12 @@ pub async fn serve(app: App, agent_addr: SocketAddr, http_addr: SocketAddr) -> R
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             tick.tick().await;
-            prune_app.state.write().await.prune();
+            {
+                let mut g = prune_app.state.write().await;
+                g.prune();
+                // Push live pool JSON to joule.f00.sh edge (if JOULE_EDGE_TOKEN set).
+                edge::publish_snapshot_async(&g, false);
+            }
             broadcast_pool_status(&prune_app).await;
         }
     });

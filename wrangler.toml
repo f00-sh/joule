@@ -1,4 +1,10 @@
-# Cloudflare Pages — static teaser site for joule.f00.sh
+# Cloudflare Pages — joule.f00.sh teaser + live pool edge API
 name = "f00-joule"
 compatibility_date = "2026-07-01"
 pages_build_output_dir = "docs"
+
+# Live cluster snapshot store (public read via /api/pool)
+[[kv_namespaces]]
+binding = "POOL"
+id = "633c95622ebd4f13b1fffcee15b9fe7b"
+preview_id = "633c95622ebd4f13b1fffcee15b9fe7b"

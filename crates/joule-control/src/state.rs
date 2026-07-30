@@ -365,9 +365,12 @@ impl ControlState {
         let api_key = self.ensure_account(account);
         // Single-model law: every donor is compute for CLUSTER_MODEL only.
         caps.models = vec![CLUSTER_MODEL.to_string()];
+        let mem = caps.mem_mib;
         self.cluster
             .upsert_node(id.clone(), account.to_string(), caps);
         self.node_account.insert(id, account.to_string());
+        self.note_online(account, mem, true);
+        crate::edge::publish_snapshot_async(self, true);
         api_key
     }
 
@@ -410,14 +413,19 @@ impl ControlState {
         self.record_contribute(&account, mint);
         self.mark_dirty();
         self.save_if_dirty();
+        crate::edge::publish_snapshot_async(self, false);
         Ok(Some(mint))
     }
 
     pub fn remove_node(&mut self, id: &NodeId) {
+        if let Some(account) = self.node_account.get(id).cloned() {
+            self.note_online(&account, 0, false);
+        }
         self.cluster.remove_node(id);
         self.node_account.remove(id);
         // Drop pending challenges for this node.
         self.pending_challenges.retain(|_, c| c.node != *id);
+        crate::edge::publish_snapshot_async(self, true);
     }
 
     pub fn account_info(&self, account: &str) -> Option<AccountInfo> {
