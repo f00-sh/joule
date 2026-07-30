@@ -3,7 +3,9 @@
 use crate::app::{AgentRoutes, App};
 use crate::state::{InferOutcome, PendingChallenge, PendingInfer};
 use anyhow::{Context, Result};
-use joule_proto::{decode_line, encode_line, Envelope, Message, NodeId};
+use joule_proto::{
+    decode_line, encode_line, resolve_cluster_model, Envelope, Message, NodeId, CLUSTER_MODEL,
+};
 use joule_runtime::{Engine, InferRequest, StubEngine};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -163,7 +165,7 @@ async fn send_to_agent(routes: &AgentRoutes, node: &NodeId, env: Envelope) -> bo
     }
 }
 
-/// Dispatch inference across donors with load balancing + failover.
+/// Dispatch inference across **all** healthy cluster donors (single model).
 pub async fn dispatch_infer(
     app: &App,
     account: &str,
@@ -171,6 +173,8 @@ pub async fn dispatch_infer(
     prompt: &str,
     max_tokens: u32,
 ) -> Result<InferOutcome, String> {
+    let model = resolve_cluster_model(Some(model))?.to_string();
+
     {
         let g = app.state.read().await;
         if !g.cluster.account_is_donating(account) {
@@ -186,20 +190,22 @@ pub async fn dispatch_infer(
         g.should_dual_verify()
     };
 
-    // Acquire ranked workers; try until one accepts the job.
+    // Draw from the full healthy pool (single model owns all cluster compute).
     let candidates = {
         let mut g = app.state.write().await;
-        let n = if dual { 2 } else { 4 };
-        let mut ids = g.cluster.acquire_workers(model, n.max(1));
-        if ids.is_empty() {
-            return Err(format!("no healthy workers for model {model}"));
+        let pool = g.cluster.pool_size();
+        if pool == 0 {
+            return Err(format!(
+                "no healthy workers for cluster model {CLUSTER_MODEL}"
+            ));
         }
-        // If dual, keep 2; for failover keep extras without dual verify requirement.
-        if !dual && ids.len() > 3 {
-            // release extras
-            for extra in ids.drain(3..) {
-                g.cluster.release_worker(&extra);
-            }
+        // Dual-verify needs 2; otherwise take whole pool for failover order.
+        let n = if dual { pool.clamp(1, 2) } else { pool };
+        let ids = g.cluster.acquire_workers(&model, n);
+        if ids.is_empty() {
+            return Err(format!(
+                "no healthy workers for cluster model {CLUSTER_MODEL}"
+            ));
         }
         ids
     };
@@ -223,7 +229,7 @@ pub async fn dispatch_infer(
         let p_out = dispatch_one(
             app,
             account,
-            model,
+            &model,
             prompt,
             max_tokens,
             primary.clone(),
@@ -233,7 +239,7 @@ pub async fn dispatch_infer(
         let s_out = dispatch_one(
             app,
             account,
-            model,
+            &model,
             prompt,
             max_tokens,
             secondary.clone(),
@@ -286,7 +292,7 @@ pub async fn dispatch_infer(
         match dispatch_one(
             app,
             account,
-            model,
+            &model,
             prompt,
             max_tokens,
             worker.clone(),
@@ -374,17 +380,10 @@ pub async fn challenge_loop(app: App) {
         let challenge = {
             let mut g = app.state.write().await;
             g.prune();
-            let target = g.cluster.pick_challenge_target().map(|n| {
-                let model = n
-                    .caps
-                    .models
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "kimi-open-q4".into());
-                (n.id.clone(), model)
-            });
-            if let Some((id, model)) = target {
+            let target = g.cluster.pick_challenge_target().map(|n| n.id.clone());
+            if let Some(id) = target {
                 let challenge_id = Uuid::new_v4();
+                let model = CLUSTER_MODEL.to_string();
                 let prompt = format!("joule-challenge:{challenge_id}");
                 let expected = StubEngine::expected_text(&model, &prompt);
                 g.pending_challenges.insert(

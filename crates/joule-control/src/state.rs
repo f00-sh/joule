@@ -5,7 +5,7 @@ use joule_cluster::Cluster;
 use joule_ledger::{
     estimate_contribution_millijoules, estimate_usage_millijoules, Ledger, Millijoule,
 };
-use joule_proto::{DeviceClass, NodeCaps, NodeId};
+use joule_proto::{DeviceClass, NodeCaps, NodeId, CLUSTER_MODEL};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -169,8 +169,10 @@ impl ControlState {
         self.keys.get(api_key).map(|s| s.as_str())
     }
 
-    pub fn register_node(&mut self, id: NodeId, account: &str, caps: NodeCaps) -> String {
+    pub fn register_node(&mut self, id: NodeId, account: &str, mut caps: NodeCaps) -> String {
         let api_key = self.ensure_account(account);
+        // Single-model law: every donor is compute for CLUSTER_MODEL only.
+        caps.models = vec![CLUSTER_MODEL.to_string()];
         self.cluster
             .upsert_node(id.clone(), account.to_string(), caps);
         self.node_account.insert(id, account.to_string());

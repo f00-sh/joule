@@ -93,7 +93,7 @@ impl Engine for StubEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use joule_proto::{NodeId, ShardAssignment, ShardRole};
+    use joule_proto::{NodeId, ShardAssignment, ShardRole, CLUSTER_MODEL};
     use uuid::Uuid;
 
     #[tokio::test]
@@ -101,7 +101,7 @@ mod tests {
         let eng = StubEngine::new();
         let plan = ClusterPlan {
             plan_id: Uuid::new_v4(),
-            model: "kimi-open-q4".into(),
+            model: CLUSTER_MODEL.into(),
             shards: vec![ShardAssignment {
                 node: NodeId::new(),
                 role: ShardRole::Replica,
@@ -114,12 +114,16 @@ mod tests {
         eng.load_plan(&plan).await.unwrap();
         let out = eng
             .infer(InferRequest {
-                model: "kimi-open-q4".into(),
+                model: CLUSTER_MODEL.into(),
                 prompt: "hello cluster".into(),
                 max_tokens: 16,
             })
             .await
             .unwrap();
         assert!(out.text.contains("hello cluster"));
+        assert_eq!(
+            StubEngine::expected_text(CLUSTER_MODEL, "hello cluster"),
+            out.text
+        );
     }
 }

@@ -2,7 +2,8 @@
 
 use joule_control::{load_or_init_app, serve_ephemeral};
 use joule_proto::{
-    decode_line, encode_line, DeviceClass, Envelope, Message, NodeCaps, NodeId, PROTOCOL_VERSION,
+    decode_line, encode_line, DeviceClass, Envelope, Message, NodeCaps, NodeId, CLUSTER_MODEL,
+    PROTOCOL_VERSION,
 };
 use joule_runtime::{Engine, InferRequest, StubEngine};
 use std::time::Duration;
@@ -24,12 +25,7 @@ async fn spawn_agent(
         node_id.clone(),
         Message::Hello {
             account: account.into(),
-            caps: NodeCaps {
-                device: DeviceClass::Gpu,
-                mem_mib: mem,
-                throughput_class: 40,
-                models: vec!["kimi-open-q4".into()],
-            },
+            caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
         },
     );
     writer
@@ -232,7 +228,7 @@ async fn pool_capacity_and_chat() {
         .post(format!("{base}/v1/chat/completions"))
         .bearer_auth(&api_key)
         .json(&serde_json::json!({
-            "model": "kimi-open-q4",
+            "model": CLUSTER_MODEL,
             "messages": [{"role": "user", "content": "ping"}]
         }))
         .send()
@@ -252,7 +248,7 @@ async fn pool_capacity_and_chat() {
         .post(format!("{base}/v1/chat/completions"))
         .bearer_auth(&api_key)
         .json(&serde_json::json!({
-            "model": "kimi-open-q4",
+            "model": CLUSTER_MODEL,
             "stream": true,
             "messages": [{"role": "user", "content": "stream me"}]
         }))
@@ -314,7 +310,7 @@ async fn multi_donor_load_balance() {
             .post(format!("{base}/v1/chat/completions"))
             .bearer_auth(&key_a)
             .json(&serde_json::json!({
-                "model": "kimi-open-q4",
+                "model": CLUSTER_MODEL,
                 "messages": [{"role": "user", "content": format!("job {i}")}]
             }))
             .send()

@@ -10,7 +10,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::Stream;
-use joule_proto::ClusterCapacity;
+use joule_proto::{resolve_cluster_model, ClusterCapacity, CLUSTER_MODEL, CLUSTER_MODEL_LABEL};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::convert::Infallible;
@@ -73,18 +73,19 @@ async fn nodes(State(app): State<App>) -> Json<NodesResponse> {
 
 async fn models(State(app): State<App>) -> impl IntoResponse {
     let g = app.state.read().await;
-    let cap = g.cluster.capacity();
-    let data: Vec<Value> = cap
-        .models_available
-        .iter()
-        .map(|id| {
-            json!({
-                "id": id,
-                "object": "model",
-                "owned_by": "joule"
-            })
-        })
-        .collect();
+    let online = g.cluster.pool_size() > 0;
+    let data = if online {
+        vec![json!({
+            "id": CLUSTER_MODEL,
+            "object": "model",
+            "owned_by": "joule",
+            "name": CLUSTER_MODEL_LABEL,
+            "description": "Single cluster model; all healthy donors serve this model.",
+            "pool_nodes": g.cluster.pool_size(),
+        })]
+    } else {
+        vec![]
+    };
     Json(json!({ "object": "list", "data": data }))
 }
 
@@ -211,7 +212,9 @@ async fn chat_completions(
             })?
     };
 
-    let model = body.model.unwrap_or_else(|| "kimi-open-q4".to_string());
+    let model = resolve_cluster_model(body.model.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": e}))))?
+        .to_string();
     let prompt = body
         .messages
         .iter()

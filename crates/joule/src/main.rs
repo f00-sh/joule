@@ -6,6 +6,7 @@ use joule_cluster::Cluster;
 use joule_ledger::{estimate_contribution_millijoules, estimate_usage_millijoules, Ledger};
 use joule_proto::{
     decode_line, encode_line, ClusterCapacity, DeviceClass, Envelope, Message, NodeCaps, NodeId,
+    CLUSTER_MODEL,
 };
 use joule_runtime::{Engine, InferRequest, StubEngine};
 use std::net::SocketAddr;
@@ -54,8 +55,8 @@ enum Commands {
         /// Account that earns credits from this node.
         #[arg(long)]
         account: String,
-        /// Model tag this node can host.
-        #[arg(long, default_value = "kimi-open-q4")]
+        /// Ignored (single-model cluster). Kept for CLI compat; always CLUSTER_MODEL.
+        #[arg(long, default_value = CLUSTER_MODEL)]
         model: String,
         /// Advertised memory MiB.
         #[arg(long, default_value_t = 8192)]
@@ -87,7 +88,7 @@ enum Commands {
         /// API key from agent welcome (joule_...).
         #[arg(long)]
         key: String,
-        #[arg(long, default_value = "kimi-open-q4")]
+        #[arg(long, default_value = CLUSTER_MODEL)]
         model: String,
         #[arg(long)]
         prompt: String,
@@ -104,7 +105,7 @@ enum Commands {
     },
     /// Local offline lab (no network).
     Lab {
-        #[arg(long, default_value = "kimi-open-q4")]
+        #[arg(long, default_value = CLUSTER_MODEL)]
         model: String,
         #[arg(long, default_value = "status report from the cluster")]
         prompt: String,
@@ -134,6 +135,7 @@ async fn main() -> Result<()> {
             println!("joule {}", env!("CARGO_PKG_VERSION"));
             println!("protocol {}", joule_proto::PROTOCOL_VERSION);
             println!("distributed compute cluster");
+            println!("cluster model {}", CLUSTER_MODEL);
         }
         Commands::Control {
             agent_listen,
@@ -227,18 +229,18 @@ async fn run_agent(
 ) -> Result<()> {
     let device = parse_device(&device)?;
     let node_id = NodeId::new();
-    let caps = NodeCaps {
+    let _ = model; // single-model cluster; agents always donate to CLUSTER_MODEL
+    let caps = NodeCaps::for_cluster(
         device,
         mem_mib,
-        throughput_class: match device {
+        match device {
             DeviceClass::Gpu => 40,
             DeviceClass::Metal => 30,
             DeviceClass::Cpu => 5,
         },
-        models: vec![model.clone()],
-    };
+    );
 
-    info!(%control, %account, %node_id, "connecting agent");
+    info!(%control, %account, %node_id, model = CLUSTER_MODEL, "connecting agent");
     let sock = TcpStream::connect(&control)
         .await
         .with_context(|| format!("connect agent port {control}"))?;
@@ -316,7 +318,7 @@ async fn run_agent(
 
 async fn run_capacity(api: String, peers: usize, json: bool) -> Result<()> {
     let cap = if api.trim().is_empty() {
-        demo_cluster(peers, "kimi-open-q4").capacity()
+        demo_cluster(peers, CLUSTER_MODEL).capacity()
     } else {
         let url = format!("{}/v1/cluster/capacity", api.trim_end_matches('/'));
         let resp = reqwest::get(&url)
@@ -413,7 +415,7 @@ async fn run_whoami(api: String, key: String) -> Result<()> {
     Ok(())
 }
 
-fn demo_cluster(peers: usize, model: &str) -> Cluster {
+fn demo_cluster(peers: usize, _model: &str) -> Cluster {
     let mut cluster = Cluster::default();
     for i in 0..peers {
         let id = NodeId::new();
@@ -421,12 +423,7 @@ fn demo_cluster(peers: usize, model: &str) -> Cluster {
         cluster.upsert_node(
             id,
             format!("lab-{i}"),
-            NodeCaps {
-                device: DeviceClass::Gpu,
-                mem_mib: mem,
-                throughput_class: 10 + i as u16,
-                models: vec![model.to_string()],
-            },
+            NodeCaps::for_cluster(DeviceClass::Gpu, mem, 10 + i as u16),
         );
     }
     cluster
@@ -468,15 +465,22 @@ async fn run_lab(
     let cap = cluster.capacity();
     print_capacity(&cap);
 
-    let plan = cluster
-        .plan_for(&model, pipeline, stages)
-        .context("planning cluster")?;
+    let plan = if pipeline {
+        cluster
+            .plan_for(CLUSTER_MODEL, true, stages.max(peers))
+            .context("planning cluster")?
+    } else {
+        cluster
+            .plan_for(CLUSTER_MODEL, false, 1)
+            .context("planning cluster")?
+    };
     println!(
-        "plan {} shards={} model={}",
+        "plan {} shards={} model={} (pool uses all healthy donors for single model)",
         plan.plan_id,
         plan.shards.len(),
         plan.model
     );
+    let _ = model;
     for (i, s) in plan.shards.iter().enumerate() {
         println!(
             "  shard[{i}] role={:?} node={} layers={:?}-{:?}",

@@ -20,8 +20,9 @@
 3. Credits = verified useful work in **millijoules**, not idle theater.
 4. Donor retains control (caps, pause, schedule, thermal/battery).
 5. Open weights, open agent, open protocol.
-6. **Distributed cluster across the internet** — not a LAN mesh product. Connectivity medium is irrelevant.
-7. **Dashboard always shows live cluster capacity** (nodes, healthy VRAM, throughput aggregate, models).
+6. **Distributed cluster across the internet** — connectivity medium is irrelevant.
+7. **Dashboard always shows live cluster capacity** (nodes, healthy VRAM, throughput aggregate).
+8. **Single model:** the cluster runs only `kimi-open` (see `joule_proto::CLUSTER_MODEL`). All healthy donors are compute for that model — no multi-model marketplace.
 
 ## Language / purity
 
@@ -69,9 +70,9 @@ cargo run -p joule -- lab
 
 ## Notes
 
-- Default model tags use `kimi-open-*` until an exact Kimi revision is pinned in `models/MANIFEST`.
+- Single API model: `kimi-open` (`CLUSTER_MODEL`). Pin exact weights later in `models/MANIFEST`.
+- Every donor serves that model; schedulers use the full healthy pool.
 - Browser is dashboard only; compute is native `joule agent`.
-- Do not reintroduce mesh/LAN-preference product language.
 
 ## f00 membership
 

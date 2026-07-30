@@ -5,8 +5,9 @@
 
 use joule_proto::{
     ClusterCapacity, ClusterPlan, DeviceClass, NodeCaps, NodeId, ShardAssignment, ShardRole,
+    CLUSTER_MODEL,
 };
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
@@ -181,23 +182,26 @@ impl Cluster {
         )
     }
 
-    fn eligible<'a>(&'a self, model: &str) -> Vec<&'a Node> {
+    /// Every healthy, non-banned donor is compute for [`CLUSTER_MODEL`].
+    /// Single-model product: do not filter donors by per-node model tags.
+    fn eligible(&self) -> Vec<&Node> {
         let now = Instant::now();
         self.nodes
             .values()
-            .filter(|p| {
-                p.healthy
-                    && !p.reputation.is_banned(now)
-                    && p.caps.models.iter().any(|m| m == model)
-            })
+            .filter(|p| p.healthy && !p.reputation.is_banned(now))
             .collect()
     }
 
-    /// Rank eligible workers (best first) without mutating.
-    pub fn rank_workers(&self, model: &str) -> Vec<NodeId> {
-        let mut eligible = self.eligible(model);
+    /// Rank all pool donors (best first) for the cluster model.
+    pub fn rank_workers(&self, _model: &str) -> Vec<NodeId> {
+        let mut eligible = self.eligible();
         eligible.sort_by(|a, b| Self::schedule_score(a).cmp(&Self::schedule_score(b)));
         eligible.into_iter().map(|n| n.id.clone()).collect()
+    }
+
+    /// How many healthy donors can serve the cluster model right now.
+    pub fn pool_size(&self) -> usize {
+        self.eligible().len()
     }
 
     /// Pick best worker and bump inflight + rr (call release_worker when done).
@@ -212,7 +216,7 @@ impl Cluster {
         Some(id)
     }
 
-    /// Pick up to `n` distinct workers for multi-donor paths (primary + challenge).
+    /// Pick up to `n` distinct workers from the full healthy pool.
     pub fn acquire_workers(&mut self, model: &str, n: usize) -> Vec<NodeId> {
         let ranked = self.rank_workers(model);
         let mut out = Vec::new();
@@ -225,6 +229,18 @@ impl Cluster {
             out.push(id);
         }
         out
+    }
+
+    /// Prefer using as many healthy donors as useful for multi-node plans.
+    pub fn preferred_pipeline_stages(&self) -> usize {
+        let n = self.pool_size();
+        if n >= 4 {
+            4
+        } else if n >= 2 {
+            n
+        } else {
+            1
+        }
     }
 
     pub fn release_worker(&mut self, id: &NodeId) {
@@ -273,7 +289,6 @@ impl Cluster {
         let mut mem_mib_total = 0u64;
         let mut mem_mib_healthy = 0u64;
         let mut throughput_class_sum = 0u64;
-        let mut models = BTreeSet::new();
         let now = Instant::now();
 
         for n in self.nodes.values() {
@@ -288,11 +303,15 @@ impl Cluster {
                 nodes_healthy += 1;
                 mem_mib_healthy += u64::from(n.caps.mem_mib);
                 throughput_class_sum += u64::from(n.caps.throughput_class);
-                for m in &n.caps.models {
-                    models.insert(m.clone());
-                }
             }
         }
+
+        // Single-model cluster: pool is either empty or offering CLUSTER_MODEL.
+        let models_available = if nodes_healthy > 0 {
+            vec![CLUSTER_MODEL.to_string()]
+        } else {
+            vec![]
+        };
 
         ClusterCapacity {
             nodes_total,
@@ -303,24 +322,31 @@ impl Cluster {
             mem_mib_total,
             mem_mib_healthy,
             throughput_class_sum,
-            models_available: models.into_iter().collect(),
+            models_available,
         }
     }
 
+    /// Placement for the single cluster model across **all** healthy donors when useful.
     pub fn plan_for(
         &self,
         model: &str,
         prefer_pipeline: bool,
         pipeline_stages: usize,
     ) -> Result<ClusterPlan, ClusterError> {
-        let mut eligible: Vec<&Node> = self.eligible(model);
+        let mut eligible: Vec<&Node> = self.eligible();
         if eligible.is_empty() {
             return Err(ClusterError::NoEligibleNodes(model.to_string()));
         }
         eligible.sort_by(|a, b| Self::schedule_score(a).cmp(&Self::schedule_score(b)));
 
-        let stages = pipeline_stages.max(1);
-        if prefer_pipeline && eligible.len() >= stages && stages > 1 {
+        // Use the whole healthy pool when pipeline is requested: stages = min(requested, pool).
+        let stages = if prefer_pipeline {
+            pipeline_stages.max(1).min(eligible.len()).max(1)
+        } else {
+            1
+        };
+
+        if stages > 1 {
             let shards = eligible
                 .iter()
                 .take(stages)
@@ -339,7 +365,7 @@ impl Cluster {
                 .collect();
             return Ok(ClusterPlan {
                 plan_id: Uuid::new_v4(),
-                model: model.to_string(),
+                model: CLUSTER_MODEL.to_string(),
                 shards,
             });
         }
@@ -347,7 +373,7 @@ impl Cluster {
         let best = eligible[0];
         Ok(ClusterPlan {
             plan_id: Uuid::new_v4(),
-            model: model.to_string(),
+            model: CLUSTER_MODEL.to_string(),
             shards: vec![ShardAssignment {
                 node: best.id.clone(),
                 role: ShardRole::Replica,
@@ -358,6 +384,12 @@ impl Cluster {
             }],
         })
     }
+
+    /// Full-pool pipeline plan: every healthy donor is a stage (or replica if one).
+    pub fn plan_full_pool(&self) -> Result<ClusterPlan, ClusterError> {
+        let n = self.pool_size().max(1);
+        self.plan_for(CLUSTER_MODEL, n > 1, n)
+    }
 }
 
 #[cfg(test)]
@@ -365,27 +397,19 @@ mod tests {
     use super::*;
     use joule_proto::DeviceClass;
 
-    fn node(mem: u32, model: &str, device: DeviceClass) -> (NodeId, NodeCaps) {
-        (
-            NodeId::new(),
-            NodeCaps {
-                device,
-                mem_mib: mem,
-                throughput_class: 10,
-                models: vec![model.into()],
-            },
-        )
+    fn node(mem: u32, device: DeviceClass) -> (NodeId, NodeCaps) {
+        (NodeId::new(), NodeCaps::for_cluster(device, mem, 10))
     }
 
     #[test]
     fn load_balance_prefers_less_inflight() {
         let mut c = Cluster::default();
-        let (a, ca) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
-        let (b, cb) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
+        let (a, ca) = node(8192, DeviceClass::Gpu);
+        let (b, cb) = node(8192, DeviceClass::Gpu);
         c.upsert_node(a.clone(), "alice", ca);
         c.upsert_node(b.clone(), "bob", cb);
-        let first = c.acquire_worker("kimi-open-q4").unwrap();
-        let second = c.acquire_worker("kimi-open-q4").unwrap();
+        let first = c.acquire_worker(CLUSTER_MODEL).unwrap();
+        let second = c.acquire_worker(CLUSTER_MODEL).unwrap();
         assert_ne!(first, second, "second pick should prefer the free donor");
         c.release_worker(&first);
         c.release_worker(&second);
@@ -394,26 +418,41 @@ mod tests {
     #[test]
     fn banned_node_skipped() {
         let mut c = Cluster::default();
-        let (a, ca) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
-        let (b, cb) = node(16384, "kimi-open-q4", DeviceClass::Gpu);
+        let (a, ca) = node(8192, DeviceClass::Gpu);
+        let (b, cb) = node(16384, DeviceClass::Gpu);
         c.upsert_node(a.clone(), "alice", ca);
         c.upsert_node(b.clone(), "bob", cb);
         for _ in 0..5 {
             c.record_challenge_fail(&a);
         }
-        let pick = c.acquire_worker("kimi-open-q4").unwrap();
+        let pick = c.acquire_worker(CLUSTER_MODEL).unwrap();
         assert_eq!(pick, b);
     }
 
     #[test]
-    fn capacity_and_donating() {
+    fn capacity_single_model_uses_full_pool() {
         let mut c = Cluster::default();
-        let (a, ca) = node(8192, "kimi-open-q4", DeviceClass::Gpu);
-        let (b, cb) = node(16384, "kimi-open-q4", DeviceClass::Gpu);
+        let (a, ca) = node(8192, DeviceClass::Gpu);
+        let (b, cb) = node(16384, DeviceClass::Gpu);
         c.upsert_node(a.clone(), "alice", ca);
         c.upsert_node(b, "bob", cb);
         c.set_health(&a, false, 1.0).unwrap();
         assert!(c.account_is_donating("bob"));
         assert!(!c.account_is_donating("alice"));
+        let cap = c.capacity();
+        assert_eq!(cap.models_available, vec![CLUSTER_MODEL.to_string()]);
+        assert_eq!(cap.nodes_healthy, 1);
+    }
+
+    #[test]
+    fn full_pool_pipeline_uses_all_healthy() {
+        let mut c = Cluster::default();
+        for _ in 0..3 {
+            let (id, caps) = node(8192, DeviceClass::Gpu);
+            c.upsert_node(id, "donor", caps);
+        }
+        let plan = c.plan_full_pool().unwrap();
+        assert_eq!(plan.model, CLUSTER_MODEL);
+        assert_eq!(plan.shards.len(), 3);
     }
 }

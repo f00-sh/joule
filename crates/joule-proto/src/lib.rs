@@ -9,6 +9,41 @@ use uuid::Uuid;
 /// Wire protocol major.minor. Bump major on breaking message changes.
 pub const PROTOCOL_VERSION: &str = "0.1.0";
 
+/// The **only** model this cluster runs. All donated compute serves this model.
+///
+/// Product law: one public AI; the distributed pool exists solely to power it.
+/// Quant/size variants are node implementation details, not separate API models.
+pub const CLUSTER_MODEL: &str = "kimi-open";
+
+/// Display name for dashboards and docs.
+pub const CLUSTER_MODEL_LABEL: &str = "Kimi (open weights)";
+
+/// Normalize client/agent model strings to [`CLUSTER_MODEL`].
+/// Returns `None` if the client asked for a foreign model.
+pub fn resolve_cluster_model(requested: Option<&str>) -> Result<&'static str, String> {
+    let Some(raw) = requested.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(CLUSTER_MODEL);
+    };
+    let key = raw.to_ascii_lowercase();
+    // Accept common aliases / legacy tags so old clients still hit the one model.
+    if matches!(
+        key.as_str(),
+        "kimi-open"
+            | "kimi"
+            | "kimi-open-q4"
+            | "kimi-open-q5"
+            | "kimi-open-q8"
+            | "kimi-k3"
+            | "kimi-k2"
+    ) || key.starts_with("kimi")
+    {
+        return Ok(CLUSTER_MODEL);
+    }
+    Err(format!(
+        "this cluster only serves model `{CLUSTER_MODEL}` (got `{raw}`)"
+    ))
+}
+
 /// Stable node identity (public key fingerprint later; UUID for early cluster).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub Uuid);
@@ -53,7 +88,7 @@ impl DeviceClass {
     }
 }
 
-/// Capability advertisement — what this node can host.
+/// Capability advertisement — compute this node donates to [`CLUSTER_MODEL`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeCaps {
     pub device: DeviceClass,
@@ -61,8 +96,29 @@ pub struct NodeCaps {
     pub mem_mib: u32,
     /// Self-reported sustained token/s class for placement (verified later).
     pub throughput_class: u16,
-    /// Model/quant tags this node can load (e.g. "kimi-open-q4").
+    /// Always [`CLUSTER_MODEL`] for this product. Kept for wire compat.
+    #[serde(default = "default_models")]
     pub models: Vec<String>,
+    /// Optional quant/size class the node will load (e.g. `q4_k_m`). Not an API model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quant: Option<String>,
+}
+
+fn default_models() -> Vec<String> {
+    vec![CLUSTER_MODEL.to_string()]
+}
+
+impl NodeCaps {
+    /// Caps for a donor that only serves the cluster model.
+    pub fn for_cluster(device: DeviceClass, mem_mib: u32, throughput_class: u16) -> Self {
+        Self {
+            device,
+            mem_mib,
+            throughput_class,
+            models: vec![CLUSTER_MODEL.to_string()],
+            quant: None,
+        }
+    }
 }
 
 /// Role a node plays in a multi-node inference graph.
@@ -216,12 +272,7 @@ mod tests {
             NodeId::new(),
             Message::Hello {
                 account: "alice".into(),
-                caps: NodeCaps {
-                    device: DeviceClass::Gpu,
-                    mem_mib: 24576,
-                    throughput_class: 40,
-                    models: vec!["kimi-open-q4".into()],
-                },
+                caps: NodeCaps::for_cluster(DeviceClass::Gpu, 24576, 40),
             },
         );
         let line = encode_line(&env).unwrap();
@@ -230,6 +281,7 @@ mod tests {
             Message::Hello { account, caps } => {
                 assert_eq!(account, "alice");
                 assert_eq!(caps.mem_mib, 24576);
+                assert_eq!(caps.models, vec![CLUSTER_MODEL.to_string()]);
             }
             _ => panic!("expected hello"),
         }
@@ -246,9 +298,16 @@ mod tests {
             mem_mib_total: 32768,
             mem_mib_healthy: 32768,
             throughput_class_sum: 50,
-            models_available: vec!["kimi-open-q4".into()],
+            models_available: vec![CLUSTER_MODEL.into()],
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["nodes_healthy"], 2);
+    }
+
+    #[test]
+    fn resolve_single_model() {
+        assert_eq!(resolve_cluster_model(None).unwrap(), CLUSTER_MODEL);
+        assert_eq!(resolve_cluster_model(Some("kimi")).unwrap(), CLUSTER_MODEL);
+        assert!(resolve_cluster_model(Some("gpt-4")).is_err());
     }
 }

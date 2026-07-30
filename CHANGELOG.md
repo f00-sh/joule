@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Single-model law:** only `kimi-open` (`CLUSTER_MODEL`); all healthy donors are pool compute for it
+- Scheduling no longer filters nodes by per-donor model tags; full pool is eligible
+- `/v1/models` returns at most one model; foreign model ids are rejected
+
 ### Added
 
 - **Multi-donor load balancing**: inflight-aware scheduling, failover across agents

@@ -93,7 +93,9 @@ joule chat --key joule_… --stream --prompt "stream me"
 
 **Law:** no active donor agent for that account → chat forbidden. Invalid keys → 401.
 
-**Scheduling:** multi-donor load balance (inflight + load + reputation). Spot anti-cheat challenges run automatically; every 3rd chat dual-verifies across two donors when available.
+**Single model:** the pool only serves **`kimi-open`**. Every healthy donor is compute for that model (`/v1/models` lists one entry). Multi-donor load balance uses the full pool; dual-verify and challenges target the same model.
+
+**Scheduling:** inflight + load + reputation across **all** healthy nodes. Spot anti-cheat challenges run automatically; every 3rd chat dual-verifies across two donors when available.
 
 Inference is still a **stub engine** until real weights land; the pool, dashboard, routing, and contribute-to-consume path are real.
 
