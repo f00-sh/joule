@@ -4,6 +4,7 @@
 //! - HTTP API: live dashboard + capacity + OpenAI-shaped chat (contribute-to-consume)
 
 mod app;
+mod blobs;
 mod edge;
 mod http;
 mod identity;

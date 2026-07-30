@@ -19,12 +19,13 @@
 2. No active contribution ⇒ no API access.
 3. Credits = sealed hash-chain millijoules only (`docs/design/self-govern-v0.md`). Fairness: √VRAM + tenure + leecher (`eco=v0`). VRAM claims untrusted until challenges verify.
 4. Balances cannot be set by users/operators outside the protocol chain.
-4. Donor retains control (caps, pause, schedule, thermal/battery).
-5. Open weights, open agent, open protocol.
-6. **Distributed cluster across the internet** — connectivity medium is irrelevant.
-7. **Dashboard always shows live cluster capacity** (nodes, healthy VRAM, throughput aggregate).
-8. **Single model:** only `kimi-open` (`CLUSTER_MODEL`).
-9. **One logical device:** N physical donors = **one** virtual GPU whose VRAM is the **sum** of healthy donors (8+16×4 → one ~72 GiB device). Public APIs lead with `logical_device`, not five separate GPUs.
+5. Donor retains control (caps, pause, schedule, thermal/battery).
+6. Open weights, open agent, open protocol.
+7. **Distributed cluster across the internet** — connectivity medium is irrelevant.
+8. **Dashboard always shows live cluster capacity** (nodes, healthy VRAM, throughput aggregate).
+9. **Single model:** only `kimi-open` (`CLUSTER_MODEL`).
+10. **One logical device:** N physical donors = **one** virtual GPU whose VRAM is the **sum** of healthy donors.
+11. **Website only on f00:** `joule.f00.sh` is not a CDN. Weights/software are **content-addressed and peer-seeded** (`docs/design/distribution-v0.md`). No f00 payload hosting.
 
 ## Language / purity
 

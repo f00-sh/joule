@@ -5,8 +5,8 @@ use clap::{Parser, Subcommand};
 use joule_cluster::Cluster;
 use joule_ledger::{estimate_contribution_millijoules, estimate_usage_millijoules, Ledger};
 use joule_proto::{
-    decode_line, encode_line, ClusterCapacity, DeviceClass, Envelope, Message, NodeCaps, NodeId,
-    CLUSTER_MODEL,
+    decode_line, encode_line, BlobMeta, ClusterCapacity, DeviceClass, Envelope, Message, NodeCaps,
+    NodeId, CLUSTER_MODEL,
 };
 use joule_runtime::{
     load_model, readiness_for_pool_ex, Engine, InferRequest, ManifestFile, RuntimeFlags,
@@ -376,6 +376,26 @@ async fn run_agent(
                                                     },
                                                 );
                                                 writer.write_all(&encode_line(&ok)?).await?;
+                                                // Seed directory: announce content we can share (no f00 CDN).
+                                                let metas = store.local_blob_metas(&spec.id, q);
+                                                if !metas.is_empty() {
+                                                    let blobs: Vec<BlobMeta> = metas
+                                                        .into_iter()
+                                                        .map(|m| BlobMeta {
+                                                            sha256: m.sha256,
+                                                            size: m.size,
+                                                            kind: m.kind,
+                                                            name: m.name,
+                                                        })
+                                                        .collect();
+                                                    let have = Envelope::new(
+                                                        node_id.clone(),
+                                                        Message::BlobsHave { blobs },
+                                                    );
+                                                    writer
+                                                        .write_all(&encode_line(&have)?)
+                                                        .await?;
+                                                }
                                                 // Actual load into RAM when possible.
                                                 match load_model(&store, spec, q) {
                                                     Ok(lm) => {

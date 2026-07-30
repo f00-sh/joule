@@ -1,5 +1,6 @@
 //! Shared control-plane state: cluster registry, ledger, accounts, pending jobs.
 
+use crate::blobs::BlobDirectory;
 use crate::persist;
 use joule_cluster::Cluster;
 use joule_ledger::{score_burn, score_mint, EconomyEvent, FairnessSnapshot, Ledger, Millijoule};
@@ -130,6 +131,8 @@ pub struct ControlState {
     pub service_live: bool,
     /// Per-account rolling fairness + tenure (economy v0).
     pub account_economy: HashMap<String, AccountEconomy>,
+    /// Swarm content directory (hash → seeders). Never stores payload bytes.
+    pub blobs: BlobDirectory,
     dirty: bool,
 }
 
@@ -158,6 +161,7 @@ impl ControlState {
             nodes_model_loaded: HashSet::new(),
             service_live: false,
             account_economy: HashMap::new(),
+            blobs: BlobDirectory::new(),
             dirty: false,
         }
     }
@@ -446,6 +450,7 @@ impl ControlState {
         }
         self.cluster.remove_node(id);
         self.node_account.remove(id);
+        self.blobs.remove_node(id);
         // Drop pending challenges for this node.
         self.pending_challenges.retain(|_, c| c.node != *id);
     }

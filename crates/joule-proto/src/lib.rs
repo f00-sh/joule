@@ -341,6 +341,49 @@ pub enum Message {
     Error {
         error: String,
     },
+    /// Agent → control: content-addressed blobs this node can seed (weights, software, …).
+    /// f00 does **not** host these; peers do. See docs/design/distribution-v0.md.
+    BlobsHave {
+        blobs: Vec<BlobMeta>,
+    },
+    /// Agent → control: need this hash from the swarm.
+    BlobWant {
+        sha256: String,
+    },
+    /// Control → agent: peers that announced this hash (empty if nobody seeding yet).
+    BlobLocate {
+        sha256: String,
+        peers: Vec<NodeId>,
+        sizes: Vec<u64>,
+    },
+    /// Control → seeder: please push this blob toward the swarm directory (payload out-of-band / later chunk).
+    /// For small blobs, seeder may reply with BlobChunk.
+    BlobProvide {
+        sha256: String,
+        request_id: Uuid,
+        to: NodeId,
+    },
+    /// Seeder → control → requester: chunk of a blob (base64). For lab-sized files; large models use peer HTTP later.
+    BlobChunk {
+        sha256: String,
+        request_id: Uuid,
+        offset: u64,
+        /// raw bytes, base64-encoded on the wire via serde_bytes not available — use base64 string
+        data_b64: String,
+        done: bool,
+    },
+}
+
+/// Content-addressed object a node can seed into the pool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobMeta {
+    pub sha256: String,
+    pub size: u64,
+    /// weight | software | fixture | other
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 fn default_true() -> bool {

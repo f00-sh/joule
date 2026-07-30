@@ -115,6 +115,29 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     }
                 }
             }
+            Message::BlobsHave { blobs } => {
+                let id = env.from.clone();
+                let mut g = app.state.write().await;
+                g.blobs.announce(id.clone(), blobs);
+                tracing::debug!(%id, "blob inventory updated");
+            }
+            Message::BlobWant { sha256 } => {
+                let id = env.from.clone();
+                let g = app.state.read().await;
+                let peers = g.blobs.peers_for(&sha256);
+                let (peer_ids, sizes): (Vec<_>, Vec<_>) =
+                    peers.into_iter().map(|(n, m)| (n, m.size)).unzip();
+                drop(g);
+                let reply = Envelope::new(
+                    id,
+                    Message::BlobLocate {
+                        sha256,
+                        peers: peer_ids,
+                        sizes,
+                    },
+                );
+                let _ = tx.send(reply);
+            }
             Message::InferDone {
                 request_id,
                 text,

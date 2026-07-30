@@ -98,7 +98,9 @@ joule chat --key joule_… --stream --prompt "stream me"
 
 **One logical device:** if five machines give 8+16+16+16+16 GiB, joule sees **one GPU with ~72 GiB VRAM** (`capacity.logical_device`). Internally that memory is sharded to place **`kimi-open`**; publicly you are talking to one supercomputer. Concurrent users share stream slots on that device.
 
-**Kimi waits for a big enough pool.** Manifest requires ≥**64 GiB** verified VRAM and ≥**3** backends for `model_ready`. Weights are **published**: `lab-tiny` (local fixture) and **Kimi-K3 meta** from Hugging Face download with sha256 verify. Full multi-hundred-GB K3 shards are not pinned yet. Agents prepare/load; tensor-backed generate runs when embeddings are resident (full transformer decode still next).
+**Distribution law:** f00 / joule.f00.sh is a **website only** — not a download farm. Weights and software are **sha256 content-addressed** and **peer-seeded** (`docs/design/distribution-v0.md`). Agents fill `~/.local/share/joule/` from local drops, git fixtures (`repo://`), and the swarm; third-party HTTP only if `JOULE_ALLOW_EXTERNAL_FETCH=1`.
+
+**Kimi waits for a big enough pool.** ≥**64 GiB** verified VRAM and ≥**3** backends for `model_ready`. Manifest lists digests; `lab-tiny` seeds from the git tree; full K3 shards spread once someone on the mesh has them.
 
 ```text
 joule ready                              # offline what-if

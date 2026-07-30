@@ -38,6 +38,8 @@ pub fn router(app: App) -> Router {
         .route("/v1/public/ledger", get(public_ledger))
         .route("/v1/public/ledger/head", get(public_ledger_head))
         .route("/v1/public/audit/{account}", get(public_audit))
+        .route("/v1/blobs", get(blob_catalog))
+        .route("/v1/blobs/{sha256}", get(blob_locate))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -222,6 +224,32 @@ async fn public_audit(State(app): State<App>, Path(account): Path<String>) -> im
         "no_money": true,
         "audit": audit,
         "chain_ok": g.ledger.verify_chain().is_ok(),
+    }))
+}
+
+/// Content-addressed seed directory (who has which hash). **No payload bytes on f00.**
+async fn blob_catalog(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    Json(json!({
+        "ok": true,
+        "law": "website only — peers seed by sha256 (docs/design/distribution-v0.md)",
+        "blobs": g.blobs.catalog(),
+    }))
+}
+
+async fn blob_locate(State(app): State<App>, Path(sha256): Path<String>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let peers = g.blobs.peers_for(&sha256);
+    Json(json!({
+        "ok": true,
+        "sha256": sha256,
+        "seeders": peers.iter().map(|(n, m)| json!({
+            "node": n.to_string(),
+            "size": m.size,
+            "kind": m.kind,
+            "name": m.name,
+        })).collect::<Vec<_>>(),
+        "count": peers.len(),
     }))
 }
 
