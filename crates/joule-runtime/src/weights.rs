@@ -260,6 +260,85 @@ impl WeightsStore {
         Ok(())
     }
 
+    /// Path of a content-addressed blob (`blobs/sha256/<hex>`).
+    pub fn blob_path(sha256: &str) -> PathBuf {
+        Self::blob_root().join(sha256.to_lowercase())
+    }
+
+    pub fn has_blob(sha256: &str) -> bool {
+        let p = Self::blob_path(sha256);
+        p.is_file()
+    }
+
+    /// Read verified blob bytes; errors if missing or hash mismatch.
+    pub fn read_blob(sha256: &str) -> Result<Vec<u8>, String> {
+        let hash = sha256.to_lowercase();
+        let p = Self::blob_path(&hash);
+        if !p.is_file() {
+            return Err(format!("blob not found: {hash}"));
+        }
+        let data = fs::read(&p).map_err(|e| e.to_string())?;
+        let got = hex::encode(Sha256::digest(&data));
+        if got != hash {
+            return Err(format!("blob corrupt: want {hash}, got {got}"));
+        }
+        Ok(data)
+    }
+
+    /// Write bytes into the blob store after verifying sha256. Idempotent.
+    pub fn store_blob(sha256: &str, data: &[u8]) -> Result<u64, String> {
+        let hash = sha256.to_lowercase();
+        if hash.len() != 64 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err("sha256 must be 64 hex chars".into());
+        }
+        let got = hex::encode(Sha256::digest(data));
+        if got != hash {
+            return Err(format!("store_blob hash mismatch: want {hash}, got {got}"));
+        }
+        let dest = Self::blob_path(&hash);
+        if dest.is_file() {
+            return Ok(data.len() as u64);
+        }
+        fs::create_dir_all(Self::blob_root()).map_err(|e| e.to_string())?;
+        let tmp = dest.with_extension("partial");
+        fs::write(&tmp, data).map_err(|e| e.to_string())?;
+        fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+        Ok(data.len() as u64)
+    }
+
+    /// Scan content-addressed blob store (for BlobsHave after peer receive).
+    pub fn list_blob_store() -> Vec<BlobAnnounce> {
+        let root = Self::blob_root();
+        let mut out = Vec::new();
+        let Ok(rd) = fs::read_dir(&root) else {
+            return out;
+        };
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().to_lowercase();
+            if name.len() != 64 || !name.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let path = ent.path();
+            if !path.is_file() {
+                continue;
+            }
+            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            // Trust filename only if length matches on-disk (cheap integrity).
+            if let Ok(h) = file_sha256(&path) {
+                if h == name {
+                    out.push(BlobAnnounce {
+                        sha256: h,
+                        size,
+                        kind: "blob".into(),
+                        name: name.clone(),
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.sha256.cmp(&b.sha256));
+        out
+    }
+
     pub fn status(&self, spec: &ModelSpec, quant: &QuantSpec) -> PrepareStatus {
         let dir = self.model_dir(&spec.id, &quant.id);
         let armed = self.is_armed(&spec.id, &quant.id);
@@ -450,5 +529,25 @@ mod tests {
         let spec = m.model("kimi-open").unwrap();
         let q = spec.pick_quant(8192).unwrap();
         assert!(!q.files.is_empty(), "got {}", q.id);
+    }
+
+    #[test]
+    fn store_and_list_blob_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("joule-blobs-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("JOULE_BLOBS_DIR", &dir);
+        let payload = b"joule peer seed bytes";
+        let hash = hex::encode(Sha256::digest(payload));
+        let n = WeightsStore::store_blob(&hash, payload).unwrap();
+        assert_eq!(n, payload.len() as u64);
+        assert!(WeightsStore::has_blob(&hash));
+        assert_eq!(WeightsStore::read_blob(&hash).unwrap(), payload);
+        // corrupt reject
+        assert!(WeightsStore::store_blob(&hash, b"wrong").is_err());
+        let list = WeightsStore::list_blob_store();
+        assert!(list.iter().any(|b| b.sha256 == hash));
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -782,6 +782,7 @@ name = "joule"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "ed25519-dalek",
  "hex",
@@ -793,6 +794,7 @@ dependencies = [
  "rand 0.8.7",
  "reqwest",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -818,6 +820,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum",
+ "base64",
  "ed25519-dalek",
  "futures",
  "hex",

@@ -1,6 +1,7 @@
 //! joule — distributed compute cluster CLI.
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use clap::{Parser, Subcommand};
 use joule_cluster::{plan_redundant_chunks, Cluster, ModelChunk};
 use joule_control::{body_sha256_hex, now_ms, operator_preimage};
@@ -13,6 +14,7 @@ use joule_runtime::{
     load_model, readiness_for_pool_ex, Engine, InferRequest, ManifestFile, RuntimeFlags,
     StubEngine, WeightsStore,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,6 +22,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
+
+/// Wire chunk size for peer BlobChunk (lab-sized files; large models later).
+const BLOB_CHUNK_BYTES: usize = 64 * 1024;
+
+struct PendingBlobRecv {
+    sha256: String,
+    buf: Vec<u8>,
+    next_offset: u64,
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -504,6 +516,7 @@ async fn run_agent(
     let store = WeightsStore::new(WeightsStore::default_root());
     store.ensure_root().ok();
     let mut last_armed = false;
+    let mut pending_recv: HashMap<Uuid, PendingBlobRecv> = HashMap::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -534,6 +547,10 @@ async fn run_agent(
                         println!("readiness: curl -s http://127.0.0.1:7700/v1/models/readiness");
                         println!("chat:      joule chat --key {key} --prompt \"hello\"");
                         println!("weights:   {}", store.root().display());
+                        // Seed swarm directory with any local content-addressed blobs.
+                        if let Err(e) = announce_local_blobs(&mut writer, &node_id, &store).await {
+                            warn!(error = %e, "initial BlobsHave failed");
+                        }
                     }
                     Message::PoolStatus {
                         pool_vram_mib,
@@ -709,6 +726,159 @@ async fn run_agent(
                             }
                         }
                     }
+                    Message::FetchDigests {
+                        digests,
+                        reason,
+                        replica_factor,
+                    } => {
+                        info!(
+                            n = digests.len(),
+                            %reason,
+                            replica_factor,
+                            "FetchDigests: obtain assigned chunk digests only"
+                        );
+                        for d in digests {
+                            let hash = d.to_lowercase();
+                            if WeightsStore::has_blob(&hash) {
+                                continue;
+                            }
+                            info!(%hash, "BlobWant (missing digest)");
+                            let want = Envelope::new(
+                                node_id.clone(),
+                                Message::BlobWant { sha256: hash },
+                            );
+                            writer.write_all(&encode_line(&want)?).await?;
+                        }
+                    }
+                    Message::BlobLocate {
+                        sha256,
+                        peers,
+                        sizes,
+                    } => {
+                        info!(
+                            %sha256,
+                            seeders = peers.len(),
+                            ?sizes,
+                            "BlobLocate"
+                        );
+                    }
+                    Message::BlobProvide {
+                        sha256,
+                        request_id,
+                        to: _,
+                    } => {
+                        // Control asked us to push this blob (we are a seeder).
+                        let hash = sha256.to_lowercase();
+                        match WeightsStore::read_blob(&hash) {
+                            Ok(data) => {
+                                info!(
+                                    %hash,
+                                    %request_id,
+                                    bytes = data.len(),
+                                    "BlobProvide: streaming chunks"
+                                );
+                                let mut offset = 0u64;
+                                while (offset as usize) < data.len() {
+                                    let end = ((offset as usize) + BLOB_CHUNK_BYTES).min(data.len());
+                                    let slice = &data[offset as usize..end];
+                                    let done = end == data.len();
+                                    let chunk = Envelope::new(
+                                        node_id.clone(),
+                                        Message::BlobChunk {
+                                            sha256: hash.clone(),
+                                            request_id,
+                                            offset,
+                                            data_b64: B64.encode(slice),
+                                            done,
+                                        },
+                                    );
+                                    writer.write_all(&encode_line(&chunk)?).await?;
+                                    offset = end as u64;
+                                }
+                                if data.is_empty() {
+                                    let chunk = Envelope::new(
+                                        node_id.clone(),
+                                        Message::BlobChunk {
+                                            sha256: hash.clone(),
+                                            request_id,
+                                            offset: 0,
+                                            data_b64: String::new(),
+                                            done: true,
+                                        },
+                                    );
+                                    writer.write_all(&encode_line(&chunk)?).await?;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(%hash, error = %e, "BlobProvide: cannot read blob");
+                            }
+                        }
+                    }
+                    Message::BlobChunk {
+                        sha256,
+                        request_id,
+                        offset,
+                        data_b64,
+                        done,
+                    } => {
+                        let hash = sha256.to_lowercase();
+                        let bytes = match B64.decode(data_b64.as_bytes()) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!(%request_id, error = %e, "BlobChunk bad base64");
+                                pending_recv.remove(&request_id);
+                                continue;
+                            }
+                        };
+                        let entry = pending_recv.entry(request_id).or_insert_with(|| {
+                            PendingBlobRecv {
+                                sha256: hash.clone(),
+                                buf: Vec::new(),
+                                next_offset: 0,
+                            }
+                        });
+                        if entry.sha256 != hash {
+                            warn!(%request_id, "BlobChunk sha256 changed mid-transfer");
+                            pending_recv.remove(&request_id);
+                            continue;
+                        }
+                        if offset != entry.next_offset {
+                            warn!(
+                                %request_id,
+                                expect = entry.next_offset,
+                                got = offset,
+                                "BlobChunk out of order"
+                            );
+                            pending_recv.remove(&request_id);
+                            continue;
+                        }
+                        entry.buf.extend_from_slice(&bytes);
+                        entry.next_offset = offset + bytes.len() as u64;
+                        if done {
+                            let finished = pending_recv.remove(&request_id).unwrap();
+                            match WeightsStore::store_blob(&finished.sha256, &finished.buf) {
+                                Ok(n) => {
+                                    info!(
+                                        hash = %finished.sha256,
+                                        bytes = n,
+                                        "blob received + verified"
+                                    );
+                                    if let Err(e) =
+                                        announce_local_blobs(&mut writer, &node_id, &store).await
+                                    {
+                                        warn!(error = %e, "BlobsHave after receive failed");
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        hash = %finished.sha256,
+                                        error = %e,
+                                        "blob verify/store failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     other => {
                         warn!(msg = ?other, "ignored control message");
                     }
@@ -716,6 +886,49 @@ async fn run_agent(
             }
         }
     }
+}
+
+async fn announce_local_blobs(
+    writer: &mut tokio::net::tcp::OwnedWriteHalf,
+    node_id: &NodeId,
+    store: &WeightsStore,
+) -> Result<()> {
+    // Ensure prepared weight files are also content-addressed so BlobProvide can read them.
+    if let Ok(manifest) = ManifestFile::load_default() {
+        if let Some(spec) = manifest.primary() {
+            for q in &spec.weights.quants {
+                for m in store.local_blob_metas(&spec.id, q) {
+                    let path = store.model_dir(&spec.id, &q.id).join(
+                        m.name
+                            .rsplit_once('/')
+                            .map(|(_, p)| p)
+                            .unwrap_or(m.name.as_str()),
+                    );
+                    // Prefer reading from model_dir file when blob store empty.
+                    if !WeightsStore::has_blob(&m.sha256) && path.is_file() {
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            let _ = WeightsStore::store_blob(&m.sha256, &bytes);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let blobs: Vec<BlobMeta> = WeightsStore::list_blob_store()
+        .into_iter()
+        .map(|m| BlobMeta {
+            sha256: m.sha256,
+            size: m.size,
+            kind: m.kind,
+            name: m.name,
+        })
+        .collect();
+    if blobs.is_empty() {
+        return Ok(());
+    }
+    let have = Envelope::new(node_id.clone(), Message::BlobsHave { blobs });
+    writer.write_all(&encode_line(&have)?).await?;
+    Ok(())
 }
 
 async fn run_ready(api: String, pool_vram_gib: u64, backends: u32) -> Result<()> {

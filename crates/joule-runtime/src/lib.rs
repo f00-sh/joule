@@ -15,7 +15,7 @@ pub use manifest::{
     InferenceMode, ManifestFile, MilestoneStatus, ModelReadiness, ModelSpec, QuantSpec,
     RuntimeFlags, EMBEDDED_MANIFEST,
 };
-pub use weights::{PrepareStatus, WeightsStore};
+pub use weights::{BlobAnnounce, PrepareStatus, WeightsStore};
 
 use async_trait::async_trait;
 use joule_proto::ClusterPlan;

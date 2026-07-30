@@ -136,6 +136,11 @@ pub struct ControlState {
     pub blobs: BlobDirectory,
     /// Operator-signed messages (deduped); peers flood these.
     pub broadcasts: BroadcastLog,
+    /// In-flight blob transfers: request_id → (requester, sha256).
+    pub pending_blob_xfers: HashMap<Uuid, (NodeId, String)>,
+    /// Active model chunks from last model_update (for rebalance).
+    pub active_chunks: Vec<joule_cluster::ModelChunk>,
+    pub active_replica_factor: u32,
     dirty: bool,
 }
 
@@ -166,6 +171,9 @@ impl ControlState {
             account_economy: HashMap::new(),
             blobs: BlobDirectory::new(),
             broadcasts: BroadcastLog::new(256),
+            pending_blob_xfers: HashMap::new(),
+            active_chunks: Vec::new(),
+            active_replica_factor: joule_cluster::DEFAULT_REPLICA_FACTOR,
             dirty: false,
         }
     }

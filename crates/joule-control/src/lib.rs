@@ -9,6 +9,7 @@ mod broadcast;
 mod edge;
 mod http;
 mod identity;
+mod model_update;
 mod persist;
 mod state;
 mod tcp;
@@ -57,6 +58,7 @@ pub async fn serve(app: App, agent_addr: SocketAddr, http_addr: SocketAddr) -> R
     let prune_app = app.clone();
     let prune_task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut rebalance_n = 0u32;
         loop {
             tick.tick().await;
             {
@@ -66,6 +68,11 @@ pub async fn serve(app: App, agent_addr: SocketAddr, http_addr: SocketAddr) -> R
                 edge::publish_snapshot_async(&g, Some(&prune_app.identity), false);
             }
             broadcast_pool_status(&prune_app).await;
+            rebalance_n = rebalance_n.wrapping_add(1);
+            // Every ~30s: pull replicas for under-replicated model chunks.
+            if rebalance_n % 6 == 0 {
+                model_update::rebalance_replicas(&prune_app).await;
+            }
         }
     });
 

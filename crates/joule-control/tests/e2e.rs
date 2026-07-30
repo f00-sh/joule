@@ -285,3 +285,189 @@ fn tempfile_dir() -> std::path::PathBuf {
     std::fs::create_dir_all(&p).unwrap();
     p
 }
+
+/// Peer seed: seeder announces sha256 → leech BlobWant → control orchestrates
+/// BlobProvide → BlobChunk stream → leech verifies hash (no f00 CDN).
+#[tokio::test]
+async fn peer_blob_chunk_transfer() {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use joule_proto::BlobMeta;
+    use sha2::{Digest, Sha256};
+    use std::sync::{Arc, Mutex};
+
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, _http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    let payload = b"lab-tiny-style peer seed payload for joule swarm v0";
+    let hash = hex::encode(Sha256::digest(payload));
+    let received: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+
+    // --- seeder agent ---
+    let seeder_id = NodeId::new();
+    let seeder_sock = TcpStream::connect(agent_addr).await.unwrap();
+    let (s_reader, mut s_writer) = seeder_sock.into_split();
+    let mut s_lines = BufReader::new(s_reader).lines();
+    s_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                seeder_id.clone(),
+                Message::Hello {
+                    account: "seeder".into(),
+                    caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40),
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = s_lines.next_line().await.unwrap(); // Welcome
+    s_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                seeder_id.clone(),
+                Message::BlobsHave {
+                    blobs: vec![BlobMeta {
+                        sha256: hash.clone(),
+                        size: payload.len() as u64,
+                        kind: "blob".into(),
+                        name: "lab-seed".into(),
+                    }],
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let seeder_payload = payload.to_vec();
+    let seeder_hash = hash.clone();
+    let seeder = tokio::spawn(async move {
+        loop {
+            let Ok(Some(line)) = s_lines.next_line().await else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let env = decode_line(line.as_bytes()).unwrap();
+            if let Message::BlobProvide {
+                sha256,
+                request_id,
+                ..
+            } = env.msg
+            {
+                assert_eq!(sha256.to_lowercase(), seeder_hash);
+                // single chunk is enough for this payload
+                let chunk = Envelope::new(
+                    seeder_id.clone(),
+                    Message::BlobChunk {
+                        sha256: seeder_hash.clone(),
+                        request_id,
+                        offset: 0,
+                        data_b64: B64.encode(&seeder_payload),
+                        done: true,
+                    },
+                );
+                if s_writer
+                    .write_all(&encode_line(&chunk).unwrap())
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    });
+
+    // --- leech agent ---
+    let leech_id = NodeId::new();
+    let leech_sock = TcpStream::connect(agent_addr).await.unwrap();
+    let (l_reader, mut l_writer) = leech_sock.into_split();
+    let mut l_lines = BufReader::new(l_reader).lines();
+    l_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                leech_id.clone(),
+                Message::Hello {
+                    account: "leech".into(),
+                    caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40),
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = l_lines.next_line().await.unwrap(); // Welcome
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Ask swarm for the hash the seeder announced.
+    l_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                leech_id.clone(),
+                Message::BlobWant {
+                    sha256: hash.clone(),
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let recv = received.clone();
+    let leech_hash = hash.clone();
+    let leech = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let mut expect = 0u64;
+        loop {
+            let Ok(Some(line)) = l_lines.next_line().await else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let env = decode_line(line.as_bytes()).unwrap();
+            match env.msg {
+                Message::BlobLocate { peers, .. } => {
+                    assert!(!peers.is_empty(), "seeder should be listed");
+                }
+                Message::BlobChunk {
+                    sha256,
+                    offset,
+                    data_b64,
+                    done,
+                    ..
+                } => {
+                    assert_eq!(sha256.to_lowercase(), leech_hash);
+                    assert_eq!(offset, expect);
+                    let piece = B64.decode(data_b64.as_bytes()).unwrap();
+                    buf.extend_from_slice(&piece);
+                    expect += piece.len() as u64;
+                    if done {
+                        *recv.lock().unwrap() = Some(buf.clone());
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), leech)
+        .await
+        .expect("leech timed out")
+        .unwrap();
+
+    let got = received.lock().unwrap().clone().expect("bytes");
+    assert_eq!(got, payload);
+    assert_eq!(hex::encode(Sha256::digest(&got)), hash);
+
+    // Directory should still list seeder (leech may not re-announce in this mini harness).
+    {
+        let g = app.state.read().await;
+        assert!(g.blobs.seeder_count(&hash) >= 1);
+    }
+
+    seeder.abort();
+}

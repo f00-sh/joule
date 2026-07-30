@@ -292,6 +292,8 @@ async fn inject_broadcast(
                     n += 1;
                 }
             }
+            drop(routes);
+            crate::model_update::apply_model_update(&app, &envelope).await;
             Json(json!({
                 "ok": true,
                 "flooded_agents": n,

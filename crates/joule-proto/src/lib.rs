@@ -377,6 +377,18 @@ pub enum Message {
     OperatorBroadcast {
         envelope: SignedEnvelope,
     },
+    /// Control → agent: digests this node should obtain (subset of model, not full).
+    FetchDigests {
+        digests: Vec<String>,
+        reason: String,
+        /// Desired replica count for rebalance hints.
+        #[serde(default = "default_replica_factor")]
+        replica_factor: u32,
+    },
+}
+
+fn default_replica_factor() -> u32 {
+    2
 }
 
 /// Kind of operator order (allow-listed actions only).

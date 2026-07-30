@@ -36,3 +36,6 @@ joule-proto = { workspace = true }
 joule-runtime = { workspace = true }
 uuid = { workspace = true }
 serde_json = { workspace = true }
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"

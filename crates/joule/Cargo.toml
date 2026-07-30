@@ -30,3 +30,5 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 hex = "0.4"
+base64 = "0.22"
+sha2 = "0.10"

@@ -118,25 +118,92 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
             Message::BlobsHave { blobs } => {
                 let id = env.from.clone();
                 let mut g = app.state.write().await;
+                // Full inventory replace from agent (authoritative local scan).
                 g.blobs.announce(id.clone(), blobs);
                 tracing::debug!(%id, "blob inventory updated");
             }
             Message::BlobWant { sha256 } => {
-                let id = env.from.clone();
+                let requester = env.from.clone();
+                let hash = sha256.to_lowercase();
                 let g = app.state.read().await;
-                let peers = g.blobs.peers_for(&sha256);
+                let peers = g.blobs.peers_for(&hash);
                 let (peer_ids, sizes): (Vec<_>, Vec<_>) =
                     peers.into_iter().map(|(n, m)| (n, m.size)).unzip();
+                let seeder = g.blobs.pick_seeder(&hash, &requester);
                 drop(g);
-                let reply = Envelope::new(
-                    id,
+
+                let locate = Envelope::new(
+                    requester.clone(),
                     Message::BlobLocate {
-                        sha256,
+                        sha256: hash.clone(),
                         peers: peer_ids,
                         sizes,
                     },
                 );
-                let _ = tx.send(reply);
+                let _ = tx.send(locate);
+
+                // Orchestrate transfer: ask seeder to push chunks to control → requester.
+                if let Some((seeder_id, _meta)) = seeder {
+                    let request_id = Uuid::new_v4();
+                    {
+                        let mut g = app.state.write().await;
+                        g.pending_blob_xfers
+                            .insert(request_id, (requester.clone(), hash.clone()));
+                    }
+                    let routes = app.routes.lock().await;
+                    if let Some(stx) = routes.get(&seeder_id) {
+                        let provide = Envelope::new(
+                            seeder_id.clone(),
+                            Message::BlobProvide {
+                                sha256: hash.clone(),
+                                request_id,
+                                to: requester,
+                            },
+                        );
+                        let _ = stx.send(provide);
+                        tracing::debug!(%seeder_id, %hash, %request_id, "blob provide requested");
+                    }
+                } else {
+                    tracing::debug!(%hash, %requester, "BlobWant: no seeder yet");
+                }
+            }
+            Message::BlobChunk {
+                sha256,
+                request_id,
+                offset,
+                data_b64,
+                done,
+            } => {
+                // Forward chunk from seeder to requester.
+                let dest = {
+                    let g = app.state.read().await;
+                    g.pending_blob_xfers.get(&request_id).cloned()
+                };
+                if let Some((to, want_hash)) = dest {
+                    let got = sha256.to_lowercase();
+                    if want_hash.to_lowercase() != got {
+                        warn!(%request_id, "blob chunk hash mismatch for pending xfer");
+                    } else {
+                        let routes = app.routes.lock().await;
+                        if let Some(rtx) = routes.get(&to) {
+                            let fwd = Envelope::new(
+                                to.clone(),
+                                Message::BlobChunk {
+                                    sha256: got,
+                                    request_id,
+                                    offset,
+                                    data_b64,
+                                    done,
+                                },
+                            );
+                            let _ = rtx.send(fwd);
+                        }
+                        if done {
+                            let mut g = app.state.write().await;
+                            g.pending_blob_xfers.remove(&request_id);
+                        }
+                    }
+                }
             }
             Message::OperatorBroadcast { envelope } => {
                 let accept = {
@@ -155,6 +222,9 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                             let out = Envelope::new(node.clone(), msg.clone());
                             let _ = peer_tx.send(out);
                         }
+                        drop(routes);
+                        // Model updates: assign redundant chunk digests (not full model).
+                        crate::model_update::apply_model_update(&app, &envelope).await;
                     }
                     Ok(false) => {
                         tracing::debug!(id = %envelope.id, "operator broadcast duplicate");
