@@ -160,14 +160,10 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use joule_proto::OperatorKind;
     use rand::rngs::OsRng;
-    use std::sync::{Mutex, OnceLock};
     use uuid::Uuid;
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        crate::pins::test_env_lock()
     }
 
     #[test]

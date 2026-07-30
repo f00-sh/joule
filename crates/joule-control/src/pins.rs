@@ -110,6 +110,16 @@ pub fn website_protocol_matches_embed(body: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Serialize tests that mutate operator-related env vars (shared with broadcast tests).
+#[cfg(test)]
+pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +134,7 @@ mod tests {
 
     #[test]
     fn effective_defaults_to_official() {
+        let _g = test_env_lock();
         std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
         std::env::remove_var("JOULE_OPERATOR_PUBKEY");
         assert_eq!(
@@ -134,6 +145,7 @@ mod tests {
 
     #[test]
     fn unofficial_override_only_when_allowed() {
+        let _g = test_env_lock();
         std::env::set_var("JOULE_OPERATOR_PUBKEY", "aa".repeat(32));
         std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
         assert_eq!(
