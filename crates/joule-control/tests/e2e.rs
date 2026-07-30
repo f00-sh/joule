@@ -10,13 +10,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-fn operator_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+async fn operator_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(())).lock().await
 }
 
 async fn spawn_agent(
@@ -492,7 +491,7 @@ async fn operator_policy_and_software_fanout() {
     use joule_proto::{OperatorKind, SignedEnvelope};
     use rand::rngs::OsRng;
 
-    let _env = operator_env_lock();
+    let _env = operator_env_lock().await;
     let sk = SigningKey::generate(&mut OsRng);
     let pk = hex::encode(sk.verifying_key().to_bytes());
     std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
@@ -628,7 +627,7 @@ async fn model_update_assigns_digests() {
     use joule_proto::{OperatorKind, SignedEnvelope};
     use rand::rngs::OsRng;
 
-    let _env = operator_env_lock();
+    let _env = operator_env_lock().await;
     let sk = SigningKey::generate(&mut OsRng);
     let pk = hex::encode(sk.verifying_key().to_bytes());
     std::env::set_var("JOULE_OPERATOR_PUBKEY", &pk);
