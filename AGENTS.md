@@ -66,3 +66,10 @@ cargo run -p joule -- version
 
 - Default model tags use `kimi-open-*` until an exact Kimi revision is pinned in `models/MANIFEST`.
 - Browser is dashboard only; compute is native `joule agent`.
+
+## f00 membership
+
+- Org: `f00-sh`
+- Catalog SSOT: https://f00.sh/catalog.json (`f00` repo `site/catalog.json`)
+- Theme: https://f00.sh/theme/f00-theme.css (Heartbox palette — do not redefine brand colors/fonts)
+- Card on hub only when catalog `status=released` after a real release
