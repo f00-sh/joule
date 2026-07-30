@@ -87,13 +87,25 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 node_id = Some(id.clone());
                 info!(%id, %account, ?peer, "agent joined");
                 let welcome = Envelope::new(
-                    id,
+                    id.clone(),
                     Message::Welcome {
                         account: account.clone(),
                         api_key,
                     },
                 );
                 let _ = tx.send(welcome);
+                // Catch-up: flood recent operator envelopes (already verified/deduped).
+                let recent = {
+                    let g = app.state.read().await;
+                    g.broadcasts.recent().to_vec()
+                };
+                for env in recent {
+                    let out = Envelope::new(
+                        id.clone(),
+                        Message::OperatorBroadcast { envelope: env },
+                    );
+                    let _ = tx.send(out);
+                }
             }
             Message::Heartbeat { load, healthy } => {
                 let id = env.from.clone();
