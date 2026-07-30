@@ -1,7 +1,13 @@
 //! Distributed compute cluster membership, live capacity, and placement.
 //!
 //! Internet-wide volunteer pool. Nodes join the control plane over any path.
-//! Load balancing uses inflight work + advertised load + reputation.
+//! Scheduling of free/loaded compute lives in [`scheduler`].
+
+mod scheduler;
+
+pub use scheduler::{
+    compute_state, free_slots, max_slots, ComputeState, NodeSchedule, SchedulerSnapshot,
+};
 
 use joule_proto::{
     ClusterCapacity, ClusterPlan, DeviceClass, NodeCaps, NodeId, ShardAssignment, ShardRole,
@@ -168,9 +174,8 @@ impl Cluster {
             .any(|n| n.account == account && n.healthy && !n.reputation.is_banned(now))
     }
 
-    /// Scheduling score: lower is better.
+    /// Scheduling score for placement plans (lower is better).
     fn schedule_score(n: &Node) -> (i64, i64, i64, u64) {
-        // inflight heavily weighted; load * 100; prefer high reputation (invert); then rr
         let inflight = i64::from(n.inflight) * 1000;
         let load = (n.load * 100.0) as i64;
         let rep = -((n.reputation.score() * 1000.0) as i64);
@@ -182,8 +187,7 @@ impl Cluster {
         )
     }
 
-    /// Every healthy, non-banned donor is compute for [`CLUSTER_MODEL`].
-    /// Single-model product: do not filter donors by per-node model tags.
+    /// Healthy, non-banned donors (pool membership).
     fn eligible(&self) -> Vec<&Node> {
         let now = Instant::now();
         self.nodes
@@ -192,46 +196,26 @@ impl Cluster {
             .collect()
     }
 
-    /// Rank all pool donors (best first) for the cluster model.
+    /// Rank schedulable donors (have free slots). Prefer free over loaded.
     pub fn rank_workers(&self, _model: &str) -> Vec<NodeId> {
-        let mut eligible = self.eligible();
-        eligible.sort_by(|a, b| Self::schedule_score(a).cmp(&Self::schedule_score(b)));
-        eligible.into_iter().map(|n| n.id.clone()).collect()
+        self.rank_schedulable()
     }
 
-    /// How many healthy donors can serve the cluster model right now.
+    /// How many healthy donors are in the pool (not necessarily free).
     pub fn pool_size(&self) -> usize {
         self.eligible().len()
     }
 
-    /// Pick best worker and bump inflight + rr (call release_worker when done).
-    pub fn acquire_worker(&mut self, model: &str) -> Option<NodeId> {
-        let ranked = self.rank_workers(model);
-        let id = ranked.into_iter().next()?;
-        self.rr_counter = self.rr_counter.wrapping_add(1);
-        if let Some(n) = self.nodes.get_mut(&id) {
-            n.inflight = n.inflight.saturating_add(1);
-            n.rr_seq = self.rr_counter;
-        }
-        Some(id)
+    /// Acquire one free/loaded slot (not full). Prefer free nodes.
+    pub fn acquire_worker(&mut self, _model: &str) -> Option<NodeId> {
+        self.try_acquire_slot()
     }
 
-    /// Pick up to `n` distinct workers from the full healthy pool.
-    pub fn acquire_workers(&mut self, model: &str, n: usize) -> Vec<NodeId> {
-        let ranked = self.rank_workers(model);
-        let mut out = Vec::new();
-        for id in ranked.into_iter().take(n) {
-            self.rr_counter = self.rr_counter.wrapping_add(1);
-            if let Some(node) = self.nodes.get_mut(&id) {
-                node.inflight = node.inflight.saturating_add(1);
-                node.rr_seq = self.rr_counter;
-            }
-            out.push(id);
-        }
-        out
+    /// Acquire up to `n` slots on distinct free/loaded nodes.
+    pub fn acquire_workers(&mut self, _model: &str, n: usize) -> Vec<NodeId> {
+        self.try_acquire_slots(n)
     }
 
-    /// Prefer using as many healthy donors as useful for multi-node plans.
     pub fn preferred_pipeline_stages(&self) -> usize {
         let n = self.pool_size();
         if n >= 4 {
@@ -402,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn load_balance_prefers_less_inflight() {
+    fn load_balance_prefers_free_over_loaded() {
         let mut c = Cluster::default();
         let (a, ca) = node(8192, DeviceClass::Gpu);
         let (b, cb) = node(8192, DeviceClass::Gpu);
@@ -411,6 +395,8 @@ mod tests {
         let first = c.acquire_worker(CLUSTER_MODEL).unwrap();
         let second = c.acquire_worker(CLUSTER_MODEL).unwrap();
         assert_ne!(first, second, "second pick should prefer the free donor");
+        // both full (1 slot each on 8GB) — no more
+        assert!(c.acquire_worker(CLUSTER_MODEL).is_none());
         c.release_worker(&first);
         c.release_worker(&second);
     }

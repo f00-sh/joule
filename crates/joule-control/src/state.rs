@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{oneshot, Notify, RwLock};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -35,6 +35,9 @@ pub struct NodeView {
     pub healthy: bool,
     pub load: f32,
     pub inflight: u32,
+    pub max_slots: u32,
+    pub free_slots: u32,
+    pub compute_state: String,
     pub reputation_ok: u64,
     pub reputation_fail: u64,
     pub banned: bool,
@@ -83,6 +86,8 @@ pub struct ControlState {
     pub dual_verify_every: u64,
     pub chat_count: u64,
     pub data_dir: Option<PathBuf>,
+    /// Wake waiters when a compute slot frees.
+    pub schedule_notify: Option<Arc<Notify>>,
     dirty: bool,
 }
 
@@ -106,22 +111,44 @@ impl ControlState {
             dual_verify_every: 3,
             chat_count: 0,
             data_dir: None,
+            schedule_notify: None,
             dirty: false,
         }
     }
 
     pub fn shared() -> SharedState {
-        Arc::new(RwLock::new(Self::new()))
+        Self::shared_with_notify(Arc::new(Notify::new()))
     }
 
-    pub fn shared_with_data_dir(dir: PathBuf) -> Result<SharedState, anyhow::Error> {
+    pub fn shared_with_notify(notify: Arc<Notify>) -> SharedState {
+        let mut s = Self::new();
+        s.schedule_notify = Some(notify);
+        Arc::new(RwLock::new(s))
+    }
+
+    pub fn shared_with_data_dir(
+        dir: PathBuf,
+        notify: Arc<Notify>,
+    ) -> Result<SharedState, anyhow::Error> {
         let mut state = Self::new();
         state.data_dir = Some(dir.clone());
+        state.schedule_notify = Some(notify);
         if let Some(snap) = persist::load(&dir)? {
             info!(path = %dir.display(), "loaded persisted state");
             persist::apply_snapshot(&mut state, snap);
         }
         Ok(Arc::new(RwLock::new(state)))
+    }
+
+    pub fn wake_scheduler(&self) {
+        if let Some(n) = &self.schedule_notify {
+            n.notify_waiters();
+        }
+    }
+
+    pub fn release_slot(&mut self, id: &NodeId) {
+        self.cluster.release_worker(id);
+        self.wake_scheduler();
     }
 
     fn mark_dirty(&mut self) {
@@ -230,23 +257,36 @@ impl ControlState {
         let mut out: Vec<NodeView> = self
             .cluster
             .nodes()
-            .map(|n| NodeView {
-                id: n.id.to_string(),
-                account: n.account.clone(),
-                device: match n.caps.device {
-                    DeviceClass::Gpu => "gpu".into(),
-                    DeviceClass::Metal => "metal".into(),
-                    DeviceClass::Cpu => "cpu".into(),
-                },
-                mem_mib: n.caps.mem_mib,
-                throughput_class: n.caps.throughput_class,
-                healthy: n.healthy,
-                load: n.load,
-                inflight: n.inflight,
-                reputation_ok: n.reputation.ok,
-                reputation_fail: n.reputation.fail,
-                banned: n.reputation.is_banned(now),
-                models: n.caps.models.clone(),
+            .map(|n| {
+                let max = joule_cluster::max_slots(n);
+                let free = joule_cluster::free_slots(n);
+                let st = joule_cluster::compute_state(n);
+                NodeView {
+                    id: n.id.to_string(),
+                    account: n.account.clone(),
+                    device: match n.caps.device {
+                        DeviceClass::Gpu => "gpu".into(),
+                        DeviceClass::Metal => "metal".into(),
+                        DeviceClass::Cpu => "cpu".into(),
+                    },
+                    mem_mib: n.caps.mem_mib,
+                    throughput_class: n.caps.throughput_class,
+                    healthy: n.healthy,
+                    load: n.load,
+                    inflight: n.inflight,
+                    max_slots: max,
+                    free_slots: free,
+                    compute_state: match st {
+                        joule_cluster::ComputeState::Free => "free".into(),
+                        joule_cluster::ComputeState::Loaded => "loaded".into(),
+                        joule_cluster::ComputeState::Full => "full".into(),
+                        joule_cluster::ComputeState::Unavailable => "unavailable".into(),
+                    },
+                    reputation_ok: n.reputation.ok,
+                    reputation_fail: n.reputation.fail,
+                    banned: n.reputation.is_banned(now),
+                    models: n.caps.models.clone(),
+                }
             })
             .collect();
         out.sort_by(|a, b| a.account.cmp(&b.account).then(a.id.cmp(&b.id)));
@@ -261,7 +301,7 @@ impl ControlState {
         completion_tokens: u32,
         worker: &NodeId,
     ) {
-        self.cluster.release_worker(worker);
+        self.release_slot(worker);
         let device = self
             .cluster
             .get(worker)
@@ -307,7 +347,7 @@ impl ControlState {
 
     pub fn settle_infer_error(&mut self, request_id: Uuid, error: String) {
         if let Some(pending) = self.pending.remove(&request_id) {
-            self.cluster.release_worker(&pending.worker);
+            self.release_slot(&pending.worker);
             let _ = pending.tx.send(Err(error));
         }
     }

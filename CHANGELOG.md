@@ -12,10 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Single-model law:** only `kimi-open` (`CLUSTER_MODEL`); all healthy donors are pool compute for it
 - Scheduling no longer filters nodes by per-donor model tags; full pool is eligible
 - `/v1/models` returns at most one model; foreign model ids are rejected
+- Scheduler reserves **slots** (free/loaded/full); will not place work on full nodes
 
 ### Added
 
-- **Multi-donor load balancing**: inflight-aware scheduling, failover across agents
+- `joule-cluster` scheduler module + `GET /v1/cluster/scheduler`
+- Wait-for-free-compute (up to 20s) when pool is fully loaded
+- **Multi-donor load balancing**: free-first, then loaded; failover across agents
 - **Anti-cheat challenges**: spot challenges every ~12s + dual-verify every 3rd chat
 - **Reputation**: pass/fail scores; ban unhealthy cheaters from scheduling
 - **Localhost control hardened**: shared agent routes (fixed dispatch), bind errors, healthz shows agents_connected

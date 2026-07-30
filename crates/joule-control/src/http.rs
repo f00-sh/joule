@@ -27,6 +27,7 @@ pub fn router(app: App) -> Router {
         .route("/dashboard", get(dashboard))
         .route("/healthz", get(healthz))
         .route("/v1/cluster/capacity", get(capacity))
+        .route("/v1/cluster/scheduler", get(scheduler))
         .route("/v1/cluster/nodes", get(nodes))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
@@ -44,11 +45,15 @@ async fn healthz(State(app): State<App>) -> impl IntoResponse {
     let g = app.state.read().await;
     let cap = g.cluster.capacity();
     let agents = app.routes.lock().await.len();
+    let sched = g.cluster.scheduler_snapshot();
     Json(json!({
         "ok": true,
         "service": "joule-control",
         "agents_connected": agents,
         "nodes_healthy": cap.nodes_healthy,
+        "slots_free": sched.slots_free,
+        "slots_used": sched.slots_used,
+        "can_accept_work": sched.can_accept_work,
     }))
 }
 
@@ -56,6 +61,12 @@ async fn capacity(State(app): State<App>) -> Json<ClusterCapacity> {
     let mut g = app.state.write().await;
     g.prune();
     Json(g.cluster.capacity())
+}
+
+async fn scheduler(State(app): State<App>) -> impl IntoResponse {
+    let mut g = app.state.write().await;
+    g.prune();
+    Json(g.cluster.scheduler_snapshot())
 }
 
 #[derive(Serialize)]

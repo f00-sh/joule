@@ -94,9 +94,9 @@
   <main>
     <div class="grid" id="stats">
       <div class="card"><div class="label">Healthy nodes</div><div class="value accent" id="n-healthy">—</div></div>
-      <div class="card"><div class="label">Total nodes</div><div class="value" id="n-total">—</div></div>
-      <div class="card"><div class="label">Healthy VRAM</div><div class="value sky" id="mem-healthy">—</div></div>
-      <div class="card"><div class="label">Throughput class Σ</div><div class="value" id="tput">—</div></div>
+      <div class="card"><div class="label">Free / loaded / full</div><div class="value" id="sched-states">—</div></div>
+      <div class="card"><div class="label">Slots free / used</div><div class="value sky" id="slots">—</div></div>
+      <div class="card"><div class="label">Healthy VRAM</div><div class="value" id="mem-healthy">—</div></div>
       <div class="card"><div class="label">GPU / Metal / CPU</div><div class="value" id="devices">—</div></div>
       <div class="card"><div class="label">Cluster model</div><div class="value models" id="models">—</div></div>
     </div>
@@ -111,9 +111,10 @@
               <th>Device</th>
               <th>Mem MiB</th>
               <th>Load</th>
-              <th>Inflight</th>
-              <th>Rep OK/Fail</th>
-              <th>Status</th>
+              <th>Slots</th>
+              <th>State</th>
+              <th>Rep</th>
+              <th>Health</th>
               <th>Models</th>
             </tr>
           </thead>
@@ -123,10 +124,11 @@
     </section>
 
     <footer>
-      API: <a href="/v1/cluster/capacity">/v1/cluster/capacity</a> ·
-      <a href="/v1/models">/v1/models</a> ·
+      API: <a href="/v1/cluster/capacity">capacity</a> ·
+      <a href="/v1/cluster/scheduler">scheduler</a> ·
+      <a href="/v1/models">models</a> ·
       chat <code>POST /v1/chat/completions</code> ·
-      refresh 3s · engine may be stub until weights load
+      refresh 3s · single model · free/loaded slots
       <div id="error" class="err"></div>
     </footer>
   </main>
@@ -138,14 +140,17 @@
     async function refresh() {
       const err = document.getElementById("error");
       try {
-        const [cap, nodes] = await Promise.all([
+        const [cap, nodes, sched] = await Promise.all([
           fetch("/v1/cluster/capacity").then(r => r.json()),
           fetch("/v1/cluster/nodes").then(r => r.json()),
+          fetch("/v1/cluster/scheduler").then(r => r.json()),
         ]);
         document.getElementById("n-healthy").textContent = cap.nodes_healthy;
-        document.getElementById("n-total").textContent = cap.nodes_total;
+        document.getElementById("sched-states").textContent =
+          (sched.nodes_free||0) + " / " + (sched.nodes_loaded||0) + " / " + (sched.nodes_full||0);
+        document.getElementById("slots").textContent =
+          (sched.slots_free||0) + " / " + (sched.slots_used||0);
         document.getElementById("mem-healthy").textContent = fmtGiB(cap.mem_mib_healthy);
-        document.getElementById("tput").textContent = cap.throughput_class_sum;
         document.getElementById("devices").textContent =
           cap.nodes_gpu + " / " + cap.nodes_metal + " / " + cap.nodes_cpu;
         document.getElementById("models").textContent =
@@ -156,21 +161,23 @@
         tb.innerHTML = "";
         (nodes.nodes || []).forEach(n => {
           const tr = document.createElement("tr");
-          let status = n.banned ? "banned" : (n.healthy ? "healthy" : "stale");
-          let pill = n.banned ? "bad" : (n.healthy ? "ok" : "bad");
+          let health = n.banned ? "banned" : (n.healthy ? "up" : "stale");
+          let pill = n.banned || !n.healthy ? "bad" : (n.compute_state === "full" ? "bad" : "ok");
+          let st = n.compute_state || "—";
           tr.innerHTML =
             "<td>" + n.account + "</td>" +
             "<td>" + n.device + "</td>" +
             "<td>" + n.mem_mib + "</td>" +
             "<td>" + (n.load != null ? n.load.toFixed(2) : "—") + "</td>" +
-            "<td>" + (n.inflight != null ? n.inflight : 0) + "</td>" +
+            "<td>" + (n.free_slots||0) + "/" + (n.max_slots||0) + " (in " + (n.inflight||0) + ")</td>" +
+            "<td><span class=\"pill " + pill + "\">" + st + "</span></td>" +
             "<td>" + (n.reputation_ok || 0) + "/" + (n.reputation_fail || 0) + "</td>" +
-            "<td><span class=\"pill " + pill + "\">" + status + "</span></td>" +
+            "<td>" + health + "</td>" +
             "<td class=\"models\">" + (n.models || []).join(", ") + "</td>";
           tb.appendChild(tr);
         });
         if (!(nodes.nodes || []).length) {
-          tb.innerHTML = "<tr><td colspan=\"8\" style=\"color:var(--muted)\">No donors yet — run <code>joule agent --account …</code></td></tr>";
+          tb.innerHTML = "<tr><td colspan=\"9\" style=\"color:var(--muted)\">No donors yet — run <code>joule agent --account …</code></td></tr>";
         }
         document.getElementById("updated").textContent =
           "updated " + new Date().toLocaleTimeString();

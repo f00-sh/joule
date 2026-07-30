@@ -190,28 +190,14 @@ pub async fn dispatch_infer(
         g.should_dual_verify()
     };
 
-    // Draw from the full healthy pool (single model owns all cluster compute).
-    let candidates = {
-        let mut g = app.state.write().await;
-        let pool = g.cluster.pool_size();
-        if pool == 0 {
-            return Err(format!(
-                "no healthy workers for cluster model {CLUSTER_MODEL}"
-            ));
-        }
-        // Dual-verify needs 2; otherwise take whole pool for failover order.
-        let n = if dual { pool.clamp(1, 2) } else { pool };
-        let ids = g.cluster.acquire_workers(&model, n);
-        if ids.is_empty() {
-            return Err(format!(
-                "no healthy workers for cluster model {CLUSTER_MODEL}"
-            ));
-        }
-        ids
-    };
+    // Wait for free/loaded slots (never schedule onto Full).
+    let want = if dual { 2 } else { 1 };
+    let candidates = acquire_with_wait(app, want, Duration::from_secs(20)).await?;
 
     if candidates.is_empty() {
-        return Err(format!("no healthy workers for model {model}"));
+        return Err(format!(
+            "no free compute for cluster model {CLUSTER_MODEL} (all slots loaded)"
+        ));
     }
 
     // Dual-verify path: run two workers in parallel, compare.
@@ -222,7 +208,7 @@ pub async fn dispatch_infer(
         {
             let mut g = app.state.write().await;
             for extra in candidates.iter().skip(2) {
-                g.cluster.release_worker(extra);
+                g.release_slot(extra);
             }
         }
 
@@ -304,7 +290,7 @@ pub async fn dispatch_infer(
                 // release unused candidates
                 let mut g = app.state.write().await;
                 for extra in remaining {
-                    g.cluster.release_worker(&extra);
+                    g.release_slot(&extra);
                 }
                 return Ok(out);
             }
@@ -365,9 +351,51 @@ async fn dispatch_one(
         Err(_) => {
             let mut g = app.state.write().await;
             if g.pending.remove(&request_id).is_some() {
-                g.cluster.release_worker(&worker_id);
+                g.release_slot(&worker_id);
             }
             Err("infer timed out".into())
+        }
+    }
+}
+
+/// Block until at least `want` free slots can be reserved, or timeout.
+async fn acquire_with_wait(
+    app: &App,
+    want: usize,
+    timeout: Duration,
+) -> Result<Vec<NodeId>, String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        {
+            let mut g = app.state.write().await;
+            if g.cluster.pool_size() == 0 {
+                return Err(format!(
+                    "no healthy workers for cluster model {CLUSTER_MODEL}"
+                ));
+            }
+            let free = g.cluster.total_free_slots() as usize;
+            let n = want.min(free).max(if free > 0 { 1 } else { 0 });
+            if n > 0 {
+                let ids = g.cluster.try_acquire_slots(n);
+                if !ids.is_empty() {
+                    // For dual path, need 2 if possible; if only 1 free, still return 1
+                    // and let dual degrade to single.
+                    return Ok(ids);
+                }
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for free compute ({CLUSTER_MODEL}); pool is fully loaded"
+            ));
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let wait = remaining.min(Duration::from_millis(100));
+        tokio::select! {
+            _ = app.schedule_notify.notified() => {}
+            _ = tokio::time::sleep(wait) => {}
         }
     }
 }
