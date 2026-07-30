@@ -195,19 +195,20 @@ burn = (prompt + 4×completion) × leecher_usage_bp
     <section id="join">
       <h2>Join the pool</h2>
       <div class="callout">
-        <strong>Decentralized stats:</strong> control signs snapshots
-        (<code>/v1/public/snapshot</code>). Add your public URL to
-        <code>sources.json</code> — the site does not need Cloudflare.
-        Optional mirror: put the ingest token at
-        <code>~/.config/f00/joule/edge.token</code> (f00 core path) so control
-        also pushes to <code>joule.f00.sh/api/ingest</code>.
+        <strong>Yes — decentralized listing:</strong> set
+        <code>JOULE_PUBLIC_URL=https://your-control</code> and run control.
+        It <em>announces</em> with your pool key to
+        <code>/api/announce</code> (no f00 token). The site loads
+        <code>/api/sources</code> automatically. Optional KV mirror uses
+        <code>~/.config/f00/joule/edge.token</code>.
       </div>
       <pre class="cmd">git clone https://github.com/f00-sh/joule.git
 cd joule && cargo build --release -p joule
 
-# terminal 1 — control (auto-loads edge token from f00 core path if present)
+# terminal 1 — public control (auto-announces to joule.f00.sh directory)
+export JOULE_PUBLIC_URL=https://your.public.host   # HTTPS base of this control
 ./target/release/joule control
-# signed feed → http://127.0.0.1:7700/v1/public/snapshot
+# signed feed → $JOULE_PUBLIC_URL/v1/public/snapshot
 
 # terminal 2 — donate
 ./target/release/joule agent --account you --control 127.0.0.1:7701</pre>

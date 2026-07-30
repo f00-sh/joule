@@ -107,6 +107,21 @@ pub fn snapshot_preimage(pool_id: &str, updated_unix_ms: u64, body_json: &str) -
     h.finalize().into()
 }
 
+/// Preimage for public source announce (no privileged token).
+///
+/// ```text
+/// sha256( pool_id || "\n" || snapshot_url || "\n" || updated_unix_ms )
+/// ```
+pub fn announce_preimage(pool_id: &str, snapshot_url: &str, updated_unix_ms: u64) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(pool_id.as_bytes());
+    h.update(b"\n");
+    h.update(snapshot_url.as_bytes());
+    h.update(b"\n");
+    h.update(updated_unix_ms.to_string().as_bytes());
+    h.finalize().into()
+}
+
 fn default_identity_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/joule"))
 }

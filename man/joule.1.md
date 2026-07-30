@@ -90,9 +90,12 @@ Offline demos (no network).
 | Variable | Purpose |
 |---|---|
 | `RUST_LOG` | Tracing filter |
-| `JOULE_EDGE_TOKEN` | Bearer token to publish live pool snapshots to `joule.f00.sh/api/ingest` |
+| `JOULE_PUBLIC_URL` | Public HTTPS base of this control; enables signed **announce** to the open directory (no f00 token) |
+| `JOULE_ANNOUNCE_URL` | Override announce endpoint (default `https://joule.f00.sh/api/announce`) |
+| `JOULE_EDGE_TOKEN` | Optional bearer to push snapshots into edge KV (`/api/ingest`) |
 | `JOULE_EDGE_URL` | Override ingest URL (default `https://joule.f00.sh/api/ingest`) |
-| `JOULE_EDGE_DISABLE` | Set to `1` to skip edge publish |
+| `JOULE_EDGE_DISABLE` | Set to `1` to skip privileged edge ingest |
+| `JOULE_POOL_ID` | Pool identity id embedded in signed snapshots |
 
 ## SEE ALSO
 

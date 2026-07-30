@@ -297,6 +297,18 @@
     }
   }
 
+  /** Public directory: anyone announced via signed POST /api/announce. */
+  async function loadDirectory() {
+    try {
+      const r = await fetch("/api/sources", { cache: "no-store" });
+      if (!r.ok) return [];
+      const d = await r.json();
+      return Array.isArray(d.sources) ? d.sources : [];
+    } catch {
+      return [];
+    }
+  }
+
   async function refresh() {
     let sources = [];
     let trust = { max_age_secs: 180 };
@@ -320,7 +332,19 @@
       const cfg = await loadSourcesConfig();
       sources = cfg.sources || [];
       trust = cfg.trust || trust;
-      // Always include same-origin edge mirror
+      // Decentralized directory (auto-announced controls)
+      const dir = await loadDirectory();
+      dir.forEach((s) => {
+        if (!s.url) return;
+        if (!sources.some((x) => x.url === s.url)) {
+          sources.push({
+            id: s.id || s.pool_id || s.url,
+            url: s.url,
+            kind: "control",
+          });
+        }
+      });
+      // Aggregating edge mirror (itself multi-sources the directory)
       if (!sources.some((s) => s.url === "/api/pool" || s.id === "f00-edge")) {
         sources.unshift({ id: "f00-edge", url: "/api/pool", kind: "mirror" });
       }

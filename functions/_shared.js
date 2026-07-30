@@ -1,6 +1,9 @@
 /** Shared helpers for joule Pages Functions (edge pool feed). */
 
 export const SNAPSHOT_KEY = "pool:live";
+export const SOURCES_KEY = "pool:sources";
+export const MAX_SOURCES = 64;
+export const SOURCE_TTL_MS = 48 * 3600 * 1000;
 
 export function emptySnapshot(reason = "no_donors") {
   return {
@@ -160,4 +163,104 @@ export function authorized(request, env) {
     : "";
   const header = request.headers.get("x-joule-token") || "";
   return bearer === token || header === token;
+}
+
+export async function readSources(env) {
+  if (!env.POOL) return [];
+  const raw = await env.POOL.get(SOURCES_KEY, "json");
+  if (!Array.isArray(raw)) return [];
+  const now = Date.now();
+  return raw.filter((s) => s && s.snapshot_url && (!s.expires_unix_ms || s.expires_unix_ms > now));
+}
+
+export async function writeSources(env, list) {
+  if (!env.POOL) return;
+  await env.POOL.put(SOURCES_KEY, JSON.stringify(list.slice(0, MAX_SOURCES)));
+}
+
+function hexToBytes(hex) {
+  const clean = String(hex || "").replace(/^0x/, "");
+  if (clean.length % 2) return null;
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(clean.substr(i * 2, 2), 16);
+  return out;
+}
+
+/** ed25519 verify via Web Crypto (Workers). message = raw bytes signed by dalek. */
+export async function ed25519Verify(messageBytes, signatureHex, publicKeyHex) {
+  try {
+    const sig = hexToBytes(signatureHex);
+    const pub = hexToBytes(publicKeyHex);
+    if (!sig || !pub || sig.length !== 64 || pub.length !== 32) return false;
+    const key = await crypto.subtle.importKey(
+      "raw",
+      pub,
+      { name: "Ed25519" },
+      false,
+      ["verify"],
+    );
+    return await crypto.subtle.verify({ name: "Ed25519" }, key, sig, messageBytes);
+  } catch {
+    return false;
+  }
+}
+
+export async function sha256Bytes(bytes) {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+}
+
+/** announce preimage: sha256(pool_id \\n snapshot_url \\n updated_unix_ms) */
+export async function announcePreimage(poolId, snapshotUrl, updatedUnixMs) {
+  const enc = new TextEncoder();
+  const raw = new Uint8Array([
+    ...enc.encode(String(poolId || "")),
+    10,
+    ...enc.encode(String(snapshotUrl || "")),
+    10,
+    ...enc.encode(String(updatedUnixMs || "")),
+  ]);
+  return sha256Bytes(raw);
+}
+
+/** Multi-fetch announced sources + KV mirror; pick freshest / most capacity. */
+export async function aggregateFromSources(env) {
+  const sources = await readSources(env);
+  const urls = sources.map((s) => s.snapshot_url).filter(Boolean);
+  // Always try CONTROL_ORIGIN signed snapshot if configured
+  const origin = (env.CONTROL_ORIGIN || "").replace(/\/$/, "");
+  if (origin) urls.push(`${origin}/v1/public/snapshot`);
+
+  const unique = [...new Set(urls)].slice(0, 24);
+  const results = await Promise.all(
+    unique.map(async (url) => {
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(3500) });
+        if (!r.ok) return null;
+        const snap = await r.json();
+        if (!snap || typeof snap !== "object") return null;
+        return { ...snap, source: snap.source || "remote", _via: url };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const ok = results.filter(Boolean);
+  const kv = await readSnapshot(env);
+  if (kv && kv.source !== "empty" && kv.source !== "seed") ok.push(kv);
+
+  if (!ok.length) return emptySnapshot("no_sources");
+
+  ok.sort((a, b) => {
+    const score = (s) => {
+      const age = Date.now() - Number(s.updated_unix_ms || 0);
+      const signed = s.signature && s.signature.signature_hex ? 1e9 : 0;
+      const nodes = Number(s.capacity?.nodes_healthy || 0) * 1e3;
+      const mem = Number(s.capacity?.mem_mib_healthy || 0);
+      return signed + nodes + mem - age / 1000;
+    };
+    return score(b) - score(a);
+  });
+  const best = ok[0];
+  delete best._via;
+  return best;
 }

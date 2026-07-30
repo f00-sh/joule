@@ -10,7 +10,7 @@
 //! 4. `$JOULE_DATA_DIR/edge.token` / `~/.local/share/joule/edge.token`
 //! 5. `~/.config/f00/joule/edge.token`  (f00 operator core path)
 
-use crate::identity::{snapshot_preimage, PoolIdentity};
+use crate::identity::{announce_preimage, snapshot_preimage, PoolIdentity};
 use crate::state::ControlState;
 use joule_runtime::readiness_for_pool_ex;
 use serde::Serialize;
@@ -171,11 +171,23 @@ pub fn build_snapshot(state: &ControlState) -> Value {
     })
 }
 
-/// Fire-and-forget publish to optional edge mirror. Rate-limited ~2s unless `force`.
+fn announce_url() -> String {
+    std::env::var("JOULE_ANNOUNCE_URL")
+        .unwrap_or_else(|_| "https://joule.f00.sh/api/announce".into())
+}
+
+/// Public base URL of this control (e.g. https://pool.example.com) for decentralization.
+pub fn public_base_url() -> Option<String> {
+    std::env::var("JOULE_PUBLIC_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Fire-and-forget:
+/// 1) signed announce to public directory (no token — needs JOULE_PUBLIC_URL)
+/// 2) optional privileged edge ingest if token present
 pub fn publish_snapshot_async(state: &ControlState, identity: Option<&PoolIdentity>, force: bool) {
-    if !edge_enabled() {
-        return;
-    }
     let now = now_ms();
     let last = LAST_PUBLISH_MS.load(Ordering::Relaxed);
     if !force && now.saturating_sub(last) < 2000 {
@@ -183,33 +195,76 @@ pub fn publish_snapshot_async(state: &ControlState, identity: Option<&PoolIdenti
     }
     LAST_PUBLISH_MS.store(now, Ordering::Relaxed);
 
+    let id = identity.cloned();
     let body = match identity {
-        Some(id) => build_signed_snapshot(state, id),
+        Some(i) => build_signed_snapshot(state, i),
         None => build_snapshot(state),
     };
-    let url = edge_url();
-    let token = resolve_edge_token().unwrap_or_default();
+    let token = resolve_edge_token();
+    let do_ingest = edge_enabled();
+    let public = public_base_url();
 
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        match client
-            .post(&url)
-            .header("authorization", format!("Bearer {token}"))
-            .header("content-type", "application/json")
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                debug!(%url, status = %resp.status(), "edge snapshot published");
+
+        // --- decentralized announce (no privilege) ---
+        if let (Some(base), Some(id)) = (public, id.as_ref()) {
+            let snapshot_url = format!("{base}/v1/public/snapshot");
+            let updated = body
+                .get("updated_unix_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_else(now_ms);
+            let pre = announce_preimage(&id.pool_id, &snapshot_url, updated);
+            let signature_hex = id.sign_bytes(&pre);
+            let pub_info = id.public_info();
+            let announce = json!({
+                "pool_id": id.pool_id,
+                "snapshot_url": snapshot_url,
+                "verifying_key_hex": pub_info.verifying_key_hex,
+                "signature_hex": signature_hex,
+                "updated_unix_ms": updated,
+            });
+            let url = announce_url();
+            match client
+                .post(&url)
+                .header("content-type", "application/json")
+                .json(&announce)
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    debug!(%url, "public announce ok");
+                }
+                Ok(resp) => {
+                    warn!(%url, status = %resp.status(), "public announce failed");
+                }
+                Err(e) => warn!(%url, error = %e, "public announce error"),
             }
-            Ok(resp) => {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                warn!(%url, %status, %text, "edge snapshot publish failed");
+        }
+
+        // --- optional privileged mirror ---
+        if do_ingest {
+            if let Some(token) = token {
+                let url = edge_url();
+                match client
+                    .post(&url)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .json(&body)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        debug!(%url, "edge snapshot published");
+                    }
+                    Ok(resp) => {
+                        warn!(%url, status = %resp.status(), "edge snapshot publish failed");
+                    }
+                    Err(e) => warn!(%url, error = %e, "edge snapshot publish error"),
+                }
             }
-            Err(e) => warn!(%url, error = %e, "edge snapshot publish error"),
         }
     });
 }

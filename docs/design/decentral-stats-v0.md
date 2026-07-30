@@ -51,17 +51,32 @@ Ingest bearer for `POST /api/ingest` resolves from:
 
 ---
 
-## Operator checklist
+## Automatic discovery (no manual sources.json)
+
+Anyone running control can **announce** without an f00 token:
 
 ```bash
-# f00 core path (preferred)
+# Public HTTPS base of YOUR control (required for announce)
+export JOULE_PUBLIC_URL=https://my-pool.example.com
+
+joule control
+# → signs POST https://joule.f00.sh/api/announce
+# → directory GET https://joule.f00.sh/api/sources lists you
+# → site multi-fetches your /v1/public/snapshot
+```
+
+Announce is authorized only by **holding the pool ed25519 key** (signature), not by Cloudflare secrets.
+
+Optional privileged mirror (push full snapshot into edge KV):
+
+```bash
+# f00 core path
 mkdir -p ~/.config/f00/joule
 # token matches Cloudflare Pages INGEST_TOKEN
 cp edge.token ~/.config/f00/joule/edge.token
-
-joule control   # signs snapshots; publishes to edge if token present
-# public signed feed:
-curl -s http://127.0.0.1:7700/v1/public/snapshot | jq .
 ```
 
-Add your public control URL to `docs/sources.json` so joule.f00.sh multi-sources you without CF ingest.
+```bash
+curl -s https://joule.f00.sh/api/sources | jq .
+curl -s http://127.0.0.1:7700/v1/public/snapshot | jq .signature
+```
