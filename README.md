@@ -100,6 +100,8 @@ joule chat --key joule_… --stream --prompt "stream me"
 
 **Distribution law:** f00 / joule.f00.sh is a **website only** — not a download farm. Weights and software are **sha256 content-addressed** and **peer-seeded** (`docs/design/distribution-v0.md`). Agents fill `~/.local/share/joule/` from local drops, git fixtures (`repo://`), and the swarm; third-party HTTP only if `JOULE_ALLOW_EXTERNAL_FETCH=1`.
 
+**Mesh discovery (decentral):** agents open a **peer listen** port (`--peer-listen`, default ephemeral), gossip `PeerAlive`, and prefer **direct** blob transfer; control is a temporary rendezvous. Phase C starts with `joule-dht` + replaceable `bootstrap.json` (`docs/design/decentral-discovery-v0.md`).
+
 **Kimi waits for a big enough pool.** ≥**64 GiB** verified VRAM and ≥**3** backends for `model_ready`. Manifest lists digests; `lab-tiny` seeds from the git tree; full K3 shards spread once someone on the mesh has them.
 
 ```text
@@ -113,7 +115,7 @@ curl -s http://127.0.0.1:7700/v1/models/readiness
 ```text
 joule version
 joule control [--agent-listen ADDR] [--http-listen ADDR]
-joule agent --account NAME [--control HOST:PORT] [--model TAG] [--mem-mib N]
+joule agent --account NAME [--control HOST:PORT] [--peer-listen HOST:PORT] [--mem-mib N]
 joule capacity --api http://127.0.0.1:7700 --json
 joule chat --key joule_… --prompt "…"
 joule whoami --key joule_…

@@ -49,6 +49,10 @@ pub fn router(app: App) -> Router {
         .route("/v1/operator/status", get(operator_status))
         .route("/v1/operator/pins", get(operator_pins))
         .route("/v1/operator/audit", get(operator_key_audit))
+        .route("/v1/mesh/peers", get(mesh_peers))
+        .route("/v1/dht/keys", get(dht_keys))
+        .route("/v1/dht/get/{*key}", get(dht_get))
+        .route("/v1/bootstrap", get(bootstrap_info))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -82,6 +86,79 @@ async fn healthz(State(app): State<App>) -> impl IntoResponse {
         "operator_paused": g.operator_paused,
         "service_live": g.service_live,
         "blob_digests": g.blobs.catalog().len(),
+        "mesh_peers": g.mesh.healthy_count(),
+        "mesh_total": g.mesh.snapshot().total,
+        "dht_records": g.dht.len(),
+    }))
+}
+
+async fn mesh_peers(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let snap = g.mesh.snapshot();
+    Json(json!({
+        "ok": true,
+        "law": "decentral discovery Phase A — multiaddrs for direct dial (docs/design/decentral-discovery-v0.md)",
+        "healthy": snap.healthy,
+        "total": snap.total,
+        "peers": snap.peers.iter().map(|p| json!({
+            "node": p.node.to_string(),
+            "multiaddrs": p.multiaddrs,
+            "load": p.load,
+            "healthy": p.healthy,
+            "blob_count": p.blob_count,
+        })).collect::<Vec<_>>(),
+    }))
+}
+
+async fn dht_keys(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    Json(json!({
+        "ok": true,
+        "law": "decentral discovery Phase C — content-addressed DHT lite (docs/design/decentral-discovery-v0.md)",
+        "count": g.dht.len(),
+        "keys": g.dht.snapshot_keys(),
+    }))
+}
+
+async fn dht_get(State(app): State<App>, Path(key): Path<String>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    // Axum may pass path with leading slash stripped; accept peer/… and blob/….
+    let key = key.trim_start_matches('/').to_string();
+    match g.dht.get_raw(&key) {
+        Some(v) => {
+            let parsed: Value = serde_json::from_str(&v.value_json).unwrap_or(Value::Null);
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "key": v.key,
+                    "seq": v.seq,
+                    "updated_unix_ms": v.updated_unix_ms,
+                    "value": parsed,
+                })),
+            )
+                .into_response()
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "key not found", "key": key })),
+        )
+            .into_response(),
+    }
+}
+
+async fn bootstrap_info() -> impl IntoResponse {
+    let loaded = joule_dht::BootstrapList::load_default();
+    Json(json!({
+        "ok": true,
+        "law": "bootstrap lists are replaceable — not f00 payload origin",
+        "loaded": loaded.is_some(),
+        "bootstrap": loaded,
+        "search_paths": joule_dht::BootstrapList::default_search_paths()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>(),
+        "env": "JOULE_BOOTSTRAP",
     }))
 }
 

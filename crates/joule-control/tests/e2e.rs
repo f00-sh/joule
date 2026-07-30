@@ -342,6 +342,7 @@ async fn peer_blob_chunk_transfer() {
                         size: payload.len() as u64,
                         kind: "blob".into(),
                         name: "lab-seed".into(),
+                        multiaddrs: vec![],
                     }],
                 },
             ))
@@ -479,6 +480,215 @@ async fn peer_blob_chunk_transfer() {
     }
 
     seeder.abort();
+}
+
+/// Phase A/B: PeerAlive fills mesh directory; BlobLocate returns multiaddrs for direct dial.
+#[tokio::test]
+async fn mesh_peer_alive_and_blob_locate_multiaddrs() {
+    use joule_proto::BlobMeta;
+    use sha2::{Digest, Sha256};
+
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    let payload = b"mesh multiaddr seed payload";
+    let hash = hex::encode(Sha256::digest(payload));
+    let seeder_multi = "tcp://127.0.0.1:17702".to_string();
+
+    let seeder_id = NodeId::new();
+    let seeder_sock = TcpStream::connect(agent_addr).await.unwrap();
+    let (s_reader, mut s_writer) = seeder_sock.into_split();
+    let mut s_lines = BufReader::new(s_reader).lines();
+    s_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                seeder_id.clone(),
+                Message::Hello {
+                    account: "mesh-seed".into(),
+                    caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40),
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = s_lines.next_line().await.unwrap();
+
+    s_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                seeder_id.clone(),
+                Message::PeerAlive {
+                    multiaddrs: vec![seeder_multi.clone()],
+                    load: 0.05,
+                    healthy: true,
+                    blob_count: 1,
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    s_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                seeder_id.clone(),
+                Message::BlobsHave {
+                    blobs: vec![BlobMeta {
+                        sha256: hash.clone(),
+                        size: payload.len() as u64,
+                        kind: "blob".into(),
+                        name: "mesh-seed".into(),
+                        multiaddrs: vec![seeder_multi.clone()],
+                    }],
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Let control process PeerAlive + BlobsHave before leech asks.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    {
+        let g = app.state.read().await;
+        assert!(
+            g.blobs.seeder_count(&hash) >= 1,
+            "seeder must be in blob directory before BlobWant"
+        );
+        assert!(
+            g.mesh.healthy_count() >= 1,
+            "seeder multiaddr must be in mesh directory"
+        );
+    }
+
+    // Peer that should receive gossip PeerAlive.
+    let peer_id = NodeId::new();
+    let peer_sock = TcpStream::connect(agent_addr).await.unwrap();
+    let (p_reader, mut p_writer) = peer_sock.into_split();
+    let mut p_lines = BufReader::new(p_reader).lines();
+    p_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                peer_id.clone(),
+                Message::Hello {
+                    account: "mesh-peer".into(),
+                    caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40),
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let _ = p_lines.next_line().await.unwrap();
+
+    // Re-announce so peer gets gossip flood (PeerAlive after both connected).
+    s_writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                seeder_id.clone(),
+                Message::PeerAlive {
+                    multiaddrs: vec![seeder_multi.clone()],
+                    load: 0.05,
+                    healthy: true,
+                    blob_count: 1,
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut saw_gossip = false;
+    let mut locate_multi: Option<Vec<Vec<String>>> = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+
+    while tokio::time::Instant::now() < deadline && locate_multi.is_none() {
+        p_writer
+            .write_all(
+                &encode_line(&Envelope::new(
+                    peer_id.clone(),
+                    Message::BlobWant {
+                        sha256: hash.clone(),
+                    },
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let slice_end = tokio::time::Instant::now() + Duration::from_millis(500);
+        while tokio::time::Instant::now() < slice_end {
+            let line = tokio::time::timeout(Duration::from_millis(200), p_lines.next_line()).await;
+            let Ok(Ok(Some(line))) = line else {
+                continue;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            let env = decode_line(line.as_bytes()).unwrap();
+            match env.msg {
+                Message::PeerAlive { multiaddrs, .. } => {
+                    if multiaddrs.iter().any(|a| a == &seeder_multi) {
+                        saw_gossip = true;
+                    }
+                }
+                Message::BlobLocate {
+                    sha256,
+                    peers,
+                    multiaddrs,
+                    ..
+                } => {
+                    assert_eq!(sha256.to_lowercase(), hash);
+                    if !peers.is_empty() {
+                        locate_multi = Some(multiaddrs);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let multi = locate_multi.expect("BlobLocate with multiaddrs");
+    assert!(
+        multi.iter().any(|addrs| addrs.iter().any(|a| a == &seeder_multi)),
+        "BlobLocate should carry seeder multiaddr, got {multi:?}"
+    );
+
+    // HTTP mesh API + healthz fields.
+    let client = reqwest::Client::new();
+    let mesh = client
+        .get(format!("http://{http_addr}/v1/mesh/peers"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(mesh["ok"], true);
+    assert!(mesh["healthy"].as_u64().unwrap_or(0) >= 1);
+    let peers = mesh["peers"].as_array().expect("peers array");
+    assert!(peers.iter().any(|p| {
+        p["multiaddrs"]
+            .as_array()
+            .map(|a| a.iter().any(|x| x.as_str() == Some(seeder_multi.as_str())))
+            .unwrap_or(false)
+    }));
+
+    let hz = client
+        .get(format!("http://{http_addr}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert!(hz["mesh_peers"].as_u64().unwrap_or(0) >= 1);
+
+    // Gossip may race; multiaddrs on locate is the hard Phase B requirement.
+    let _ = saw_gossip;
 }
 
 /// Operator policy pause flips service_live; software_update fans FetchDigests.

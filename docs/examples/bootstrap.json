@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "comment": "Lab/example bootstrap multiaddrs — replace freely; not an f00 CDN. Point at any control or peer-listen nodes.",
+  "multiaddrs": [
+    "tcp://127.0.0.1:7701",
+    "tcp://127.0.0.1:7702"
+  ],
+  "list_urls": []
+}

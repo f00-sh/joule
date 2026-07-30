@@ -2,8 +2,10 @@
 
 use crate::blobs::BlobDirectory;
 use crate::broadcast::BroadcastLog;
+use crate::mesh::MeshDirectory;
 use crate::persist;
 use joule_cluster::Cluster;
+use joule_dht::DhtStore;
 use joule_ledger::{score_burn, score_mint, EconomyEvent, FairnessSnapshot, Ledger, Millijoule};
 use joule_proto::{ClusterPlan, DeviceClass, NodeCaps, NodeId, CLUSTER_MODEL};
 use serde::Serialize;
@@ -148,6 +150,10 @@ pub struct ControlState {
     pub account_economy: HashMap<String, AccountEconomy>,
     /// Swarm content directory (hash → seeders). Never stores payload bytes.
     pub blobs: BlobDirectory,
+    /// Mesh peer directory (multiaddrs for direct dial). Phase A decentral discovery.
+    pub mesh: MeshDirectory,
+    /// Content-addressed DHT lite view (peer/ + blob/ keys). Phase C.
+    pub dht: DhtStore,
     /// Operator-signed messages (deduped); peers flood these.
     pub broadcasts: BroadcastLog,
     /// In-flight blob transfers: request_id → (requester, sha256, started).
@@ -187,6 +193,8 @@ impl ControlState {
             operator_paused: false,
             account_economy: HashMap::new(),
             blobs: BlobDirectory::new(),
+            mesh: MeshDirectory::new(),
+            dht: DhtStore::new(),
             broadcasts: BroadcastLog::new(256),
             pending_blob_xfers: HashMap::new(),
             active_chunks: Vec::new(),
@@ -383,6 +391,7 @@ impl ControlState {
         // Drop stuck control-relayed blob transfers (lab path).
         self.pending_blob_xfers
             .retain(|_, (_, _, started)| now.duration_since(*started) < Duration::from_secs(120));
+        self.mesh.prune_stale(Duration::from_secs(180));
         self.save_if_dirty();
     }
 
@@ -484,6 +493,7 @@ impl ControlState {
         self.cluster.remove_node(id);
         self.node_account.remove(id);
         self.blobs.remove_node(id);
+        self.mesh.remove(id);
         // Drop pending challenges for this node.
         self.pending_challenges.retain(|_, c| c.node != *id);
     }

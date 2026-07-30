@@ -12,6 +12,7 @@ joule-proto = { workspace = true }
 joule-cluster = { workspace = true }
 joule-ledger = { workspace = true }
 joule-runtime = { workspace = true }
+joule-dht = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }

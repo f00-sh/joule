@@ -160,6 +160,7 @@ mod tests {
             size: 32,
             kind: "blob".into(),
             name: "t".into(),
+            multiaddrs: vec![],
         }
     }
 

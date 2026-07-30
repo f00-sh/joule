@@ -1,6 +1,7 @@
 //! joule — distributed compute cluster CLI.
 
 mod client_status;
+mod peer_net;
 mod tray_app;
 
 use anyhow::{bail, Context, Result};
@@ -96,6 +97,10 @@ enum Commands {
         /// Heartbeat interval seconds.
         #[arg(long, default_value_t = 5)]
         heartbeat_secs: u64,
+        /// Peer listen for direct mesh dial (blob seed). Default: ephemeral port on 127.0.0.1.
+        /// Set e.g. 0.0.0.0:7702 for internet donors. Empty disables peer listen.
+        #[arg(long, default_value = "127.0.0.1:0")]
+        peer_listen: String,
         #[arg(long)]
         config: Option<PathBuf>,
     },
@@ -384,10 +389,20 @@ async fn main() -> Result<()> {
             mem_mib,
             device,
             heartbeat_secs,
+            peer_listen,
             config,
         } => {
             let _ = config;
-            run_agent(control, account, model, mem_mib, device, heartbeat_secs).await?;
+            run_agent(
+                control,
+                account,
+                model,
+                mem_mib,
+                device,
+                heartbeat_secs,
+                peer_listen,
+            )
+            .await?;
         }
         Commands::Capacity { api, peers, json } => {
             run_capacity(api, peers, json).await?;
@@ -739,6 +754,7 @@ async fn run_agent(
     mem_mib: u32,
     device: String,
     heartbeat_secs: u64,
+    peer_listen: String,
 ) -> Result<()> {
     let device = parse_device(&device)?;
     let node_id = NodeId::new();
@@ -752,6 +768,41 @@ async fn run_agent(
             DeviceClass::Cpu => 5,
         },
     );
+
+    // Peer listen for direct mesh dial (decentral Phase A).
+    let mut multiaddrs: Vec<String> = Vec::new();
+    if !peer_listen.trim().is_empty() {
+        let bind: SocketAddr = peer_listen
+            .parse()
+            .with_context(|| format!("parse --peer-listen {peer_listen}"))?;
+        let listener = tokio::net::TcpListener::bind(bind)
+            .await
+            .with_context(|| format!("bind peer listen {bind}"))?;
+        let local = listener.local_addr()?;
+        multiaddrs.push(peer_net::format_tcp_multiaddr(local));
+        println!("peer listen: {}", multiaddrs[0]);
+        let nid = node_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = peer_net::run_peer_listener(listener, nid).await {
+                warn!(error = %e, "peer listener exited");
+            }
+        });
+    }
+    // Phase C: optional bootstrap list (replaceable; not f00-only).
+    if let Some(boot) = joule_dht::BootstrapList::load_default() {
+        println!(
+            "bootstrap: {} multiaddr(s) · {}",
+            boot.multiaddrs.len(),
+            if boot.comment.is_empty() {
+                "no comment"
+            } else {
+                boot.comment.as_str()
+            }
+        );
+        for a in boot.multiaddrs.iter().take(8) {
+            println!("  bootstrap dial hint: {a}");
+        }
+    }
 
     info!(%control, %account, %node_id, model = CLUSTER_MODEL, "connecting agent");
     let sock = TcpStream::connect(&control)
@@ -777,6 +828,8 @@ async fn run_agent(
     let mut pending_recv: HashMap<Uuid, PendingBlobRecv> = HashMap::new();
     // When software_update matches this host, stage once the digest lands.
     let mut pending_software: Option<(String, SoftwareTarget)> = None;
+    // Unique mesh neighbors seen via gossip (Phase A).
+    let mut mesh_seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -789,6 +842,20 @@ async fn run_agent(
                 );
                 if writer.write_all(&encode_line(&hb)?).await.is_err() {
                     bail!("control connection closed during heartbeat");
+                }
+                // Refresh mesh presence (multiaddrs for direct blob seed).
+                if !multiaddrs.is_empty() {
+                    let blob_count = WeightsStore::list_blob_store().len() as u32;
+                    let alive = Envelope::new(
+                        node_id.clone(),
+                        Message::PeerAlive {
+                            multiaddrs: multiaddrs.clone(),
+                            load: 0.1,
+                            healthy: true,
+                            blob_count,
+                        },
+                    );
+                    let _ = writer.write_all(&encode_line(&alive)?).await;
                 }
             }
             line = lines.next_line() => {
@@ -807,9 +874,87 @@ async fn run_agent(
                         println!("readiness: curl -s http://127.0.0.1:7700/v1/models/readiness");
                         println!("chat:      joule chat --key {key} --prompt \"hello\"");
                         println!("weights:   {}", store.root().display());
+                        if !multiaddrs.is_empty() {
+                            println!("mesh dial:  {}", multiaddrs.join(", "));
+                            let blob_count = WeightsStore::list_blob_store().len() as u32;
+                            let alive = Envelope::new(
+                                node_id.clone(),
+                                Message::PeerAlive {
+                                    multiaddrs: multiaddrs.clone(),
+                                    load: 0.1,
+                                    healthy: true,
+                                    blob_count,
+                                },
+                            );
+                            writer.write_all(&encode_line(&alive)?).await?;
+                        }
                         // Seed swarm directory with any local content-addressed blobs.
-                        if let Err(e) = announce_local_blobs(&mut writer, &node_id, &store).await {
+                        if let Err(e) =
+                            announce_local_blobs(&mut writer, &node_id, &store, &multiaddrs).await
+                        {
                             warn!(error = %e, "initial BlobsHave failed");
+                        }
+                    }
+                    Message::PeerAlive {
+                        multiaddrs: _addrs,
+                        healthy,
+                        blob_count,
+                        ..
+                    } => {
+                        if healthy {
+                            mesh_seen.insert(env.from.clone());
+                        } else {
+                            mesh_seen.remove(&env.from);
+                        }
+                        tracing::debug!(
+                            blob_count,
+                            mesh_peers = mesh_seen.len(),
+                            "mesh PeerAlive (gossip)"
+                        );
+                    }
+                    Message::BlobLocate {
+                        sha256,
+                        peers,
+                        sizes,
+                        multiaddrs: locate_addrs,
+                    } => {
+                        info!(
+                            %sha256,
+                            seeders = peers.len(),
+                            ?sizes,
+                            "BlobLocate"
+                        );
+                        // Phase B: try direct peer fetch before waiting on control relay chunks.
+                        let mut tried_direct = false;
+                        for addrs in &locate_addrs {
+                            if addrs.is_empty() {
+                                continue;
+                            }
+                            tried_direct = true;
+                            match peer_net::fetch_blob_from_addrs(addrs, &sha256).await {
+                                Ok(data) => {
+                                    match WeightsStore::store_blob(&sha256, &data) {
+                                        Ok(n) => {
+                                            info!(%sha256, bytes = n, "direct peer blob OK");
+                                            let _ = announce_local_blobs(
+                                                &mut writer,
+                                                &node_id,
+                                                &store,
+                                                &multiaddrs,
+                                            )
+                                            .await;
+                                        }
+                                        Err(e) => warn!(error = %e, "store direct blob failed"),
+                                    }
+                                    break;
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "direct fetch failed; may use control relay")
+                                }
+                            }
+                        }
+                        if !tried_direct {
+                            tracing::debug!(%sha256, "no multiaddrs yet; control BlobProvide path");
                         }
                     }
                     Message::PoolStatus {
@@ -869,6 +1014,7 @@ async fn run_agent(
                                                             size: m.size,
                                                             kind: m.kind,
                                                             name: m.name,
+                                                            multiaddrs: multiaddrs.clone(),
                                                         })
                                                         .collect();
                                                     let have = Envelope::new(
@@ -1080,18 +1226,6 @@ async fn run_agent(
                             writer.write_all(&encode_line(&want)?).await?;
                         }
                     }
-                    Message::BlobLocate {
-                        sha256,
-                        peers,
-                        sizes,
-                    } => {
-                        info!(
-                            %sha256,
-                            seeders = peers.len(),
-                            ?sizes,
-                            "BlobLocate"
-                        );
-                    }
                     Message::BlobProvide {
                         sha256,
                         request_id,
@@ -1201,8 +1335,13 @@ async fn run_agent(
                                         bytes = n,
                                         "blob received + verified"
                                     );
-                                    if let Err(e) =
-                                        announce_local_blobs(&mut writer, &node_id, &store).await
+                                    if let Err(e) = announce_local_blobs(
+                                        &mut writer,
+                                        &node_id,
+                                        &store,
+                                        &multiaddrs,
+                                    )
+                                    .await
                                     {
                                         warn!(error = %e, "BlobsHave after receive failed");
                                     }
@@ -1350,6 +1489,7 @@ async fn announce_local_blobs(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     node_id: &NodeId,
     store: &WeightsStore,
+    multiaddrs: &[String],
 ) -> Result<()> {
     // Ensure prepared weight files are also content-addressed so BlobProvide can read them.
     if let Ok(manifest) = ManifestFile::load_default() {
@@ -1379,6 +1519,7 @@ async fn announce_local_blobs(
             size: m.size,
             kind: m.kind,
             name: m.name,
+            multiaddrs: multiaddrs.to_vec(),
         })
         .collect();
     if blobs.is_empty() {

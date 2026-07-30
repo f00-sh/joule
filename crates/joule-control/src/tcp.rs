@@ -140,10 +140,65 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     }
                 }
             }
+            Message::PeerAlive {
+                multiaddrs,
+                load,
+                healthy,
+                blob_count,
+            } => {
+                let id = env.from.clone();
+                {
+                    let mut g = app.state.write().await;
+                    g.mesh.upsert(
+                        id.clone(),
+                        multiaddrs.clone(),
+                        load,
+                        healthy,
+                        blob_count,
+                    );
+                    // Phase C: mirror into DHT peer/<id> (seq = wall ms for LWW).
+                    let seq = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    g.dht.put_peer(joule_dht::PeerRecord {
+                        node_id: id.to_string(),
+                        multiaddrs: multiaddrs.clone(),
+                        load_milli: (load * 1000.0) as u32,
+                        healthy,
+                        blob_count,
+                        seq,
+                        updated_unix_ms: seq,
+                    });
+                }
+                // Gossip to other agents (control as temporary flood hub).
+                let routes = app.routes.lock().await;
+                let msg = Message::PeerAlive {
+                    multiaddrs,
+                    load,
+                    healthy,
+                    blob_count,
+                };
+                for (node, peer_tx) in routes.iter() {
+                    if node != &id {
+                        let _ = peer_tx.send(Envelope::new(node.clone(), msg.clone()));
+                    }
+                }
+                tracing::debug!(%id, "PeerAlive mesh update + gossip");
+            }
             Message::BlobsHave { blobs } => {
                 let id = env.from.clone();
                 let need_rebalance = {
                     let mut g = app.state.write().await;
+                    // Phase C DHT blob/<sha> seeders.
+                    for b in &blobs {
+                        g.dht.put_blob_seeder(
+                            &b.sha256,
+                            &id.to_string(),
+                            b.size,
+                            b.multiaddrs.clone(),
+                        );
+                    }
                     // Full inventory replace from agent (authoritative local scan).
                     g.blobs.announce(id.clone(), blobs);
                     tracing::debug!(%id, "blob inventory updated");
@@ -171,8 +226,19 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 let hash = sha256.to_lowercase();
                 let g = app.state.read().await;
                 let peers = g.blobs.peers_for(&hash);
-                let (peer_ids, sizes): (Vec<_>, Vec<_>) =
-                    peers.into_iter().map(|(n, m)| (n, m.size)).unzip();
+                let mut peer_ids = Vec::new();
+                let mut sizes = Vec::new();
+                let mut multiaddrs = Vec::new();
+                for (n, m) in peers {
+                    let addrs = if m.multiaddrs.is_empty() {
+                        g.mesh.multiaddrs_for(&n)
+                    } else {
+                        m.multiaddrs.clone()
+                    };
+                    peer_ids.push(n);
+                    sizes.push(m.size);
+                    multiaddrs.push(addrs);
+                }
                 let seeder = g.blobs.pick_seeder(&hash, &requester);
                 drop(g);
 
@@ -182,6 +248,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                         sha256: hash.clone(),
                         peers: peer_ids,
                         sizes,
+                        multiaddrs,
                     },
                 );
                 let _ = tx.send(locate);

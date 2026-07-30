@@ -9,6 +9,7 @@ mod broadcast;
 mod edge;
 mod http;
 mod identity;
+mod mesh;
 mod model_update;
 mod official_fetch;
 mod operator_actions;

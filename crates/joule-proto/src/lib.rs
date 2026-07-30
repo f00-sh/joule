@@ -341,20 +341,34 @@ pub enum Message {
     Error {
         error: String,
     },
-    /// Agent → control: content-addressed blobs this node can seed (weights, software, …).
+    /// Agent → control (and peer gossip): I am alive; here is how to dial me.
+    /// See docs/design/decentral-discovery-v0.md Phase A.
+    PeerAlive {
+        /// Dial strings, e.g. `tcp://1.2.3.4:7702` (peer blob/gossip port).
+        multiaddrs: Vec<String>,
+        load: f32,
+        healthy: bool,
+        /// How many content digests this node seeds.
+        #[serde(default)]
+        blob_count: u32,
+    },
+    /// Agent → control / peer: content-addressed blobs this node can seed.
     /// f00 does **not** host these; peers do. See docs/design/distribution-v0.md.
     BlobsHave {
         blobs: Vec<BlobMeta>,
     },
-    /// Agent → control: need this hash from the swarm.
+    /// Agent → control or **direct to seeder peer**: need this hash from the swarm.
     BlobWant {
         sha256: String,
     },
     /// Control → agent: peers that announced this hash (empty if nobody seeding yet).
+    /// `multiaddrs[i]` is the dial list for `peers[i]` when known (Phase A/B).
     BlobLocate {
         sha256: String,
         peers: Vec<NodeId>,
         sizes: Vec<u64>,
+        #[serde(default)]
+        multiaddrs: Vec<Vec<String>>,
     },
     /// Control → seeder: please push this blob toward the swarm directory (payload out-of-band / later chunk).
     /// For small blobs, seeder may reply with BlobChunk.
@@ -435,6 +449,9 @@ pub struct BlobMeta {
     pub kind: String,
     #[serde(default)]
     pub name: String,
+    /// Optional dial hints for direct peer fetch (`tcp://host:port`).
+    #[serde(default)]
+    pub multiaddrs: Vec<String>,
 }
 
 fn default_true() -> bool {

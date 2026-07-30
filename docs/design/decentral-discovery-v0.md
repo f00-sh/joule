@@ -220,11 +220,21 @@ website may **mirror signed** bootstrap/stats; never required as payload or as t
 
 ---
 
-## 12. Next code steps (when implementing)
+## 12. Implementation status
 
-1. `PeerAlive` + peer listen on agent (Phase A).  
-2. Put seeder multiaddr on `BlobsHave` / BlobLocate (Phase B).  
-3. DHT module + bootstrap file format (Phase C).  
-4. PlanOffer path without control (Phase D).  
+| Phase | Status | Code |
+|-------|--------|------|
+| **A** | **Landed** | Agent `--peer-listen` (default `127.0.0.1:0`); `PeerAlive` gossip via control flood hub; `GET /v1/mesh/peers`; status `mesh_peers` |
+| **B** | **Landed** | `BlobMeta.multiaddrs`; `BlobLocate.multiaddrs`; agent prefers direct `peer_net` BlobWant/BlobChunk; control relay remains fallback |
+| **C** | **Started** | `joule-dht` crate: peer/blob keys, XOR distance, bootstrap.json; control mirrors PeerAlive/BlobsHave into DHT; `GET /v1/dht/keys`, `GET /v1/dht/get/{*key}`, `GET /v1/bootstrap` |
+| **D** | Not yet | PlanOffer / RequestInfer without permanent control |
+| **E** | Not yet | Erasure, QUIC, full NAT traversal |
 
-Until then, document honesty: **lab is control-rendezvous; production target is this mesh.**
+### Remaining for production mesh
+
+1. Replicate DHT records peer-to-peer (not only control view).  
+2. Dial bootstrap multiaddrs for first contact without control.  
+3. PlanOffer path without control (Phase D).  
+4. QUIC + NAT (Phase E).
+
+**Honesty:** lab still uses control as rendezvous; production target remains full mesh.

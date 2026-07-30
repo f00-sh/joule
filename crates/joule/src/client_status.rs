@@ -41,6 +41,14 @@ pub async fn fetch_client_status(api: &str, key: Option<&str>) -> Result<ClientS
                     .get("stream_slots_used")
                     .and_then(|x| x.as_u64())
                     .unwrap_or(0) as u32;
+                inputs.mesh_peers = v
+                    .get("mesh_peers")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0) as u32;
+                inputs.dht_records = v
+                    .get("dht_records")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0) as u32;
                 if let Some(ld) = v.get("logical_device") {
                     inputs.pool_backends =
                         ld.get("backends").and_then(|x| x.as_u64()).unwrap_or(0) as u32;

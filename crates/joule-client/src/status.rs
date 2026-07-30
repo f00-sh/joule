@@ -50,6 +50,10 @@ pub struct ClientStatus {
     pub pool_backends: u32,
     pub pool_vram_gib: u64,
     pub agents_connected: u32,
+    /// Mesh peers that announced multiaddrs (decentral Phase A).
+    pub mesh_peers: u32,
+    /// DHT lite records known to control (Phase C).
+    pub dht_records: u32,
     pub service_live: bool,
     pub operator_paused: bool,
     pub inference_mode: String,
@@ -63,6 +67,8 @@ pub struct StatusInputs {
     /// True if healthz/HTTP base responded.
     pub control_reachable: bool,
     pub agents_connected: u32,
+    pub mesh_peers: u32,
+    pub dht_records: u32,
     pub pool_backends: u32,
     pub pool_vram_gib: u64,
     pub service_live: bool,
@@ -153,6 +159,14 @@ impl ClientStatus {
                 value: i.agents_connected.to_string(),
             },
             MonitorCard {
+                label: "mesh_peers".into(),
+                value: i.mesh_peers.to_string(),
+            },
+            MonitorCard {
+                label: "dht_records".into(),
+                value: i.dht_records.to_string(),
+            },
+            MonitorCard {
                 label: "slots".into(),
                 value: {
                     let total = i.stream_slots_used.saturating_add(i.stream_slots_free);
@@ -198,6 +212,8 @@ impl ClientStatus {
             pool_backends: i.pool_backends,
             pool_vram_gib: i.pool_vram_gib,
             agents_connected: i.agents_connected,
+            mesh_peers: i.mesh_peers,
+            dht_records: i.dht_records,
             service_live: i.service_live,
             operator_paused: i.operator_paused,
             inference_mode: i.inference_mode,
@@ -244,6 +260,8 @@ pub fn format_status_human(s: &ClientStatus) -> String {
         "  pool:        {} backends · {} GiB · agents {}\n",
         s.pool_backends, s.pool_vram_gib, s.agents_connected
     ));
+    out.push_str(&format!("  mesh_peers:  {}\n", s.mesh_peers));
+    out.push_str(&format!("  dht_records: {}\n", s.dht_records));
     out.push_str(&format!(
         "  service:     live={} paused={} mode={}\n",
         s.service_live, s.operator_paused, s.inference_mode
@@ -286,6 +304,8 @@ mod tests {
             api_base: "http://127.0.0.1:7700".into(),
             control_reachable: true,
             agents_connected: 2,
+            mesh_peers: 2,
+            dht_records: 3,
             pool_backends: 2,
             pool_vram_gib: 24,
             service_live: false,
@@ -311,14 +331,17 @@ mod tests {
         assert_eq!(s.account.as_deref(), Some("alice"));
         assert!(s.donating);
         assert_eq!(s.api_base, "http://127.0.0.1:7700");
+        assert_eq!(s.mesh_peers, 2);
         let human = format_status_human(&s);
         assert!(human.contains("connected"));
         assert!(human.contains("120 millijoules"));
         assert!(human.contains("tokens used: 100"));
         assert!(human.contains("alice"));
+        assert!(human.contains("mesh_peers:  2"));
         let dash = format_monitor_dash(&s);
         assert!(dash.contains("balance_mJ"));
         assert!(dash.contains("tokens_used"));
+        assert!(dash.contains("mesh_peers"));
         let tip = format_tray_tooltip(&s);
         assert!(tip.contains("120 mJ"));
         assert!(tip.contains("100 tok"));
