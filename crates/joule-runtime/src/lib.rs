@@ -105,11 +105,15 @@ mod tests {
             shards: vec![ShardAssignment {
                 node: NodeId::new(),
                 role: ShardRole::Replica,
-                layer_start: None,
-                layer_end: None,
+                layer_start: Some(0),
+                layer_end: Some(0),
                 tp_rank: None,
                 tp_world: None,
+                mem_share_mib: 8192,
+                mem_fraction_ppm: 1_000_000,
             }],
+            pool_mem_mib: 8192,
+            model_layers: 1,
         };
         eng.load_plan(&plan).await.unwrap();
         let out = eng

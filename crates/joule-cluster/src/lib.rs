@@ -6,17 +6,14 @@
 mod scheduler;
 
 pub use scheduler::{
-    compute_state, free_slots, max_slots, ComputeState, NodeSchedule, SchedulerSnapshot,
+    compute_state, free_slots, free_stream_slots, max_slots, max_streams, pool_max_streams,
+    ComputeState, NodeSchedule, SchedulerSnapshot, DEFAULT_MODEL_LAYERS, STREAM_BUDGET_MIB,
 };
 
-use joule_proto::{
-    ClusterCapacity, ClusterPlan, DeviceClass, NodeCaps, NodeId, ShardAssignment, ShardRole,
-    CLUSTER_MODEL,
-};
+use joule_proto::{ClusterCapacity, ClusterPlan, DeviceClass, NodeCaps, NodeId, CLUSTER_MODEL};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum ClusterError {
@@ -174,21 +171,8 @@ impl Cluster {
             .any(|n| n.account == account && n.healthy && !n.reputation.is_banned(now))
     }
 
-    /// Scheduling score for placement plans (lower is better).
-    fn schedule_score(n: &Node) -> (i64, i64, i64, u64) {
-        let inflight = i64::from(n.inflight) * 1000;
-        let load = (n.load * 100.0) as i64;
-        let rep = -((n.reputation.score() * 1000.0) as i64);
-        (
-            inflight + load + rep,
-            -(i64::from(n.caps.mem_mib)),
-            -(i64::from(n.caps.throughput_class)),
-            n.rr_seq,
-        )
-    }
-
     /// Healthy, non-banned donors (pool membership).
-    fn eligible(&self) -> Vec<&Node> {
+    pub(crate) fn eligible(&self) -> Vec<&Node> {
         let now = Instant::now();
         self.nodes
             .values()
@@ -290,12 +274,20 @@ impl Cluster {
             }
         }
 
-        // Single-model cluster: pool is either empty or offering CLUSTER_MODEL.
         let models_available = if nodes_healthy > 0 {
             vec![CLUSTER_MODEL.to_string()]
         } else {
             vec![]
         };
+
+        let stream_slots_total = scheduler::pool_max_streams(mem_mib_healthy);
+        let stream_slots_used = self
+            .eligible()
+            .iter()
+            .map(|n| n.inflight)
+            .max()
+            .unwrap_or(0)
+            .min(stream_slots_total);
 
         ClusterCapacity {
             nodes_total,
@@ -307,72 +299,25 @@ impl Cluster {
             mem_mib_healthy,
             throughput_class_sum,
             models_available,
+            stream_slots_total,
+            stream_slots_used,
         }
     }
 
-    /// Placement for the single cluster model across **all** healthy donors when useful.
+    /// Placement for the single cluster model: always VRAM-shard across the healthy pool.
+    /// `prefer_pipeline` / `pipeline_stages` are ignored (whole pool is the plan).
     pub fn plan_for(
         &self,
-        model: &str,
-        prefer_pipeline: bool,
-        pipeline_stages: usize,
+        _model: &str,
+        _prefer_pipeline: bool,
+        _pipeline_stages: usize,
     ) -> Result<ClusterPlan, ClusterError> {
-        let mut eligible: Vec<&Node> = self.eligible();
-        if eligible.is_empty() {
-            return Err(ClusterError::NoEligibleNodes(model.to_string()));
-        }
-        eligible.sort_by(|a, b| Self::schedule_score(a).cmp(&Self::schedule_score(b)));
-
-        // Use the whole healthy pool when pipeline is requested: stages = min(requested, pool).
-        let stages = if prefer_pipeline {
-            pipeline_stages.max(1).min(eligible.len()).max(1)
-        } else {
-            1
-        };
-
-        if stages > 1 {
-            let shards = eligible
-                .iter()
-                .take(stages)
-                .enumerate()
-                .map(|(i, p)| {
-                    let start = (i as u32) * 8;
-                    ShardAssignment {
-                        node: p.id.clone(),
-                        role: ShardRole::Pipeline,
-                        layer_start: Some(start),
-                        layer_end: Some(start + 7),
-                        tp_rank: None,
-                        tp_world: None,
-                    }
-                })
-                .collect();
-            return Ok(ClusterPlan {
-                plan_id: Uuid::new_v4(),
-                model: CLUSTER_MODEL.to_string(),
-                shards,
-            });
-        }
-
-        let best = eligible[0];
-        Ok(ClusterPlan {
-            plan_id: Uuid::new_v4(),
-            model: CLUSTER_MODEL.to_string(),
-            shards: vec![ShardAssignment {
-                node: best.id.clone(),
-                role: ShardRole::Replica,
-                layer_start: None,
-                layer_end: None,
-                tp_rank: None,
-                tp_world: None,
-            }],
-        })
+        self.plan_sharded_pool()
     }
 
-    /// Full-pool pipeline plan: every healthy donor is a stage (or replica if one).
+    /// Full-pool VRAM-sharded plan (alias).
     pub fn plan_full_pool(&self) -> Result<ClusterPlan, ClusterError> {
-        let n = self.pool_size().max(1);
-        self.plan_for(CLUSTER_MODEL, n > 1, n)
+        self.plan_sharded_pool()
     }
 }
 
@@ -386,19 +331,20 @@ mod tests {
     }
 
     #[test]
-    fn load_balance_prefers_free_over_loaded() {
+    fn stream_uses_whole_pool_not_one_gpu() {
         let mut c = Cluster::default();
         let (a, ca) = node(8192, DeviceClass::Gpu);
-        let (b, cb) = node(8192, DeviceClass::Gpu);
+        let (b, cb) = node(16384, DeviceClass::Gpu);
         c.upsert_node(a.clone(), "alice", ca);
         c.upsert_node(b.clone(), "bob", cb);
-        let first = c.acquire_worker(CLUSTER_MODEL).unwrap();
-        let second = c.acquire_worker(CLUSTER_MODEL).unwrap();
-        assert_ne!(first, second, "second pick should prefer the free donor");
-        // both full (1 slot each on 8GB) — no more
-        assert!(c.acquire_worker(CLUSTER_MODEL).is_none());
-        c.release_worker(&first);
-        c.release_worker(&second);
+        let plan = c.try_acquire_stream().unwrap();
+        assert_eq!(plan.shards.len(), 2);
+        assert_eq!(plan.pool_mem_mib, 8192 + 16384);
+        // both nodes participate (inflight on each)
+        assert_eq!(c.get(&a).unwrap().inflight, 1);
+        assert_eq!(c.get(&b).unwrap().inflight, 1);
+        c.release_stream(&plan);
+        assert_eq!(c.get(&a).unwrap().inflight, 0);
     }
 
     #[test]
@@ -440,5 +386,6 @@ mod tests {
         let plan = c.plan_full_pool().unwrap();
         assert_eq!(plan.model, CLUSTER_MODEL);
         assert_eq!(plan.shards.len(), 3);
+        assert_eq!(plan.pool_mem_mib, 8192 * 3);
     }
 }

@@ -1,87 +1,108 @@
-//! Cluster compute scheduler: free / loaded / full slots for the single model.
+//! Sharded-pool scheduler.
 //!
-//! Every healthy donor has a finite number of concurrent job **slots**.
-//! The scheduler only places work on nodes with free slots, prefers free
-//! nodes over loaded ones, and never schedules onto full or offline nodes.
+//! One model is spread across **all** healthy donors proportional to VRAM.
+//! A single request does **not** monopolize one GPU: it rides the shared
+//! multi-node plan and consumes one **stream slot** of aggregate capacity,
+//! leaving room for other concurrent users.
 
 use crate::{Cluster, Node};
-use joule_proto::DeviceClass;
+use joule_proto::{ClusterPlan, NodeId, ShardAssignment, ShardRole, CLUSTER_MODEL};
 use serde::Serialize;
+use uuid::Uuid;
 
-/// How busy a donor is relative to its concurrent capacity.
+/// Default transformer layer count for placement math (placeholder until model config).
+pub const DEFAULT_MODEL_LAYERS: u32 = 80;
+
+/// Rough KV/activation budget (MiB) reserved per concurrent generation stream
+/// against **aggregate** pool VRAM. Lower → more concurrent users.
+pub const STREAM_BUDGET_MIB: u64 = 4096;
+
+/// How a donor participates in the sharded pool (not exclusive whole-GPU ownership).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ComputeState {
-    /// Healthy, zero inflight — preferred.
+    /// Healthy, in the active shard map, not saturated.
     Free,
-    /// Healthy, some work, still has free slots.
+    /// Carrying some concurrent streams (shared mesh).
     Loaded,
-    /// Healthy but all slots taken — not schedulable until a job finishes.
+    /// At stream capacity for this node.
     Full,
-    /// Unhealthy, banned, or self-reported saturated.
+    /// Not in the mesh (down / banned).
     Unavailable,
 }
 
-/// One node as the scheduler sees it.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodeSchedule {
     pub id: String,
     pub account: String,
     pub state: ComputeState,
-    pub inflight: u32,
-    pub max_slots: u32,
-    pub free_slots: u32,
-    pub load: f32,
     pub mem_mib: u32,
+    /// VRAM this node contributes to the sharded model.
+    pub mem_share_mib: u32,
+    pub mem_fraction_ppm: u32,
+    pub layer_start: Option<u32>,
+    pub layer_end: Option<u32>,
+    pub inflight_streams: u32,
+    pub max_streams: u32,
+    pub free_stream_slots: u32,
+    pub load: f32,
 }
 
-/// Live free/loaded summary for dashboard + API.
 #[derive(Debug, Clone, Serialize)]
 pub struct SchedulerSnapshot {
+    pub mode: &'static str,
+    pub pool_mem_mib: u64,
+    pub model: String,
+    pub shards: u32,
+    pub stream_slots_total: u32,
+    pub stream_slots_used: u32,
+    pub stream_slots_free: u32,
+    pub can_accept_work: bool,
     pub nodes_free: u32,
     pub nodes_loaded: u32,
     pub nodes_full: u32,
     pub nodes_unavailable: u32,
-    pub slots_free: u32,
-    pub slots_used: u32,
-    pub slots_total: u32,
-    pub can_accept_work: bool,
     pub nodes: Vec<NodeSchedule>,
+    pub plan: Option<ClusterPlan>,
 }
 
-/// Concurrent job slots for a donor.
-///
-/// Conservative defaults: consumer GPUs usually run one generation at a time;
-/// larger cards may take two. Heartbeat `load` near 1.0 closes slots.
-pub fn max_slots(node: &Node) -> u32 {
+/// Concurrent streams this node can help serve (shared sharded model).
+pub fn max_streams(node: &Node) -> u32 {
     if !node.healthy || node.reputation.is_banned(std::time::Instant::now()) {
         return 0;
     }
-    // Donor says it's saturated.
     if node.load >= 0.95 {
         return 0;
     }
-    let base = match node.caps.device {
-        DeviceClass::Gpu if node.caps.mem_mib >= 20_480 => 2,
-        DeviceClass::Gpu if node.caps.mem_mib >= 8_192 => 1,
-        DeviceClass::Gpu => 1,
-        DeviceClass::Metal if node.caps.mem_mib >= 16_384 => 2,
-        DeviceClass::Metal => 1,
-        DeviceClass::Cpu => 1,
+    // Share of global streams roughly scales with VRAM contribution.
+    let by_mem = (u64::from(node.caps.mem_mib) / (STREAM_BUDGET_MIB / 4).max(1)).max(1) as u32;
+    let cap = match node.caps.device {
+        joule_proto::DeviceClass::Gpu => by_mem.min(8),
+        joule_proto::DeviceClass::Metal => by_mem.min(6),
+        joule_proto::DeviceClass::Cpu => 1,
     };
     if node.load >= 0.75 {
-        base.min(1)
+        cap.clamp(1, 2)
     } else {
-        base
+        cap.max(1)
     }
 }
 
+pub fn free_stream_slots(node: &Node) -> u32 {
+    max_streams(node).saturating_sub(node.inflight)
+}
+
+/// Alias used by control/dashboard (stream slots, not exclusive whole-GPU locks).
+pub fn max_slots(node: &Node) -> u32 {
+    max_streams(node)
+}
+
 pub fn free_slots(node: &Node) -> u32 {
-    max_slots(node).saturating_sub(node.inflight)
+    free_stream_slots(node)
 }
 
 pub fn compute_state(node: &Node) -> ComputeState {
-    let max = max_slots(node);
+    let max = max_streams(node);
     if max == 0 {
         return ComputeState::Unavailable;
     }
@@ -94,96 +115,235 @@ pub fn compute_state(node: &Node) -> ComputeState {
     }
 }
 
+/// Global stream capacity from aggregate healthy VRAM.
+pub fn pool_max_streams(total_mem_mib: u64) -> u32 {
+    if total_mem_mib == 0 {
+        return 0;
+    }
+    (total_mem_mib / STREAM_BUDGET_MIB).max(1) as u32
+}
+
 impl Cluster {
-    /// Snapshot free/loaded/full compute for control + dashboard.
+    /// VRAM-weighted pipeline: **every** healthy donor holds a slice of the one model.
+    ///
+    /// Example: 8+16+16+16+16 GiB → five shards sized ~8/72, 16/72, … of layers.
+    pub fn plan_sharded_pool(&self) -> Result<ClusterPlan, crate::ClusterError> {
+        let mut donors: Vec<&Node> = self.eligible();
+        if donors.is_empty() {
+            return Err(crate::ClusterError::NoEligibleNodes(
+                CLUSTER_MODEL.to_string(),
+            ));
+        }
+        // Stable order: largest VRAM first (typical pipeline: fat cards first).
+        donors.sort_by(|a, b| {
+            b.caps
+                .mem_mib
+                .cmp(&a.caps.mem_mib)
+                .then_with(|| a.id.0.cmp(&b.id.0))
+        });
+
+        let pool_mem: u64 = donors.iter().map(|n| u64::from(n.caps.mem_mib)).sum();
+        if pool_mem == 0 {
+            return Err(crate::ClusterError::NoEligibleNodes(
+                CLUSTER_MODEL.to_string(),
+            ));
+        }
+
+        let layers = DEFAULT_MODEL_LAYERS;
+        let mut shards = Vec::with_capacity(donors.len());
+        let mut layer_cursor = 0u32;
+        let mut ppm_acc = 0u32;
+
+        for (i, n) in donors.iter().enumerate() {
+            let mem = u64::from(n.caps.mem_mib);
+            let mut ppm = ((mem * 1_000_000) / pool_mem) as u32;
+            let is_last = i + 1 == donors.len();
+            if is_last {
+                ppm = 1_000_000u32.saturating_sub(ppm_acc);
+            } else {
+                ppm_acc = ppm_acc.saturating_add(ppm);
+            }
+
+            let layer_start = layer_cursor.min(layers.saturating_sub(1));
+            let layer_end = if is_last {
+                layers.saturating_sub(1)
+            } else {
+                let span = ((u64::from(layers) * mem) / pool_mem).max(1) as u32;
+                let end = layer_start.saturating_add(span).saturating_sub(1);
+                end.min(layers.saturating_sub(1))
+            };
+            let layer_end = layer_end.max(layer_start);
+            layer_cursor = layer_end.saturating_add(1).min(layers);
+
+            shards.push(ShardAssignment {
+                node: n.id.clone(),
+                role: if donors.len() == 1 {
+                    ShardRole::Replica
+                } else {
+                    ShardRole::Pipeline
+                },
+                layer_start: Some(layer_start),
+                layer_end: Some(layer_end),
+                tp_rank: None,
+                tp_world: None,
+                mem_share_mib: n.caps.mem_mib,
+                mem_fraction_ppm: ppm,
+            });
+        }
+
+        Ok(ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.to_string(),
+            shards,
+            pool_mem_mib: pool_mem,
+            model_layers: layers,
+        })
+    }
+
     pub fn scheduler_snapshot(&self) -> SchedulerSnapshot {
+        let plan = self.plan_sharded_pool().ok();
+        let pool_mem = plan.as_ref().map(|p| p.pool_mem_mib).unwrap_or_else(|| {
+            self.eligible()
+                .iter()
+                .map(|n| u64::from(n.caps.mem_mib))
+                .sum()
+        });
+        let stream_total = pool_max_streams(pool_mem);
+        // Global used = max inflight across mesh (streams touch all shards).
+        let stream_used = self
+            .eligible()
+            .iter()
+            .map(|n| n.inflight)
+            .max()
+            .unwrap_or(0)
+            .min(stream_total);
+
         let mut nodes_free = 0u32;
         let mut nodes_loaded = 0u32;
         let mut nodes_full = 0u32;
         let mut nodes_unavailable = 0u32;
-        let mut slots_free = 0u32;
-        let mut slots_used = 0u32;
-        let mut slots_total = 0u32;
         let mut nodes = Vec::new();
 
+        let plan_ref = plan.as_ref();
         for n in self.nodes() {
-            let max = max_slots(n);
-            let free = free_slots(n);
-            let state = compute_state(n);
-            match state {
+            let st = compute_state(n);
+            match st {
                 ComputeState::Free => nodes_free += 1,
                 ComputeState::Loaded => nodes_loaded += 1,
                 ComputeState::Full => nodes_full += 1,
                 ComputeState::Unavailable => nodes_unavailable += 1,
             }
-            slots_total = slots_total.saturating_add(max);
-            slots_free = slots_free.saturating_add(free);
-            slots_used = slots_used.saturating_add(n.inflight.min(max));
+            let (mem_share, ppm, ls, le) = plan_ref
+                .and_then(|p| {
+                    p.shards.iter().find(|s| s.node == n.id).map(|s| {
+                        (
+                            s.mem_share_mib,
+                            s.mem_fraction_ppm,
+                            s.layer_start,
+                            s.layer_end,
+                        )
+                    })
+                })
+                .unwrap_or((n.caps.mem_mib, 0, None, None));
 
             nodes.push(NodeSchedule {
                 id: n.id.to_string(),
                 account: n.account.clone(),
-                state,
-                inflight: n.inflight,
-                max_slots: max,
-                free_slots: free,
-                load: n.load,
+                state: st,
                 mem_mib: n.caps.mem_mib,
+                mem_share_mib: mem_share,
+                mem_fraction_ppm: ppm,
+                layer_start: ls,
+                layer_end: le,
+                inflight_streams: n.inflight,
+                max_streams: max_streams(n),
+                free_stream_slots: free_stream_slots(n),
+                load: n.load,
             });
         }
 
-        nodes.sort_by(|a, b| {
-            state_rank(a.state)
-                .cmp(&state_rank(b.state))
-                .then(b.free_slots.cmp(&a.free_slots))
-                .then(a.account.cmp(&b.account))
-        });
+        nodes.sort_by_key(|a| std::cmp::Reverse(a.mem_share_mib));
 
         SchedulerSnapshot {
+            mode: "vram_sharded_pool",
+            pool_mem_mib: pool_mem,
+            model: CLUSTER_MODEL.to_string(),
+            shards: plan.as_ref().map(|p| p.shards.len() as u32).unwrap_or(0),
+            stream_slots_total: stream_total,
+            stream_slots_used: stream_used,
+            stream_slots_free: stream_total.saturating_sub(stream_used),
+            can_accept_work: stream_used < stream_total && plan.is_some(),
             nodes_free,
             nodes_loaded,
             nodes_full,
             nodes_unavailable,
-            slots_free,
-            slots_used,
-            slots_total,
-            can_accept_work: slots_free > 0,
             nodes,
+            plan,
         }
     }
 
-    /// Rank only nodes that still have free slots (free first, then loaded).
-    pub fn rank_schedulable(&self) -> Vec<joule_proto::NodeId> {
-        let mut eligible: Vec<&Node> = self.nodes().filter(|n| free_slots(n) > 0).collect();
-        eligible.sort_by(|a, b| {
-            // Free before loaded; more free slots; less inflight; better rep; more mem.
-            let sa = compute_state(a);
-            let sb = compute_state(b);
-            state_rank(sa)
-                .cmp(&state_rank(sb))
-                .then(free_slots(b).cmp(&free_slots(a)))
-                .then(a.inflight.cmp(&b.inflight))
-                .then(
-                    b.reputation
-                        .score()
-                        .partial_cmp(&a.reputation.score())
-                        .unwrap_or(std::cmp::Ordering::Equal),
-                )
-                .then(b.caps.mem_mib.cmp(&a.caps.mem_mib))
-                .then(a.rr_seq.cmp(&b.rr_seq))
-        });
-        eligible.into_iter().map(|n| n.id.clone()).collect()
+    /// Reserve one concurrent stream on the **whole** sharded mesh.
+    /// Increments inflight on every healthy shard (shared model).
+    pub fn try_acquire_stream(&mut self) -> Option<ClusterPlan> {
+        let plan = self.plan_sharded_pool().ok()?;
+        let pool_mem = plan.pool_mem_mib;
+        let max = pool_max_streams(pool_mem);
+        let used = self
+            .eligible()
+            .iter()
+            .map(|n| n.inflight)
+            .max()
+            .unwrap_or(0);
+        if used >= max {
+            return None;
+        }
+        // Every shard participates lightly.
+        for s in &plan.shards {
+            if let Some(n) = self.nodes.get_mut(&s.node) {
+                if free_stream_slots(n) == 0 {
+                    // roll back partial
+                    for s2 in &plan.shards {
+                        if s2.node == s.node {
+                            break;
+                        }
+                        if let Some(nn) = self.nodes.get_mut(&s2.node) {
+                            nn.inflight = nn.inflight.saturating_sub(1);
+                        }
+                    }
+                    return None;
+                }
+                n.inflight = n.inflight.saturating_add(1);
+            }
+        }
+        Some(plan)
     }
 
-    /// Try to reserve one job slot on the freest schedulable node.
-    /// Returns `None` when the pool is fully loaded (caller may wait).
-    pub fn try_acquire_slot(&mut self) -> Option<joule_proto::NodeId> {
+    /// Release one stream reservation from all listed shards.
+    pub fn release_stream(&mut self, plan: &ClusterPlan) {
+        for s in &plan.shards {
+            if let Some(n) = self.nodes.get_mut(&s.node) {
+                n.inflight = n.inflight.saturating_sub(1);
+            }
+        }
+    }
+
+    // --- compatibility wrappers used by older call sites ---
+
+    pub fn max_slots(node: &Node) -> u32 {
+        max_streams(node)
+    }
+
+    pub fn free_slots(node: &Node) -> u32 {
+        free_stream_slots(node)
+    }
+
+    pub fn try_acquire_slot(&mut self) -> Option<NodeId> {
+        // Single-node acquire is wrong for product; keep for tests of slot math only.
         let ranked = self.rank_schedulable();
         let id = ranked.into_iter().next()?;
-        // Re-check under mutation.
         {
             let node = self.get_mut(&id)?;
-            if free_slots(node) == 0 {
+            if free_stream_slots(node) == 0 {
                 return None;
             }
         }
@@ -196,8 +356,7 @@ impl Cluster {
         Some(id)
     }
 
-    /// Reserve up to `n` slots on distinct schedulable nodes (free first).
-    pub fn try_acquire_slots(&mut self, n: usize) -> Vec<joule_proto::NodeId> {
+    pub fn try_acquire_slots(&mut self, n: usize) -> Vec<NodeId> {
         let mut out = Vec::new();
         for _ in 0..n {
             match self.try_acquire_slot() {
@@ -208,17 +367,20 @@ impl Cluster {
         out
     }
 
-    pub fn total_free_slots(&self) -> u32 {
-        self.nodes().map(free_slots).sum()
+    pub fn rank_schedulable(&self) -> Vec<NodeId> {
+        let mut eligible: Vec<&Node> = self.nodes().filter(|n| free_stream_slots(n) > 0).collect();
+        eligible.sort_by(|a, b| {
+            free_stream_slots(b)
+                .cmp(&free_stream_slots(a))
+                .then(a.inflight.cmp(&b.inflight))
+                .then(b.caps.mem_mib.cmp(&a.caps.mem_mib))
+        });
+        eligible.into_iter().map(|n| n.id.clone()).collect()
     }
-}
 
-fn state_rank(s: ComputeState) -> u8 {
-    match s {
-        ComputeState::Free => 0,
-        ComputeState::Loaded => 1,
-        ComputeState::Full => 2,
-        ComputeState::Unavailable => 3,
+    pub fn total_free_slots(&self) -> u32 {
+        let snap = self.scheduler_snapshot();
+        snap.stream_slots_free
     }
 }
 
@@ -239,42 +401,49 @@ mod tests {
     }
 
     #[test]
-    fn free_then_loaded_then_full() {
+    fn sharded_plan_uses_all_vram() {
         let mut c = Cluster::default();
-        let a = add(&mut c, 8192); // max_slots = 1
-        assert_eq!(compute_state(c.get(&a).unwrap()), ComputeState::Free);
-        let got = c.try_acquire_slot().unwrap();
-        assert_eq!(got, a);
-        assert_eq!(compute_state(c.get(&a).unwrap()), ComputeState::Full);
-        assert!(c.try_acquire_slot().is_none());
-        c.release_worker(&a);
-        assert_eq!(compute_state(c.get(&a).unwrap()), ComputeState::Free);
+        add(&mut c, 8192);
+        add(&mut c, 16384);
+        add(&mut c, 16384);
+        add(&mut c, 16384);
+        add(&mut c, 16384);
+        let plan = c.plan_sharded_pool().unwrap();
+        assert_eq!(plan.shards.len(), 5);
+        assert_eq!(plan.pool_mem_mib, 8192 + 16384 * 4);
+        let ppm: u32 = plan.shards.iter().map(|s| s.mem_fraction_ppm).sum();
+        assert!((999_000..=1_000_000).contains(&ppm), "ppm={ppm}");
+        // 8GB node should get smaller layer span than 16GB
+        let small = plan
+            .shards
+            .iter()
+            .find(|s| s.mem_share_mib == 8192)
+            .unwrap();
+        let big = plan
+            .shards
+            .iter()
+            .find(|s| s.mem_share_mib == 16384)
+            .unwrap();
+        let small_span = small.layer_end.unwrap() - small.layer_start.unwrap() + 1;
+        let big_span = big.layer_end.unwrap() - big.layer_start.unwrap() + 1;
+        assert!(big_span >= small_span);
     }
 
     #[test]
-    fn prefers_free_over_loaded() {
+    fn stream_slots_scale_with_pool() {
         let mut c = Cluster::default();
-        let a = add(&mut c, 24_576); // max 2
-        let b = add(&mut c, 24_576);
-        let first = c.try_acquire_slot().unwrap();
-        // one loaded, one free — next should be the free one
-        let second = c.try_acquire_slot().unwrap();
-        assert_ne!(first, second);
-        c.release_worker(&a);
-        c.release_worker(&b);
-    }
-
-    #[test]
-    fn snapshot_counts() {
-        let mut c = Cluster::default();
-        let a = add(&mut c, 8192);
-        let _b = add(&mut c, 8192);
-        c.try_acquire_slot().unwrap(); // one full (1 slot)
-        let snap = c.scheduler_snapshot();
-        assert_eq!(snap.nodes_free, 1);
-        assert_eq!(snap.nodes_full, 1);
-        assert!(snap.can_accept_work);
-        assert_eq!(snap.slots_free, 1);
-        let _ = a;
+        add(&mut c, 8192);
+        add(&mut c, 16384);
+        add(&mut c, 16384);
+        add(&mut c, 16384);
+        add(&mut c, 16384);
+        let total = 8192 + 16384 * 4;
+        let max = pool_max_streams(total);
+        assert!(max >= 1);
+        let plan = c.try_acquire_stream().unwrap();
+        assert_eq!(plan.shards.len(), 5);
+        // second stream ok until cap
+        let _ = c.try_acquire_stream();
+        c.release_stream(&plan);
     }
 }

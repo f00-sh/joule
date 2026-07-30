@@ -94,8 +94,8 @@
   <main>
     <div class="grid" id="stats">
       <div class="card"><div class="label">Healthy nodes</div><div class="value accent" id="n-healthy">—</div></div>
-      <div class="card"><div class="label">Free / loaded / full</div><div class="value" id="sched-states">—</div></div>
-      <div class="card"><div class="label">Slots free / used</div><div class="value sky" id="slots">—</div></div>
+      <div class="card"><div class="label">Pool VRAM</div><div class="value sky" id="pool-vram">—</div></div>
+      <div class="card"><div class="label">Stream slots free/used</div><div class="value" id="slots">—</div></div>
       <div class="card"><div class="label">Healthy VRAM</div><div class="value" id="mem-healthy">—</div></div>
       <div class="card"><div class="label">GPU / Metal / CPU</div><div class="value" id="devices">—</div></div>
       <div class="card"><div class="label">Cluster model</div><div class="value models" id="models">—</div></div>
@@ -111,11 +111,10 @@
               <th>Device</th>
               <th>Mem MiB</th>
               <th>Load</th>
-              <th>Slots</th>
+              <th>VRAM share</th>
+              <th>Layers</th>
+              <th>Streams</th>
               <th>State</th>
-              <th>Rep</th>
-              <th>Health</th>
-              <th>Models</th>
             </tr>
           </thead>
           <tbody id="nodes"></tbody>
@@ -145,39 +144,39 @@
           fetch("/v1/cluster/nodes").then(r => r.json()),
           fetch("/v1/cluster/scheduler").then(r => r.json()),
         ]);
-        document.getElementById("n-healthy").textContent = cap.nodes_healthy;
-        document.getElementById("sched-states").textContent =
-          (sched.nodes_free||0) + " / " + (sched.nodes_loaded||0) + " / " + (sched.nodes_full||0);
+        document.getElementById("n-healthy").textContent = cap.nodes_healthy + " shards";
+        document.getElementById("pool-vram").textContent = fmtGiB(sched.pool_mem_mib || cap.mem_mib_healthy);
         document.getElementById("slots").textContent =
-          (sched.slots_free||0) + " / " + (sched.slots_used||0);
+          (sched.stream_slots_free||0) + " / " + (sched.stream_slots_used||0) +
+          " (max " + (sched.stream_slots_total||0) + ")";
         document.getElementById("mem-healthy").textContent = fmtGiB(cap.mem_mib_healthy);
         document.getElementById("devices").textContent =
           cap.nodes_gpu + " / " + cap.nodes_metal + " / " + cap.nodes_cpu;
         document.getElementById("models").textContent =
-          (cap.models_available && cap.models_available.length)
-            ? cap.models_available.join(", ")
-            : "(none)";
+          (sched.model || (cap.models_available && cap.models_available[0]) || "(none)") +
+          " · " + (sched.shards||0) + " shards";
         const tb = document.getElementById("nodes");
         tb.innerHTML = "";
-        (nodes.nodes || []).forEach(n => {
+        const snodes = sched.nodes || [];
+        snodes.forEach(n => {
           const tr = document.createElement("tr");
-          let health = n.banned ? "banned" : (n.healthy ? "up" : "stale");
-          let pill = n.banned || !n.healthy ? "bad" : (n.compute_state === "full" ? "bad" : "ok");
-          let st = n.compute_state || "—";
+          let pill = n.state === "full" || n.state === "unavailable" ? "bad" : "ok";
+          const layers = (n.layer_start!=null && n.layer_end!=null)
+            ? (n.layer_start + "–" + n.layer_end) : "—";
+          const ppm = n.mem_fraction_ppm ? ((n.mem_fraction_ppm/10000).toFixed(1) + "%") : "—";
           tr.innerHTML =
             "<td>" + n.account + "</td>" +
-            "<td>" + n.device + "</td>" +
+            "<td>" + (n.device||"—") + "</td>" +
             "<td>" + n.mem_mib + "</td>" +
             "<td>" + (n.load != null ? n.load.toFixed(2) : "—") + "</td>" +
-            "<td>" + (n.free_slots||0) + "/" + (n.max_slots||0) + " (in " + (n.inflight||0) + ")</td>" +
-            "<td><span class=\"pill " + pill + "\">" + st + "</span></td>" +
-            "<td>" + (n.reputation_ok || 0) + "/" + (n.reputation_fail || 0) + "</td>" +
-            "<td>" + health + "</td>" +
-            "<td class=\"models\">" + (n.models || []).join(", ") + "</td>";
+            "<td>" + n.mem_share_mib + " (" + ppm + ")</td>" +
+            "<td>" + layers + "</td>" +
+            "<td>" + n.free_stream_slots + "/" + n.max_streams + "</td>" +
+            "<td><span class=\"pill " + pill + "\">" + n.state + "</span></td>";
           tb.appendChild(tr);
         });
-        if (!(nodes.nodes || []).length) {
-          tb.innerHTML = "<tr><td colspan=\"9\" style=\"color:var(--muted)\">No donors yet — run <code>joule agent --account …</code></td></tr>";
+        if (!snodes.length) {
+          tb.innerHTML = "<tr><td colspan=\"8\" style=\"color:var(--muted)\">No donors yet — run <code>joule agent --account …</code></td></tr>";
         }
         document.getElementById("updated").textContent =
           "updated " + new Date().toLocaleTimeString();

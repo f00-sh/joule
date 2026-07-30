@@ -132,7 +132,7 @@ pub enum ShardRole {
     Decode,
 }
 
-/// Placement of one model shard on one node.
+/// Placement of one model shard on one node (VRAM-weighted slice of the pool).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardAssignment {
     pub node: NodeId,
@@ -141,14 +141,30 @@ pub struct ShardAssignment {
     pub layer_end: Option<u32>,
     pub tp_rank: Option<u16>,
     pub tp_world: Option<u16>,
+    /// This node's share of aggregate pool VRAM (MiB).
+    #[serde(default)]
+    pub mem_share_mib: u32,
+    /// Parts-per-million of total pool VRAM (sum ≈ 1_000_000).
+    #[serde(default)]
+    pub mem_fraction_ppm: u32,
 }
 
-/// Active multi-node (or single-node) serving plan for the cluster.
+/// Active multi-node serving plan: one model sharded across the pool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterPlan {
     pub plan_id: Uuid,
     pub model: String,
     pub shards: Vec<ShardAssignment>,
+    /// Sum of healthy donor VRAM used in this plan.
+    #[serde(default)]
+    pub pool_mem_mib: u64,
+    /// Assumed total transformer layers for layer-range placement.
+    #[serde(default = "default_model_layers")]
+    pub model_layers: u32,
+}
+
+fn default_model_layers() -> u32 {
+    80
 }
 
 /// Live aggregate of donated compute — powers the public dashboard.
@@ -163,6 +179,12 @@ pub struct ClusterCapacity {
     pub mem_mib_healthy: u64,
     pub throughput_class_sum: u64,
     pub models_available: Vec<String>,
+    /// Max concurrent generation streams the sharded pool can accept.
+    #[serde(default)]
+    pub stream_slots_total: u32,
+    /// Streams currently reserved.
+    #[serde(default)]
+    pub stream_slots_used: u32,
 }
 
 /// Envelope for control ↔ agent messages (newline-delimited JSON on the wire).
@@ -210,18 +232,26 @@ pub enum Message {
     CapacitySnapshot {
         capacity: ClusterCapacity,
     },
-    /// Control asks a donor to run inference (stub path until real engine).
+    /// Control asks a donor to run its **shard** of a distributed inference.
+    /// The full model is spread across `plan`; this node only owns its assignment.
     InferRequest {
         request_id: Uuid,
         model: String,
         prompt: String,
         max_tokens: u32,
+        /// Full pool shard map (VRAM-weighted).
+        plan: ClusterPlan,
+        /// This node is the tail/coordinator shard (returns user-visible tokens in stub).
+        is_tail: bool,
     },
     InferDone {
         request_id: Uuid,
         text: String,
         prompt_tokens: u32,
         completion_tokens: u32,
+        /// Non-tail shards may return empty text with shard_ok.
+        #[serde(default = "default_true")]
+        shard_ok: bool,
     },
     InferError {
         request_id: Uuid,
@@ -248,6 +278,10 @@ pub enum Message {
     Error {
         error: String,
     },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Encode one envelope as a single newline-terminated JSON line.
@@ -299,6 +333,8 @@ mod tests {
             mem_mib_healthy: 32768,
             throughput_class_sum: 50,
             models_available: vec![CLUSTER_MODEL.into()],
+            stream_slots_total: 4,
+            stream_slots_used: 1,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["nodes_healthy"], 2);

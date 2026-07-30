@@ -51,8 +51,8 @@ async fn healthz(State(app): State<App>) -> impl IntoResponse {
         "service": "joule-control",
         "agents_connected": agents,
         "nodes_healthy": cap.nodes_healthy,
-        "slots_free": sched.slots_free,
-        "slots_used": sched.slots_used,
+        "slots_free": sched.stream_slots_free,
+        "slots_used": sched.stream_slots_used,
         "can_accept_work": sched.can_accept_work,
     }))
 }

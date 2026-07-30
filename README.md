@@ -93,9 +93,7 @@ joule chat --key joule_… --stream --prompt "stream me"
 
 **Law:** no active donor agent for that account → chat forbidden. Invalid keys → 401.
 
-**Single model:** the pool only serves **`kimi-open`**. Every healthy donor is compute for that model (`/v1/models` lists one entry). Multi-donor load balance uses the full pool; dual-verify and challenges target the same model.
-
-**Scheduler:** each donor has free/loaded/full **slots**. Jobs only land on free or loaded nodes; full pool waits (timeout) until a slot frees. See `GET /v1/cluster/scheduler`. Spot challenges + dual-verify still apply.
+**Single model, sharded pool:** only **`kimi-open`**. Donors’ VRAM is **aggregated** (e.g. 8+16+16+16+16 GiB ≈ 72 GiB) and the model is **split across all healthy nodes** proportional to memory. One chat request rides that shared mesh — it does **not** monopolize one entire GPU. Concurrent users share **stream slots** on the same pool (`GET /v1/cluster/scheduler`).
 
 Inference is still a **stub engine** until real weights land; the pool, dashboard, routing, and contribute-to-consume path are real.
 

@@ -5,7 +5,7 @@ use joule_cluster::Cluster;
 use joule_ledger::{
     estimate_contribution_millijoules, estimate_usage_millijoules, Ledger, Millijoule,
 };
-use joule_proto::{DeviceClass, NodeCaps, NodeId, CLUSTER_MODEL};
+use joule_proto::{ClusterPlan, DeviceClass, NodeCaps, NodeId, CLUSTER_MODEL};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -47,10 +47,15 @@ pub struct NodeView {
 #[derive(Debug)]
 pub struct PendingInfer {
     pub account: String,
-    pub worker: NodeId,
-    /// If false, mint worker contribution only (verify path; do not burn caller balance).
+    /// Full VRAM-sharded plan; stream reserved on every shard.
+    pub plan: ClusterPlan,
+    /// Shards still expected to ACK (node ids).
+    pub awaiting: std::collections::HashSet<NodeId>,
+    pub tail_text: Option<String>,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
     pub charge: bool,
-    pub tx: oneshot::Sender<Result<InferOutcome, String>>,
+    pub tx: Option<oneshot::Sender<Result<InferOutcome, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +66,9 @@ pub struct InferOutcome {
     pub worker_account: String,
     pub device: DeviceClass,
     pub worker_id: NodeId,
+    /// Aggregate pool VRAM the request was sharded over.
+    pub pool_mem_mib: u64,
+    pub shard_count: u32,
 }
 
 #[derive(Debug)]
@@ -293,15 +301,16 @@ impl ControlState {
         out
     }
 
-    pub fn settle_infer_success(
+    /// One shard of a multi-node stream finished.
+    pub fn settle_shard_success(
         &mut self,
         request_id: Uuid,
         text: String,
         prompt_tokens: u32,
         completion_tokens: u32,
         worker: &NodeId,
+        is_tail: bool,
     ) {
-        self.release_slot(worker);
         let device = self
             .cluster
             .get(worker)
@@ -313,42 +322,112 @@ impl ControlState {
             .cloned()
             .unwrap_or_else(|| "unknown".into());
 
-        let mint =
-            estimate_contribution_millijoules(completion_tokens, device.contribution_multiplier());
-        let _ = self
-            .ledger
-            .mint_contribution(&worker_account, mint, format!("infer:{request_id}"));
+        let mint = estimate_contribution_millijoules(
+            completion_tokens.max(1),
+            device.contribution_multiplier(),
+        )
+        .max(1);
+        let _ = self.ledger.mint_contribution(
+            &worker_account,
+            mint,
+            format!("infer-shard:{request_id}"),
+        );
+        self.mark_dirty();
 
-        if let Some(pending) = self.pending.remove(&request_id) {
-            if pending.charge {
-                let burn = estimate_usage_millijoules(prompt_tokens, completion_tokens);
-                if let Err(e) =
-                    self.ledger
-                        .burn_usage(&pending.account, burn, format!("chat:{request_id}"))
-                {
-                    self.mark_dirty();
-                    let _ = pending.tx.send(Err(e.to_string()));
-                    return;
+        let Some(pending) = self.pending.get_mut(&request_id) else {
+            return;
+        };
+        pending.awaiting.remove(worker);
+        if is_tail || (!text.is_empty() && pending.tail_text.is_none()) {
+            pending.tail_text = Some(text);
+            pending.prompt_tokens = prompt_tokens;
+            pending.completion_tokens = completion_tokens;
+        }
+        if !pending.awaiting.is_empty() {
+            return;
+        }
+
+        let Some(mut pending) = self.pending.remove(&request_id) else {
+            return;
+        };
+        self.cluster.release_stream(&pending.plan);
+        self.wake_scheduler();
+
+        let text = pending
+            .tail_text
+            .unwrap_or_else(|| "[joule] empty completion from pool".into());
+        let prompt_tokens = pending.prompt_tokens;
+        let completion_tokens = pending.completion_tokens;
+        let tail = pending
+            .plan
+            .shards
+            .last()
+            .map(|s| s.node.clone())
+            .unwrap_or_else(NodeId::new);
+        let device = self
+            .cluster
+            .get(&tail)
+            .map(|n| n.caps.device)
+            .unwrap_or(DeviceClass::Cpu);
+        let worker_account = self
+            .node_account
+            .get(&tail)
+            .cloned()
+            .unwrap_or_else(|| "unknown".into());
+        let pool_mem_mib = pending.plan.pool_mem_mib;
+        let shard_count = pending.plan.shards.len() as u32;
+
+        if pending.charge {
+            let burn = estimate_usage_millijoules(prompt_tokens, completion_tokens);
+            if let Err(e) =
+                self.ledger
+                    .burn_usage(&pending.account, burn, format!("chat:{request_id}"))
+            {
+                if let Some(tx) = pending.tx.take() {
+                    let _ = tx.send(Err(e.to_string()));
                 }
+                return;
             }
-            self.mark_dirty();
-            let _ = pending.tx.send(Ok(InferOutcome {
+        }
+        if let Some(tx) = pending.tx.take() {
+            let _ = tx.send(Ok(InferOutcome {
                 text,
                 prompt_tokens,
                 completion_tokens,
                 worker_account,
                 device,
-                worker_id: worker.clone(),
+                worker_id: tail,
+                pool_mem_mib,
+                shard_count,
             }));
-        } else {
-            self.mark_dirty();
         }
     }
 
+    pub fn settle_infer_success(
+        &mut self,
+        request_id: Uuid,
+        text: String,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        worker: &NodeId,
+    ) {
+        self.settle_shard_success(
+            request_id,
+            text,
+            prompt_tokens,
+            completion_tokens,
+            worker,
+            true,
+        );
+    }
+
     pub fn settle_infer_error(&mut self, request_id: Uuid, error: String) {
-        if let Some(pending) = self.pending.remove(&request_id) {
-            self.release_slot(&pending.worker);
-            let _ = pending.tx.send(Err(error));
+        if let Some(mut pending) = self.pending.remove(&request_id) {
+            self.cluster.release_stream(&pending.plan);
+            self.wake_scheduler();
+            if let Some(tx) = pending.tx.take() {
+                let _ = tx.send(Err(error));
+            }
         }
     }
 

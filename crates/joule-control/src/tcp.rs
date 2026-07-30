@@ -117,14 +117,23 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 text,
                 prompt_tokens,
                 completion_tokens,
+                shard_ok: _,
             } => {
                 let mut g = app.state.write().await;
-                g.settle_infer_success(
+                // Tail detection: pending plan last shard or non-empty text.
+                let is_tail = g
+                    .pending
+                    .get(&request_id)
+                    .and_then(|p| p.plan.shards.last())
+                    .map(|s| s.node == env.from)
+                    .unwrap_or(!text.is_empty());
+                g.settle_shard_success(
                     request_id,
                     text,
                     prompt_tokens,
                     completion_tokens,
                     &env.from,
+                    is_tail,
                 );
             }
             Message::InferError { request_id, error } => {
@@ -165,7 +174,10 @@ async fn send_to_agent(routes: &AgentRoutes, node: &NodeId, env: Envelope) -> bo
     }
 }
 
-/// Dispatch inference across **all** healthy cluster donors (single model).
+/// Dispatch one generation across the **VRAM-sharded pool** (all healthy donors).
+///
+/// One request is spread over aggregate pool memory (e.g. 8+16×4 GiB), not parked
+/// exclusively on a single GPU. Concurrent users share stream slots on that mesh.
 pub async fn dispatch_infer(
     app: &App,
     account: &str,
@@ -185,185 +197,109 @@ pub async fn dispatch_infer(
         }
     }
 
-    let dual = {
-        let mut g = app.state.write().await;
-        g.should_dual_verify()
-    };
-
-    // Wait for free/loaded slots (never schedule onto Full).
-    let want = if dual { 2 } else { 1 };
-    let candidates = acquire_with_wait(app, want, Duration::from_secs(20)).await?;
-
-    if candidates.is_empty() {
-        return Err(format!(
-            "no free compute for cluster model {CLUSTER_MODEL} (all slots loaded)"
-        ));
-    }
-
-    // Dual-verify path: run two workers in parallel, compare.
-    if dual && candidates.len() >= 2 {
-        let primary = candidates[0].clone();
-        let secondary = candidates[1].clone();
-        // release any extra beyond 2
-        {
-            let mut g = app.state.write().await;
-            for extra in candidates.iter().skip(2) {
-                g.release_slot(extra);
-            }
-        }
-
-        let p_out = dispatch_one(
-            app,
-            account,
-            &model,
-            prompt,
-            max_tokens,
-            primary.clone(),
-            true,
-        )
-        .await;
-        let s_out = dispatch_one(
-            app,
-            account,
-            &model,
-            prompt,
-            max_tokens,
-            secondary.clone(),
-            false,
-        )
-        .await;
-
-        match (p_out, s_out) {
-            (Ok(a), Ok(b)) => {
-                let mut g = app.state.write().await;
-                if a.text.trim() == b.text.trim() {
-                    g.cluster.record_challenge_ok(&a.worker_id);
-                    g.cluster.record_challenge_ok(&b.worker_id);
-                    // secondary already minted via settle; return primary
-                    return Ok(a);
-                }
-                // Mismatch: fail both reputations, still return primary if usable
-                g.cluster.record_challenge_fail(&a.worker_id);
-                g.cluster.record_challenge_fail(&b.worker_id);
-                warn!(
-                    primary = %a.worker_id,
-                    secondary = %b.worker_id,
-                    "dual-verify mismatch"
-                );
-                return Ok(a);
-            }
-            (Ok(a), Err(e)) => {
-                let mut g = app.state.write().await;
-                g.cluster.record_challenge_fail(&secondary);
-                warn!(error = %e, "secondary verify failed");
-                return Ok(a);
-            }
-            (Err(e), Ok(b)) => {
-                let mut g = app.state.write().await;
-                g.cluster.record_challenge_fail(&primary);
-                warn!(error = %e, "primary failed; using secondary");
-                return Ok(b);
-            }
-            (Err(e1), Err(e2)) => {
-                return Err(format!("all workers failed: {e1}; {e2}"));
-            }
-        }
-    }
-
-    // Single path with failover across acquired candidates.
-    let mut last_err = String::from("no worker accepted job");
-    let mut remaining = candidates;
-    while let Some(worker) = remaining.first().cloned() {
-        remaining.remove(0);
-        match dispatch_one(
-            app,
-            account,
-            &model,
-            prompt,
-            max_tokens,
-            worker.clone(),
-            true,
-        )
-        .await
-        {
-            Ok(out) => {
-                // release unused candidates
-                let mut g = app.state.write().await;
-                for extra in remaining {
-                    g.release_slot(&extra);
-                }
-                return Ok(out);
-            }
-            Err(e) => {
-                last_err = e;
-                // worker already released in settle error / timeout path for that request
-            }
-        }
-    }
-    Err(last_err)
-}
-
-async fn dispatch_one(
-    app: &App,
-    account: &str,
-    model: &str,
-    prompt: &str,
-    max_tokens: u32,
-    worker_id: NodeId,
-    charge: bool,
-) -> Result<InferOutcome, String> {
+    let plan = acquire_stream_with_wait(app, Duration::from_secs(20)).await?;
     let request_id = Uuid::new_v4();
     let (tx, rx) = oneshot::channel();
+
+    let awaiting: std::collections::HashSet<NodeId> =
+        plan.shards.iter().map(|s| s.node.clone()).collect();
+    let tail = plan
+        .shards
+        .last()
+        .map(|s| s.node.clone())
+        .ok_or_else(|| "empty shard plan".to_string())?;
+
     {
         let mut g = app.state.write().await;
         g.pending.insert(
             request_id,
             PendingInfer {
                 account: account.to_string(),
-                worker: worker_id.clone(),
-                charge,
-                tx,
+                plan: plan.clone(),
+                awaiting,
+                tail_text: None,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                charge: true,
+                tx: Some(tx),
             },
         );
     }
 
-    let env = Envelope::new(
-        worker_id.clone(),
-        Message::InferRequest {
-            request_id,
-            model: model.to_string(),
-            prompt: prompt.to_string(),
-            max_tokens,
-        },
+    info!(
+        %request_id,
+        shards = plan.shards.len(),
+        pool_mem_mib = plan.pool_mem_mib,
+        "dispatching sharded infer across pool"
     );
 
-    if !send_to_agent(&app.routes, &worker_id, env).await {
-        let mut g = app.state.write().await;
-        g.pending.remove(&request_id);
-        g.cluster.release_worker(&worker_id);
-        return Err(format!("agent not connected: {worker_id}"));
+    // Fan-out: every shard runs its slice; tail produces user-visible tokens (stub).
+    let mut sent = 0usize;
+    for shard in &plan.shards {
+        let is_tail = shard.node == tail;
+        let env = Envelope::new(
+            shard.node.clone(),
+            Message::InferRequest {
+                request_id,
+                model: model.clone(),
+                prompt: prompt.to_string(),
+                max_tokens,
+                plan: plan.clone(),
+                is_tail,
+            },
+        );
+        if send_to_agent(&app.routes, &shard.node, env).await {
+            sent += 1;
+        } else {
+            warn!(node = %shard.node, "shard agent not connected");
+        }
     }
 
-    match tokio::time::timeout(Duration::from_secs(30), rx).await {
+    if sent == 0 {
+        let mut g = app.state.write().await;
+        g.pending.remove(&request_id);
+        g.cluster.release_stream(&plan);
+        g.wake_scheduler();
+        return Err("no connected agents for sharded plan".into());
+    }
+
+    // If some shards offline, drop them from awaiting so we don't hang.
+    if sent < plan.shards.len() {
+        let connected: std::collections::HashSet<_> =
+            app.routes.lock().await.keys().cloned().collect();
+        let mut g = app.state.write().await;
+        if let Some(p) = g.pending.get_mut(&request_id) {
+            p.awaiting.retain(|n| connected.contains(n));
+            if p.awaiting.is_empty() {
+                g.pending.remove(&request_id);
+                g.cluster.release_stream(&plan);
+                g.wake_scheduler();
+                return Err("all shards disconnected mid-dispatch".into());
+            }
+        }
+    }
+
+    match tokio::time::timeout(Duration::from_secs(45), rx).await {
         Ok(Ok(Ok(outcome))) => Ok(outcome),
         Ok(Ok(Err(e))) => Err(e),
         Ok(Err(_)) => Err("infer channel closed".into()),
         Err(_) => {
             let mut g = app.state.write().await;
-            if g.pending.remove(&request_id).is_some() {
-                g.release_slot(&worker_id);
+            if let Some(mut p) = g.pending.remove(&request_id) {
+                g.cluster.release_stream(&p.plan);
+                g.wake_scheduler();
+                let _ = p.tx.take();
             }
-            Err("infer timed out".into())
+            Err("sharded infer timed out".into())
         }
     }
 }
 
-/// Block until at least `want` free slots can be reserved, or timeout.
-async fn acquire_with_wait(
+/// Wait until a shared stream can be reserved on the whole mesh.
+async fn acquire_stream_with_wait(
     app: &App,
-    want: usize,
     timeout: Duration,
-) -> Result<Vec<NodeId>, String> {
+) -> Result<joule_proto::ClusterPlan, String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         {
@@ -373,21 +309,14 @@ async fn acquire_with_wait(
                     "no healthy workers for cluster model {CLUSTER_MODEL}"
                 ));
             }
-            let free = g.cluster.total_free_slots() as usize;
-            let n = want.min(free).max(if free > 0 { 1 } else { 0 });
-            if n > 0 {
-                let ids = g.cluster.try_acquire_slots(n);
-                if !ids.is_empty() {
-                    // For dual path, need 2 if possible; if only 1 free, still return 1
-                    // and let dual degrade to single.
-                    return Ok(ids);
-                }
+            if let Some(plan) = g.cluster.try_acquire_stream() {
+                return Ok(plan);
             }
         }
 
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
-                "timed out waiting for free compute ({CLUSTER_MODEL}); pool is fully loaded"
+                "timed out waiting for free stream capacity on {CLUSTER_MODEL} pool"
             ));
         }
 
@@ -452,7 +381,9 @@ pub async fn challenge_loop(app: App) {
     }
 }
 
-/// Agent-side: handle InferRequest from control using local stub engine.
+/// Agent-side: run this node's **shard** of a pool-wide inference.
+///
+/// Non-tail shards only ACK (activation handoff stub). Tail produces tokens.
 pub async fn agent_handle_infer(env: &Envelope, stub: &StubEngine) -> Result<Envelope> {
     match &env.msg {
         Message::InferRequest {
@@ -460,21 +391,23 @@ pub async fn agent_handle_infer(env: &Envelope, stub: &StubEngine) -> Result<Env
             model,
             prompt,
             max_tokens,
+            plan,
+            is_tail,
         } => {
-            use joule_proto::{ClusterPlan, ShardAssignment, ShardRole};
-            let plan = ClusterPlan {
-                plan_id: Uuid::new_v4(),
-                model: model.clone(),
-                shards: vec![ShardAssignment {
-                    node: env.from.clone(),
-                    role: ShardRole::Replica,
-                    layer_start: None,
-                    layer_end: None,
-                    tp_rank: None,
-                    tp_world: None,
-                }],
-            };
-            stub.load_plan(&plan).await.context("stub load")?;
+            stub.load_plan(plan).await.context("stub load")?;
+            if !*is_tail {
+                // Intermediate pipeline stage: consume compute, no user text yet.
+                return Ok(Envelope::new(
+                    env.from.clone(),
+                    Message::InferDone {
+                        request_id: *request_id,
+                        text: String::new(),
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        shard_ok: true,
+                    },
+                ));
+            }
             match stub
                 .infer(InferRequest {
                     model: model.clone(),
@@ -490,6 +423,7 @@ pub async fn agent_handle_infer(env: &Envelope, stub: &StubEngine) -> Result<Env
                         text: out.text,
                         prompt_tokens: out.prompt_tokens,
                         completion_tokens: out.completion_tokens,
+                        shard_ok: true,
                     },
                 )),
                 Err(e) => Ok(Envelope::new(
@@ -521,11 +455,15 @@ pub async fn agent_handle_challenge(env: &Envelope, stub: &StubEngine) -> Result
                 shards: vec![ShardAssignment {
                     node: env.from.clone(),
                     role: ShardRole::Replica,
-                    layer_start: None,
-                    layer_end: None,
+                    layer_start: Some(0),
+                    layer_end: Some(0),
                     tp_rank: None,
                     tp_world: None,
+                    mem_share_mib: 0,
+                    mem_fraction_ppm: 1_000_000,
                 }],
+                pool_mem_mib: 0,
+                model_layers: 1,
             };
             stub.load_plan(&plan).await.context("stub load")?;
             let out = stub
