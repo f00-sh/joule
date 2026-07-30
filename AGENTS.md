@@ -26,7 +26,8 @@
 9. **Single model:** only `kimi-open` (`CLUSTER_MODEL`).
 10. **One logical device:** N physical donors = **one** virtual GPU whose VRAM is the **sum** of healthy donors.
 11. **Website only on f00:** `joule.f00.sh` is not a CDN. Weights/software are **content-addressed and peer-seeded** (`docs/design/distribution-v0.md`). No f00 payload hosting.
-12. **Operator broadcast:** signed allow-listed orders (update/model/notice/…) verified with public operator key and flooded by the swarm (`docs/design/broadcast-v0.md`).
+12. **Operator broadcast:** signed allow-listed orders (update/model/notice/…) verified with public operator key and flooded by the swarm (`docs/design/broadcast-v0.md`, ceremony in `docs/design/operator-ceremony-v0.md`).
+13. **Software/weights:** stage after sha256 verify; never execute unsigned bus payloads as scripts.
 
 ## Language / purity
 
@@ -60,6 +61,10 @@ cargo run -p joule --release -- agent --account alice
 cargo run -p joule --release -- capacity --api http://127.0.0.1:7700 --json
 cargo run -p joule --release -- chat --key joule_… --prompt "hi"
 cargo run -p joule -- lab
+cargo run -p joule -- seed-blob --path models/fixtures/lab-tiny/model.safetensors
+cargo run -p joule -- blobs
+cargo run -p joule -- software status
+cargo run -p joule -- broadcast plan-chunks --chunks 12 --nodes 5
 ```
 
 ## Install channels

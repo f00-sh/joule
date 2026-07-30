@@ -205,16 +205,26 @@ burn = (prompt + 4×completion) × leecher_usage_bp
         <code>/api/sources</code> automatically. Optional KV mirror uses
         <code>~/.config/f00/joule/edge.token</code>.
       </div>
+      <div class="callout">
+        <strong>Peer seed, not CDN:</strong> this site never hosts weights or
+        installers. Content is <code>sha256</code>-addressed. Seed a file with
+        <code>joule seed-blob</code>; operators sign digests offline
+        (<a href="https://github.com/f00-sh/joule/blob/main/docs/design/operator-ceremony-v0.md">ceremony</a>).
+        Agents fetch only their assigned chunks / matching software targets.
+      </div>
       <pre class="cmd">git clone https://github.com/f00-sh/joule.git
 cd joule && cargo build --release -p joule
 
 # terminal 1 — public control (auto-announces to joule.f00.sh directory)
 export JOULE_PUBLIC_URL=https://your.public.host   # HTTPS base of this control
+# export JOULE_OPERATOR_PUBKEY=…   # pin operator key in production
 ./target/release/joule control
 # signed feed → $JOULE_PUBLIC_URL/v1/public/snapshot
 
 # terminal 2 — donate
-./target/release/joule agent --account you --control 127.0.0.1:7701</pre>
+./target/release/joule agent --account you --control 127.0.0.1:7701
+# optional: seed lab fixture so peers can pull
+./target/release/joule seed-blob --path models/fixtures/lab-tiny/model.safetensors --kind weight</pre>
       <p class="muted">MIT · f00-sh · native agent only · browser is this page, not pool FLOPs.</p>
     </section>
 
@@ -222,7 +232,9 @@ export JOULE_PUBLIC_URL=https://your.public.host   # HTTPS base of this control
       <p>
         <a href="https://f00.sh/">f00</a> ·
         <a href="https://github.com/f00-sh/joule">github.com/f00-sh/joule</a> ·
-        <a href="https://github.com/f00-sh/joule/blob/main/docs/design/economy-v0.md">economy-v0</a> ·
+        <a href="https://github.com/f00-sh/joule/blob/main/docs/design/economy-v0.md">economy</a> ·
+        <a href="https://github.com/f00-sh/joule/blob/main/docs/design/distribution-v0.md">distribution</a> ·
+        <a href="https://github.com/f00-sh/joule/blob/main/docs/design/broadcast-v0.md">broadcast</a> ·
         <a href="https://github.com/f00-sh/joule/blob/main/LICENSE">MIT</a>
       </p>
       <p>Live capacity is the product. Stay online. Don’t leech.</p>

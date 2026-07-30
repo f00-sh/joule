@@ -27,6 +27,8 @@ use uuid::Uuid;
 
 /// Wire chunk size for peer BlobChunk (lab-sized files; large models later).
 const BLOB_CHUNK_BYTES: usize = 64 * 1024;
+/// Refuse assembling larger than this over control-relayed chunks (DoS guard).
+const MAX_RELAY_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 
 struct PendingBlobRecv {
     sha256: String,
@@ -175,6 +177,14 @@ enum Commands {
         /// Optional human name.
         #[arg(long, default_value = "")]
         name: String,
+    },
+    /// List local content-addressed blobs (what this machine can seed).
+    Blobs {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Optional live control to show swarm catalog instead of local only.
+        #[arg(long, default_value = "")]
+        api: String,
     },
     /// Software update stage / apply (peer-seeded binaries only).
     Software {
@@ -358,10 +368,48 @@ async fn main() -> Result<()> {
             } => broadcast_plan_chunks(chunks, nodes, replicas, json)?,
         },
         Commands::SeedBlob { path, kind, name } => seed_blob(path, kind, name)?,
+        Commands::Blobs { json, api } => run_blobs(json, api).await?,
         Commands::Software { cmd } => match cmd {
             SoftwareCmd::Status => software_status()?,
             SoftwareCmd::Apply { dest } => software_apply(dest)?,
         },
+    }
+    Ok(())
+}
+
+async fn run_blobs(json: bool, api: String) -> Result<()> {
+    if !api.trim().is_empty() {
+        let url = format!("{}/v1/blobs", api.trim_end_matches('/'));
+        let text = reqwest::get(&url)
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()?
+            .text()
+            .await?;
+        println!("{text}");
+        return Ok(());
+    }
+    let list = WeightsStore::list_blob_store();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+    } else if list.is_empty() {
+        println!("no local blobs under {}", WeightsStore::blob_root().display());
+        println!("seed with: joule seed-blob --path FILE");
+    } else {
+        println!(
+            "local blobs ({}): {}",
+            list.len(),
+            WeightsStore::blob_root().display()
+        );
+        for b in list {
+            println!(
+                "  {}  {:>10}  {}  {}",
+                b.sha256,
+                b.size,
+                b.kind,
+                b.name
+            );
+        }
     }
     Ok(())
 }
@@ -973,6 +1021,14 @@ async fn run_agent(
                                 expect = entry.next_offset,
                                 got = offset,
                                 "BlobChunk out of order"
+                            );
+                            pending_recv.remove(&request_id);
+                            continue;
+                        }
+                        if entry.next_offset + bytes.len() as u64 > MAX_RELAY_BLOB_BYTES {
+                            warn!(
+                                %request_id,
+                                "BlobChunk exceeds MAX_RELAY_BLOB_BYTES; abort"
                             );
                             pending_recv.remove(&request_id);
                             continue;

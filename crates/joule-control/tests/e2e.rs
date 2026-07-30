@@ -271,6 +271,8 @@ async fn persist_roundtrip() {
         let _ = g.ensure_account("bob");
         g.ledger.mint_contribution("bob", 100, "seed").unwrap();
         let _ = g.ensure_account("carol");
+        g.operator_paused = true;
+        g.heartbeat_mint_mj = 42;
         g.prune();
     }
 
@@ -278,6 +280,8 @@ async fn persist_roundtrip() {
     let g = app2.state.read().await;
     assert!(g.account_keys.contains_key("carol"));
     assert!(g.ledger.balance("bob") >= 100);
+    assert!(g.operator_paused);
+    assert_eq!(g.heartbeat_mint_mj, 42);
 }
 
 fn tempfile_dir() -> std::path::PathBuf {

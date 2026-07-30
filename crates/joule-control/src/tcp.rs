@@ -147,6 +147,11 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     let request_id = Uuid::new_v4();
                     {
                         let mut g = app.state.write().await;
+                        // Cap concurrent control-relayed transfers (lab path).
+                        if g.pending_blob_xfers.len() >= 64 {
+                            warn!("BlobWant: too many in-flight transfers");
+                            continue;
+                        }
                         g.pending_blob_xfers
                             .insert(request_id, (requester.clone(), hash.clone()));
                     }

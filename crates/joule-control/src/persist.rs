@@ -27,10 +27,19 @@ pub struct Snapshot {
     /// Authoritative sealed ledger events (self-govern v0).
     #[serde(default)]
     pub chain: Vec<SealedEntry>,
+    /// Signed-bus operator pause (blocks chat).
+    #[serde(default)]
+    pub operator_paused: bool,
+    #[serde(default)]
+    pub service_live: bool,
+    #[serde(default)]
+    pub heartbeat_mint_mj: Option<i64>,
+    #[serde(default)]
+    pub dual_verify_every: Option<u64>,
 }
 
 impl Snapshot {
-    pub const VERSION: u32 = 3;
+    pub const VERSION: u32 = 4;
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -86,6 +95,10 @@ pub fn save(dir: &Path, state: &ControlState) -> Result<()> {
         balances: HashMap::new(), // not authoritative
         economy,
         chain: state.ledger.sealed().entries().to_vec(),
+        operator_paused: state.operator_paused,
+        service_live: state.service_live,
+        heartbeat_mint_mj: Some(state.heartbeat_mint_mj),
+        dual_verify_every: Some(state.dual_verify_every),
     };
     let path = snapshot_path(dir);
     let tmp = path.with_extension("json.tmp");
@@ -126,5 +139,15 @@ pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
                 best_mem_mib: e.best_mem_mib,
             },
         );
+    }
+    state.operator_paused = snap.operator_paused;
+    state.service_live = snap.service_live;
+    if let Some(v) = snap.heartbeat_mint_mj {
+        if (0..=1_000_000).contains(&v) {
+            state.heartbeat_mint_mj = v;
+        }
+    }
+    if let Some(v) = snap.dual_verify_every {
+        state.dual_verify_every = v;
     }
 }
