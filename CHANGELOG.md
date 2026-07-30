@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Weight download/verify**: HTTP(S) + `repo://` with sha256; `weights.published=true`
+- **lab-tiny** fixture + **kimi-k3-meta** (Moonshot HF configs); tensor-backed generate (`decode.rs`)
 - **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
 - **Live public pool on joule.f00.sh**: Pages Functions `/api/pool` + SSE `/api/pool/stream` + KV snapshot; control edge publish (`JOULE_EDGE_TOKEN` → `/api/ingest`)
 - **Self-govern v0**: sealed hash-chained millijoule ledger; balances only via chain replay; public audit APIs
@@ -26,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Logical device view:** pool = one virtual GPU (`logical_device.vram_mib` = sum of donors)
 - **VRAM-sharded single model** under that device; requests share stream slots
 - `/v1/models` is one model; foreign ids rejected
-- **Kimi gated:** stub until pool ≥64 GiB VRAM and ≥3 backends; weights unpublished
+- **Kimi gated:** pool ≥64 GiB + ≥3 backends for model_ready; weights published (lab + HF meta)
 
 ### Added
 
