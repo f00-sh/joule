@@ -125,7 +125,7 @@ joule software status|apply
 joule broadcast keygen|sign|inject|plan-chunks
 ```
 
-**Operator bus (signed, peer-flooded):** pin `JOULE_OPERATOR_PUBKEY`, sign offline, inject once — swarm relays. Model/software updates carry **hashes**; bytes move peer→peer. Ceremony: [docs/design/operator-ceremony-v0.md](docs/design/operator-ceremony-v0.md).
+**Operator bus (signed, peer-flooded):** pin `JOULE_OPERATOR_PUBKEY`, sign offline, inject once — swarm relays. Model/software updates carry **hashes**; bytes move peer→peer. Agents verify body hash + sig locally when key is pinned. Ceremony: [docs/design/operator-ceremony-v0.md](docs/design/operator-ceremony-v0.md). Demo: `scripts/demo-operator-bus.sh`. Seed fixture: `scripts/seed-lab-tiny.sh`.
 
 Full option reference: [man/joule.1.md](man/joule.1.md).
 
