@@ -1,8 +1,15 @@
 //! joule — distributed compute cluster CLI.
 
+mod client_status;
+mod tray_app;
+
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use clap::{Parser, Subcommand};
+use joule_client::{
+    format_monitor_dash, format_status_human, generate_launchd_plist, generate_systemd_unit,
+    generate_windows_task_xml, InstallSpec, ServiceKind, ServicePlatform,
+};
 use joule_cluster::{plan_redundant_chunks, Cluster, ModelChunk};
 use joule_control::{
     body_sha256_hex, now_ms, operator_preimage, operator_pubkey_hex, verify_operator_sig,
@@ -124,6 +131,42 @@ enum Commands {
         #[arg(long)]
         key: String,
     },
+    /// Live client status (connection, API, millijoules, tokens, pool) — all platforms.
+    Status {
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        /// Optional API key for account balance / tokens.
+        #[arg(long, default_value = "")]
+        key: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+        /// Compact monitor dash instead of multi-line status.
+        #[arg(long, default_value_t = false)]
+        dash: bool,
+    },
+    /// Continuous monitor dash (refreshes). Same fields as status; all platforms.
+    Monitor {
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        #[arg(long, default_value = "")]
+        key: String,
+        #[arg(long, default_value_t = 3)]
+        interval_secs: u64,
+    },
+    /// Systray / tray-mode status surface (polls control; headless-safe monitor).
+    Tray {
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        #[arg(long, default_value = "")]
+        key: String,
+        #[arg(long, default_value_t = 5)]
+        interval_secs: u64,
+    },
+    /// Generate OS service install artifacts (systemd / launchd / Windows task).
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
     /// Local offline lab (no network).
     Lab {
         #[arg(long, default_value = CLUSTER_MODEL)]
@@ -203,6 +246,41 @@ enum SoftwareCmd {
     Apply {
         #[arg(long)]
         dest: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceCmd {
+    /// Write unit/plist/task XML to stdout or --out.
+    Generate {
+        /// linux | macos | windows
+        #[arg(long, default_value = "linux")]
+        platform: String,
+        /// agent | tray
+        #[arg(long, default_value = "agent")]
+        kind: String,
+        #[arg(long, default_value = "joule")]
+        binary: String,
+        #[arg(long, default_value = "127.0.0.1:7701")]
+        control: String,
+        #[arg(long, default_value = "donor")]
+        account: String,
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        #[arg(long, default_value = "")]
+        key: String,
+        #[arg(long, default_value_t = 8192)]
+        mem_mib: u32,
+        /// Linux: user unit (true) vs system unit.
+        #[arg(long, default_value_t = true)]
+        user: bool,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Print minimal install steps for the current OS helpers.
+    InstallHelp {
+        #[arg(long, default_value = "linux")]
+        platform: String,
     },
 }
 
@@ -325,6 +403,51 @@ async fn main() -> Result<()> {
         Commands::Whoami { api, key } => {
             run_whoami(api, key).await?;
         }
+        Commands::Status {
+            api,
+            key,
+            json,
+            dash,
+        } => {
+            run_status(api, key, json, dash).await?;
+        }
+        Commands::Monitor {
+            api,
+            key,
+            interval_secs,
+        } => {
+            let k = if key.is_empty() { None } else { Some(key) };
+            tray_app::run_tray(api, k, interval_secs).await?;
+        }
+        Commands::Tray {
+            api,
+            key,
+            interval_secs,
+        } => {
+            let k = if key.is_empty() { None } else { Some(key) };
+            tray_app::run_tray(api, k, interval_secs).await?;
+        }
+        Commands::Service { cmd } => match cmd {
+            ServiceCmd::Generate {
+                platform,
+                kind,
+                binary,
+                control,
+                account,
+                api,
+                key,
+                mem_mib,
+                user,
+                out,
+            } => {
+                run_service_generate(
+                    platform, kind, binary, control, account, api, key, mem_mib, user, out,
+                )?;
+            }
+            ServiceCmd::InstallHelp { platform } => {
+                run_service_install_help(&platform)?;
+            }
+        },
         Commands::Lab {
             model,
             prompt,
@@ -1409,6 +1532,135 @@ async fn run_whoami(api: String, key: String) -> Result<()> {
         .context("account status")?;
     let v: serde_json::Value = resp.json().await?;
     println!("{}", serde_json::to_string_pretty(&v)?);
+    Ok(())
+}
+
+async fn run_status(api: String, key: String, json: bool, dash: bool) -> Result<()> {
+    let key_opt = if key.is_empty() {
+        None
+    } else {
+        Some(key.as_str())
+    };
+    let st = client_status::fetch_client_status(&api, key_opt).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&st)?);
+    } else if dash {
+        println!("{}", format_monitor_dash(&st));
+    } else {
+        print!("{}", format_status_human(&st));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_service_generate(
+    platform: String,
+    kind: String,
+    binary: String,
+    control: String,
+    account: String,
+    api: String,
+    key: String,
+    mem_mib: u32,
+    user: bool,
+    out: Option<PathBuf>,
+) -> Result<()> {
+    let platform = match platform.to_ascii_lowercase().as_str() {
+        "linux" | "systemd" => ServicePlatform::LinuxSystemd,
+        "macos" | "darwin" | "launchd" => ServicePlatform::MacosLaunchd,
+        "windows" | "win" | "task" => ServicePlatform::WindowsTask,
+        other => bail!("unknown platform {other}; use linux|macos|windows"),
+    };
+    let kind = match kind.to_ascii_lowercase().as_str() {
+        "agent" => ServiceKind::Agent,
+        "tray" | "monitor" => ServiceKind::Tray,
+        other => bail!("unknown kind {other}; use agent|tray"),
+    };
+    let spec = InstallSpec {
+        platform,
+        kind,
+        binary_path: binary,
+        control,
+        account,
+        api,
+        api_key: if key.is_empty() { None } else { Some(key) },
+        mem_mib,
+        user_unit: user,
+        description: match kind {
+            ServiceKind::Agent => "joule donor agent".into(),
+            ServiceKind::Tray => "joule status tray/monitor".into(),
+        },
+    };
+    let body = match platform {
+        ServicePlatform::LinuxSystemd => generate_systemd_unit(&spec),
+        ServicePlatform::MacosLaunchd => generate_launchd_plist(&spec),
+        ServicePlatform::WindowsTask => generate_windows_task_xml(&spec),
+    };
+    if let Some(p) = out {
+        std::fs::write(&p, &body).with_context(|| format!("write {}", p.display()))?;
+        println!("wrote {}", p.display());
+    } else {
+        print!("{body}");
+    }
+    Ok(())
+}
+
+fn run_service_install_help(platform: &str) -> Result<()> {
+    match platform.to_ascii_lowercase().as_str() {
+        "linux" | "systemd" => {
+            println!(
+                r#"Linux (user systemd — recommended with tray/GPU):
+
+  joule service generate --platform linux --kind agent \
+    --binary "$(command -v joule)" --account YOU --control 127.0.0.1:7701 \
+    --out ~/.config/systemd/user/joule-agent.service
+  systemctl --user daemon-reload
+  systemctl --user enable --now joule-agent.service
+
+Tray/monitor:
+  joule service generate --platform linux --kind tray --out ~/.config/systemd/user/joule-tray.service
+  systemctl --user enable --now joule-tray.service
+
+Headless-only agent may use --user=false and install under /etc/systemd/system/ (root).
+"#
+            );
+        }
+        "macos" | "darwin" | "launchd" => {
+            println!(
+                r#"macOS (LaunchAgents — user domain, tray-friendly):
+
+  joule service generate --platform macos --kind agent \
+    --binary /opt/homebrew/bin/joule --account YOU \
+    --out ~/Library/LaunchAgents/sh.f00.joule.agent.plist
+  launchctl load ~/Library/LaunchAgents/sh.f00.joule.agent.plist
+
+Tray:
+  joule service generate --platform macos --kind tray --out ~/Library/LaunchAgents/sh.f00.joule.tray.plist
+  launchctl load ~/Library/LaunchAgents/sh.f00.joule.tray.plist
+
+CLI status on macOS: joule status --api http://127.0.0.1:7700 --key joule_…
+"#
+            );
+        }
+        "windows" | "win" => {
+            println!(
+                r#"Windows (Task Scheduler — logon trigger, least privilege):
+
+  joule service generate --platform windows --kind agent \
+    --binary "C:\Program Files\joule\joule.exe" --account YOU \
+    --out %TEMP%\joule-agent.xml
+  schtasks /Create /TN joule-agent /XML %TEMP%\joule-agent.xml
+
+Tray:
+  joule service generate --platform windows --kind tray --out %TEMP%\joule-tray.xml
+  schtasks /Create /TN joule-tray /XML %TEMP%\joule-tray.xml
+
+CLI status on Windows: joule status --api http://127.0.0.1:7700 --key joule_…
+"#
+            );
+        }
+        other => bail!("unknown platform {other}"),
+    }
     Ok(())
 }
 

@@ -18,6 +18,11 @@ joule load [--model TAG] [--quant ID] [--mem-mib N]
 joule seed-blob --path FILE [--kind KIND] [--name NAME]
 joule blobs [--json] [--api URL]
 joule software status|apply [--dest PATH]
+joule status --api URL [--key KEY] [--json] [--dash]
+joule monitor --api URL [--key KEY] [--interval-secs N]
+joule tray --api URL [--key KEY] [--interval-secs N]
+joule service generate --platform linux|macos|windows --kind agent|tray …
+joule service install-help --platform linux|macos|windows
 joule broadcast keygen|sign|inject|plan-chunks …
 joule lab [options]
 joule credits [--account NAME]
@@ -84,6 +89,23 @@ operator bus actions (model/software digests, notices).
 Hash a local file into `blobs/sha256/` for the swarm. After a signed
 `software_update`, agents stage the matching digest; `joule software apply`
 installs the staged binary (hash-checked).
+
+### joule status / monitor / tray
+
+Cross-platform **client status** (Linux, macOS, Windows CLI): connection,
+account/API, millijoule balance, tokens used (prompt+completion), pool
+backends/VRAM, service_live. `--dash` prints a compact monitor; `monitor` and
+`tray` refresh live. Shared core: `joule-client::ClientStatus`.
+
+### joule service
+
+Generate **OS auto-start** units without root (dry-run to stdout/`--out`):
+
+- Linux: systemd user unit (`systemctl --user enable --now …`)
+- macOS: LaunchAgents plist (`launchctl load …`)
+- Windows: Task Scheduler XML (`schtasks /Create /XML …`)
+
+Prefer user-session services so tray/monitor can share the GPU session.
 
 ### joule broadcast
 

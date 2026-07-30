@@ -33,6 +33,12 @@ pub struct AccountInfo {
     pub leecher_mint_bp: u32,
     /// Current leecher usage multiplier in basis points.
     pub leecher_usage_bp: u32,
+    /// Lifetime prompt tokens charged on this account (chat usage).
+    #[serde(default)]
+    pub prompt_tokens_used: u64,
+    /// Lifetime completion tokens charged on this account.
+    #[serde(default)]
+    pub completion_tokens_used: u64,
 }
 
 /// Per-account fairness stats for the auditable economy (v0).
@@ -47,6 +53,12 @@ pub struct AccountEconomy {
     pub continuous_online_secs: u64,
     /// Best *verified* mem across this account's nodes (MiB) — claims ignored.
     pub best_mem_mib: u32,
+    /// Lifetime prompt tokens billed via chat (not persisted until snapshot v6).
+    #[serde(default)]
+    pub prompt_tokens_used: u64,
+    /// Lifetime completion tokens billed via chat.
+    #[serde(default)]
+    pub completion_tokens_used: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -501,6 +513,8 @@ impl ControlState {
             continuous_online_secs: continuous,
             leecher_mint_bp,
             leecher_usage_bp,
+            prompt_tokens_used: eco.prompt_tokens_used,
+            completion_tokens_used: eco.completion_tokens_used,
         })
     }
 
@@ -635,6 +649,15 @@ impl ControlState {
                 return;
             }
             self.record_consume(&payer, burn.total_mj);
+            {
+                let eco = self.economy_mut(&payer);
+                eco.prompt_tokens_used = eco
+                    .prompt_tokens_used
+                    .saturating_add(u64::from(prompt_tokens));
+                eco.completion_tokens_used = eco
+                    .completion_tokens_used
+                    .saturating_add(u64::from(completion_tokens));
+            }
             self.seal_and_checkpoint();
             self.mark_dirty();
         }

@@ -7,6 +7,7 @@ members = [
     "crates/joule-runtime",
     "crates/joule-ledger",
     "crates/joule-control",
+    "crates/joule-client",
 ]
 default-members = ["crates/joule"]
 
@@ -25,6 +26,7 @@ joule-cluster = { path = "crates/joule-cluster" }
 joule-runtime = { path = "crates/joule-runtime" }
 joule-ledger = { path = "crates/joule-ledger" }
 joule-control = { path = "crates/joule-control" }
+joule-client = { path = "crates/joule-client" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

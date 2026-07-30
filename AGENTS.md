@@ -39,7 +39,8 @@
 ## Workspace
 
 ```text
-crates/joule             CLI binary
+crates/joule             CLI binary (+ status/monitor/tray/service)
+crates/joule-client      shared ClientStatus + OS service unit generation
 crates/joule-proto       wire types / ClusterCapacity / plans
 crates/joule-cluster     membership + capacity + placement
 crates/joule-runtime     Engine trait + StubEngine

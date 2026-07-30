@@ -120,10 +120,19 @@ joule whoami --key joule_…
 joule lab --peers 3
 joule credits --account alice
 joule ready [--api URL]
+joule status --api URL --key joule_… [--dash|--json]
+joule monitor --api URL --key joule_…          # living dash (all platforms)
+joule tray --api URL --key joule_…             # tray/monitor surface
+joule service generate --platform linux|macos|windows --kind agent|tray
+joule service install-help --platform linux
 joule seed-blob --path FILE [--kind software]
 joule software status|apply
 joule broadcast keygen|sign|inject|plan-chunks
 ```
+
+**Client / donor UX:** `status` and `monitor` work on **Linux, macOS, and Windows** (same CLI).  
+Linux also has **systemd** user units (`joule service generate --platform linux`).  
+macOS: LaunchAgents plist; Windows: Task Scheduler XML. Prefer **user-session** auto-start so a tray/monitor can run with the GPU agent (not root-only).
 
 **Operator bus:** stock builds verify the **embedded official** protocol key (OpenPGP master `tj@f00.sh` certifies it). Env override only with `JOULE_ALLOW_UNOFFICIAL_OPERATOR=1` (lab). Trust model: [docs/design/master-key-trust-v0.md](docs/design/master-key-trust-v0.md). Demo: `scripts/demo-operator-bus.sh`. Seed: `scripts/seed-lab-tiny.sh`.
 

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Cross-platform client status**: `joule status` / `monitor` / `tray` (Linux, macOS, Windows CLI) — connection, API/account, millijoule balance, tokens used, pool dash (`joule-client` shared snapshot)
+- **Service install helpers**: `joule service generate|install-help` for systemd (Linux), launchd (macOS), Task Scheduler XML (Windows); user-session preferred for tray+GPU
+- Account API fields `prompt_tokens_used` / `completion_tokens_used` (lifetime chat usage)
 - **Master key trust v0**: OpenPGP master `tj@f00.sh` + embedded protocol ed25519; website HTTPS must match embed; env override only with `JOULE_ALLOW_UNOFFICIAL_OPERATOR=1` — see [docs/design/master-key-trust-v0.md](docs/design/master-key-trust-v0.md)
 - Public keys: `docs/operator-keys/master.asc`, `protocol.ed25519.pub` (+ GPG detach-sig); `GET /v1/operator/pins` and `/v1/operator/audit`
 - **Peer blob transfer**: `BlobWant` → `BlobProvide` → `BlobChunk` (base64); agents verify sha256 into content-addressed store; `FetchDigests` for assigned model/software digests only
