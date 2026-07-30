@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 joule-proto = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 async-trait = "0.1"
 uuid = { workspace = true }
 

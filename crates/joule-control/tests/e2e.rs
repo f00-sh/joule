@@ -143,6 +143,19 @@ async fn pool_capacity_and_chat() {
         .unwrap();
     assert_eq!(cap["logical_device"]["id"], "joule-pool");
     assert_eq!(cap["logical_device"]["backends"], 1);
+    // small pool → not model_ready for kimi (needs 64 GiB / 3 backends)
+    assert_eq!(cap["logical_device"]["model_ready"], false);
+
+    let ready: serde_json::Value = client
+        .get(format!("{base}/v1/models/readiness"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(ready["pool_ready"], false);
+    assert_eq!(ready["inference_mode"], "stub_awaiting_pool");
 
     let chat: serde_json::Value = client
         .post(format!("{base}/v1/chat/completions"))

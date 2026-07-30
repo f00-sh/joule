@@ -184,7 +184,19 @@ pub struct LogicalDevice {
     /// Donors that make up this logical device (internal detail).
     pub backends: u32,
     pub model: String,
+    /// Backends online (device assembled).
     pub ready: bool,
+    /// Pool large enough for the model’s min VRAM / backend gates.
+    #[serde(default)]
+    pub model_ready: bool,
+    /// 0–100 toward model pool gate.
+    #[serde(default)]
+    pub model_progress_pct: u8,
+    /// Human-readable readiness (stub vs waiting for pool vs weights).
+    #[serde(default)]
+    pub inference_mode: String,
+    #[serde(default)]
+    pub readiness_message: String,
 }
 
 /// Live aggregate of donated compute — powers the public dashboard.
@@ -245,6 +257,26 @@ pub enum Message {
     Heartbeat {
         load: f32,
         healthy: bool,
+    },
+    /// Control → agents: pool readiness for the single model (size gates, weights).
+    PoolStatus {
+        pool_vram_mib: u64,
+        backends: u32,
+        pool_ready: bool,
+        weights_published: bool,
+        pool_progress_pct: u8,
+        inference_mode: String,
+        message: String,
+        /// Quant this node should prepare (if any).
+        recommend_quant: Option<String>,
+    },
+    /// Agent → control: local weight/arm status after prepare.
+    PrepareOk {
+        model: String,
+        quant: String,
+        armed: bool,
+        files_complete: bool,
+        message: String,
     },
     PlanRequest {
         model: String,

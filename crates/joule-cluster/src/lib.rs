@@ -293,29 +293,21 @@ impl Cluster {
             .min(stream_slots_total);
 
         // Public product view: one accelerator whose VRAM is the sum of donors.
-        let logical_device = if nodes_healthy > 0 {
-            Some(LogicalDevice {
-                id: "joule-pool".into(),
-                name: format!("joule supercomputer ({CLUSTER_MODEL_LABEL})"),
-                kind: "aggregate_gpu".into(),
-                vram_mib: mem_mib_healthy,
-                vram_gib: mem_mib_healthy / 1024,
-                backends: nodes_healthy,
-                model: CLUSTER_MODEL.to_string(),
-                ready: true,
-            })
-        } else {
-            Some(LogicalDevice {
-                id: "joule-pool".into(),
-                name: format!("joule supercomputer ({CLUSTER_MODEL_LABEL})"),
-                kind: "aggregate_gpu".into(),
-                vram_mib: 0,
-                vram_gib: 0,
-                backends: 0,
-                model: CLUSTER_MODEL.to_string(),
-                ready: false,
-            })
-        };
+        // model_ready filled by control once manifest gates are applied.
+        let logical_device = Some(LogicalDevice {
+            id: "joule-pool".into(),
+            name: format!("joule supercomputer ({CLUSTER_MODEL_LABEL})"),
+            kind: "aggregate_gpu".into(),
+            vram_mib: mem_mib_healthy,
+            vram_gib: mem_mib_healthy / 1024,
+            backends: nodes_healthy,
+            model: CLUSTER_MODEL.to_string(),
+            ready: nodes_healthy > 0,
+            model_ready: false,
+            model_progress_pct: 0,
+            inference_mode: String::new(),
+            readiness_message: String::new(),
+        });
 
         ClusterCapacity {
             nodes_total,

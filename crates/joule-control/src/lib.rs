@@ -51,6 +51,7 @@ pub async fn serve(app: App, agent_addr: SocketAddr, http_addr: SocketAddr) -> R
         loop {
             tick.tick().await;
             prune_app.state.write().await.prune();
+            broadcast_pool_status(&prune_app).await;
         }
     });
 
@@ -113,4 +114,47 @@ pub fn load_or_init_app(data_dir: Option<PathBuf>) -> Result<App> {
 // Back-compat name used by CLI earlier.
 pub fn load_or_init_state(data_dir: Option<PathBuf>) -> Result<App> {
     load_or_init_app(data_dir)
+}
+
+/// Push pool readiness to every connected agent so they can arm/prepare weights.
+pub async fn broadcast_pool_status(app: &App) {
+    use joule_proto::{Envelope, Message, NodeId};
+    use joule_runtime::{readiness_for_pool, ManifestFile};
+
+    let (vram, backends) = {
+        let g = app.state.read().await;
+        let cap = g.cluster.capacity();
+        (cap.mem_mib_healthy, cap.nodes_healthy)
+    };
+    let Ok(r) = readiness_for_pool(vram, backends) else {
+        return;
+    };
+    let quant = ManifestFile::load_default()
+        .ok()
+        .and_then(|m| m.primary().cloned())
+        .and_then(|spec| {
+            // Control does not know each node VRAM here in bulk; agents re-pick.
+            spec.pick_quant(8192).map(|q| q.id.clone())
+        });
+
+    let msg = Message::PoolStatus {
+        pool_vram_mib: r.pool_vram_mib,
+        backends: r.backends,
+        pool_ready: r.pool_ready,
+        weights_published: r.weights_published,
+        pool_progress_pct: r.pool_progress_pct,
+        inference_mode: serde_json::to_value(r.inference_mode)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default(),
+        message: r.message,
+        recommend_quant: quant,
+    };
+
+    let routes = app.routes.lock().await;
+    for (node, tx) in routes.iter() {
+        let env = Envelope::new(node.clone(), msg.clone());
+        let _ = tx.send(env);
+    }
+    let _ = std::mem::size_of::<NodeId>();
 }

@@ -8,7 +8,9 @@ use joule_proto::{
     decode_line, encode_line, ClusterCapacity, DeviceClass, Envelope, Message, NodeCaps, NodeId,
     CLUSTER_MODEL,
 };
-use joule_runtime::{Engine, InferRequest, StubEngine};
+use joule_runtime::{
+    readiness_for_pool, Engine, InferRequest, ManifestFile, StubEngine, WeightsStore,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -121,6 +123,17 @@ enum Commands {
         #[arg(long, default_value = "donor")]
         account: String,
     },
+    /// Show model pool-readiness (Kimi waits for a large enough logical device).
+    Ready {
+        /// Optional live control HTTP base (e.g. http://127.0.0.1:7700).
+        #[arg(long, default_value = "")]
+        api: String,
+        /// Override pool VRAM GiB when offline.
+        #[arg(long, default_value_t = 0)]
+        pool_vram_gib: u64,
+        #[arg(long, default_value_t = 0)]
+        backends: u32,
+    },
 }
 
 #[tokio::main]
@@ -206,6 +219,13 @@ async fn main() -> Result<()> {
         Commands::Credits { account } => {
             run_credits(&account)?;
         }
+        Commands::Ready {
+            api,
+            pool_vram_gib,
+            backends,
+        } => {
+            run_ready(api, pool_vram_gib, backends).await?;
+        }
     }
     Ok(())
 }
@@ -257,6 +277,9 @@ async fn run_agent(
     writer.write_all(&encode_line(&hello)?).await?;
 
     let stub = StubEngine::new();
+    let store = WeightsStore::new(WeightsStore::default_root());
+    store.ensure_root().ok();
+    let mut last_armed = false;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -284,8 +307,64 @@ async fn run_agent(
                         println!("joined cluster as account={acc}");
                         println!("API key (save this): {key}");
                         println!("dashboard: http://127.0.0.1:7700/");
-                        println!("capacity:  curl -s http://127.0.0.1:7700/v1/cluster/capacity");
+                        println!("readiness: curl -s http://127.0.0.1:7700/v1/models/readiness");
                         println!("chat:      joule chat --key {key} --prompt \"hello\"");
+                        println!("weights:   {}", store.root().display());
+                    }
+                    Message::PoolStatus {
+                        pool_vram_mib,
+                        backends,
+                        pool_ready,
+                        weights_published,
+                        pool_progress_pct,
+                        inference_mode,
+                        message,
+                        recommend_quant,
+                    } => {
+                        info!(
+                            pool_ready,
+                            weights_published,
+                            pool_progress_pct,
+                            %inference_mode,
+                            pool_vram_gib = pool_vram_mib / 1024,
+                            backends,
+                            "{message}"
+                        );
+                        if pool_ready && !last_armed {
+                            if let Ok(manifest) = ManifestFile::load_default() {
+                                if let Some(spec) = manifest.primary() {
+                                    let quant = recommend_quant
+                                        .as_deref()
+                                        .and_then(|id| {
+                                            spec.weights.quants.iter().find(|q| q.id == id)
+                                        })
+                                        .or_else(|| spec.pick_quant(mem_mib));
+                                    if let Some(q) = quant {
+                                        match store.prepare(spec, q) {
+                                            Ok(st) => {
+                                                last_armed = st.armed;
+                                                println!(
+                                                    "weights: {} ({})",
+                                                    st.message, st.cache_dir
+                                                );
+                                                let ok = Envelope::new(
+                                                    node_id.clone(),
+                                                    Message::PrepareOk {
+                                                        model: st.model,
+                                                        quant: st.quant,
+                                                        armed: st.armed,
+                                                        files_complete: st.files_complete,
+                                                        message: st.message,
+                                                    },
+                                                );
+                                                writer.write_all(&encode_line(&ok)?).await?;
+                                            }
+                                            Err(e) => warn!(error = %e, "prepare failed"),
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     Message::InferRequest { .. } => {
                         let reply = joule_control::agent_handle_infer(&env, &stub)
@@ -314,6 +393,24 @@ async fn run_agent(
             }
         }
     }
+}
+
+async fn run_ready(api: String, pool_vram_gib: u64, backends: u32) -> Result<()> {
+    if !api.trim().is_empty() {
+        let url = format!("{}/v1/models/readiness", api.trim_end_matches('/'));
+        let text = reqwest::get(&url)
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()?
+            .text()
+            .await?;
+        println!("{text}");
+        return Ok(());
+    }
+    let r = readiness_for_pool(pool_vram_gib.saturating_mul(1024), backends)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    println!("{}", serde_json::to_string_pretty(&r)?);
+    Ok(())
 }
 
 async fn run_capacity(api: String, peers: usize, json: bool) -> Result<()> {

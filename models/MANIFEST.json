@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "kimi-open",
+      "label": "Kimi (open weights)",
+      "description": "Single cluster model. Weights are not loaded until the logical device (aggregate donor VRAM) is large enough. Inference stays stub until weights are published and the pool is ready.",
+      "min_pool_vram_mib": 65536,
+      "min_backends": 3,
+      "model_layers": 80,
+      "weights": {
+        "published": false,
+        "note": "Pin redistributable open Kimi checkpoint URLs/hashes here when the public pool routinely exceeds min_pool_vram_mib. Until then agents only arm the cache.",
+        "quants": [
+          {
+            "id": "q4_k_m",
+            "min_node_vram_mib": 8192,
+            "approx_file_mib": 22000,
+            "files": []
+          },
+          {
+            "id": "q5_k_m",
+            "min_node_vram_mib": 12288,
+            "approx_file_mib": 28000,
+            "files": []
+          },
+          {
+            "id": "q8_0",
+            "min_node_vram_mib": 24576,
+            "approx_file_mib": 40000,
+            "files": []
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -12,12 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Logical device view:** pool = one virtual GPU (`logical_device.vram_mib` = sum of donors)
 - **VRAM-sharded single model** under that device; requests share stream slots
 - `/v1/models` is one model; foreign ids rejected
+- **Kimi gated:** stub until pool ≥64 GiB VRAM and ≥3 backends; weights unpublished
 
 ### Added
 
-- `LogicalDevice` on capacity + dashboard “one supercomputer” framing
-- `plan_sharded_pool` + multi-node infer fan-out
-- `GET /v1/cluster/scheduler` (`view: one_logical_device`)
+- `models/MANIFEST.json` + readiness API `GET /v1/models/readiness`
+- Agent weight **arm** path (`~/.local/share/joule/weights`) when pool ready
+- `PoolStatus` / `PrepareOk` protocol; `joule ready` CLI
+- `LogicalDevice` readiness fields on capacity/dashboard
 - **Anti-cheat challenges**: spot challenges every ~12s + dual-verify every 3rd chat
 - **Reputation**: pass/fail scores; ban unhealthy cheaters from scheduling
 - **Localhost control hardened**: shared agent routes (fixed dispatch), bind errors, healthz shows agents_connected

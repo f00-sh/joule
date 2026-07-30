@@ -98,8 +98,10 @@
       <div class="card"><div class="label">Backends (internal)</div><div class="value" id="n-healthy">—</div></div>
       <div class="card"><div class="label">Stream slots free/used</div><div class="value" id="slots">—</div></div>
       <div class="card"><div class="label">Model</div><div class="value models" id="models">—</div></div>
-      <div class="card"><div class="label">Ready</div><div class="value" id="ready">—</div></div>
+      <div class="card"><div class="label">Model ready</div><div class="value" id="ready">—</div></div>
+      <div class="card"><div class="label">Pool progress</div><div class="value sky" id="progress">—</div></div>
     </div>
+    <p class="sub" id="ready-msg" style="margin:0 0 1.25rem;"></p>
 
     <section class="card">
       <h2>How the logical device is built (internal backends)</h2>
@@ -154,7 +156,11 @@
           (sched.stream_slots_free||0) + " / " + (sched.stream_slots_used||0) +
           " (max " + (sched.stream_slots_total||0) + ")";
         document.getElementById("models").textContent = ld.model || sched.model || "kimi-open";
-        document.getElementById("ready").textContent = ld.ready ? "yes" : "no";
+        document.getElementById("ready").textContent = ld.model_ready ? "yes" : "no";
+        document.getElementById("progress").textContent =
+          (ld.model_progress_pct != null ? ld.model_progress_pct : 0) + "%";
+        document.getElementById("ready-msg").textContent =
+          ld.readiness_message || ld.inference_mode || "";
         const tb = document.getElementById("nodes");
         tb.innerHTML = "";
         const snodes = sched.backends || sched.nodes || [];

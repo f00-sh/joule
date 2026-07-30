@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::stream::Stream;
 use joule_proto::{resolve_cluster_model, ClusterCapacity, CLUSTER_MODEL, CLUSTER_MODEL_LABEL};
+use joule_runtime::readiness_for_pool;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::convert::Infallible;
@@ -30,6 +31,7 @@ pub fn router(app: App) -> Router {
         .route("/v1/cluster/scheduler", get(scheduler))
         .route("/v1/cluster/nodes", get(nodes))
         .route("/v1/models", get(models))
+        .route("/v1/models/readiness", get(readiness))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
         .with_state(app)
@@ -63,10 +65,25 @@ async fn healthz(State(app): State<App>) -> impl IntoResponse {
     }))
 }
 
+fn enrich_capacity(mut cap: ClusterCapacity) -> ClusterCapacity {
+    if let Some(ref mut ld) = cap.logical_device {
+        if let Ok(r) = readiness_for_pool(ld.vram_mib, ld.backends) {
+            ld.model_ready = r.pool_ready;
+            ld.model_progress_pct = r.pool_progress_pct;
+            ld.inference_mode = serde_json::to_value(r.inference_mode)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| "stub_awaiting_pool".into());
+            ld.readiness_message = r.message;
+        }
+    }
+    cap
+}
+
 async fn capacity(State(app): State<App>) -> Json<ClusterCapacity> {
     let mut g = app.state.write().await;
     g.prune();
-    Json(g.cluster.capacity())
+    Json(enrich_capacity(g.cluster.capacity()))
 }
 
 async fn scheduler(State(app): State<App>) -> impl IntoResponse {
@@ -90,20 +107,38 @@ async fn nodes(State(app): State<App>) -> Json<NodesResponse> {
 
 async fn models(State(app): State<App>) -> impl IntoResponse {
     let g = app.state.read().await;
+    let cap = enrich_capacity(g.cluster.capacity());
     let online = g.cluster.pool_size() > 0;
     let data = if online {
+        let ld = cap.logical_device.as_ref();
         vec![json!({
             "id": CLUSTER_MODEL,
             "object": "model",
             "owned_by": "joule",
             "name": CLUSTER_MODEL_LABEL,
-            "description": "Single cluster model; all healthy donors serve this model.",
+            "description": "Single cluster model on one logical device (aggregate donor VRAM).",
             "pool_nodes": g.cluster.pool_size(),
+            "logical_vram_gib": ld.map(|d| d.vram_gib).unwrap_or(0),
+            "model_ready": ld.map(|d| d.model_ready).unwrap_or(false),
+            "model_progress_pct": ld.map(|d| d.model_progress_pct).unwrap_or(0),
+            "inference_mode": ld.map(|d| d.inference_mode.clone()).unwrap_or_default(),
+            "readiness_message": ld.map(|d| d.readiness_message.clone()).unwrap_or_default(),
         })]
     } else {
         vec![]
     };
     Json(json!({ "object": "list", "data": data }))
+}
+
+async fn readiness(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let cap = g.cluster.capacity();
+    let vram = cap.mem_mib_healthy;
+    let backends = cap.nodes_healthy;
+    match readiness_for_pool(vram, backends) {
+        Ok(r) => Json(json!(r)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
+    }
 }
 
 fn bearer_key(headers: &HeaderMap) -> Option<String> {

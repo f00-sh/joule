@@ -150,6 +150,22 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     info!(%challenge_id, ok, latency_ms, "challenge settled");
                 }
             }
+            Message::PrepareOk {
+                model,
+                quant,
+                armed,
+                files_complete,
+                message,
+            } => {
+                info!(
+                    %model,
+                    %quant,
+                    armed,
+                    files_complete,
+                    from = %env.from,
+                    "{message}"
+                );
+            }
             other => {
                 warn!(msg = ?other, "ignored agent→control message");
             }

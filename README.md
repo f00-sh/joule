@@ -95,7 +95,13 @@ joule chat --key joule_… --stream --prompt "stream me"
 
 **One logical device:** if five machines give 8+16+16+16+16 GiB, joule sees **one GPU with ~72 GiB VRAM** (`capacity.logical_device`). Internally that memory is sharded to place **`kimi-open`**; publicly you are talking to one supercomputer. Concurrent users share stream slots on that device.
 
-Inference is still a **stub engine** until real weights land; the pool, dashboard, routing, and contribute-to-consume path are real.
+**Kimi waits for a big enough pool.** Manifest (`models/MANIFEST.json`) requires ≥**64 GiB** aggregate VRAM and ≥**3** backends before the pool is `model_ready`. Until then (and until weights are published), inference is **stub**. Agents **arm** the weight cache when the pool crosses the gate; they do not download multi‑GB weights yet.
+
+```text
+joule ready                              # offline what-if
+joule ready --api http://127.0.0.1:7700  # live
+curl -s http://127.0.0.1:7700/v1/models/readiness
+```
 
 ## Usage
 
