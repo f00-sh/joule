@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/joule",
+    "crates/joule-proto",
+    "crates/joule-mesh",
+    "crates/joule-runtime",
+    "crates/joule-ledger",
+]
+default-members = ["crates/joule"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/f00-sh/joule"
+homepage = "https://joule.f00.sh/"
+authors = ["William Theesfeld <william@theesfeld.net>"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+joule-proto = { path = "crates/joule-proto" }
+joule-mesh = { path = "crates/joule-mesh" }
+joule-runtime = { path = "crates/joule-runtime" }
+joule-ledger = { path = "crates/joule-ledger" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+bytes = "1"

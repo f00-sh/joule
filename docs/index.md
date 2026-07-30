@@ -1,23 +1,25 @@
 # joule
 
-Decentralized mesh supercomputer: pool idle GPUs into open-weight AI inference (Kimi-class)
+**Mesh supercomputer for open-weight AI.** Idle GPUs join a peer mesh. Access is earned in millijoules — compute in, tokens out. No cash buy-in for the public pool.
 
-This page is the GitHub Pages entry for the project. Keep it in sync with
-[README.md](../README.md) and the man page(s) under [man/](../man/).
+| | |
+|---|---|
+| Status | 0.0.0 research / wip |
+| Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
+| License | MIT |
 
 ## Why this project exists
 
-Lead with purpose. State who it helps and what problem it solves.
-Use clear public narrative (NASA Stylebook + AP Style habits).
-Keep sentences short.
+Frontier models need more than one idle card. Central clouds re-centralize power. joule pools donated machines into a **mesh**: multi-node placement first, OpenAI-compatible access when the mesh is real. Donors keep control of their hardware. Freeloaders without contribution do not get keys that work.
 
 ## Requirements
 
-- Rust (document the supported toolchain and version)
+- Native agent (download a program — not browser compute)
+- GPU recommended for production inference
+- Rust 1.85+ to build from source
 
 ## Install
 
-Write install steps as procedures (Simplified Technical English).
 Every install method installs man page(s).
 
 ### Curl (releases)
@@ -26,71 +28,59 @@ Every install method installs man page(s).
 curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh
 ```
 
-### Package managers
-
-List only channels this project offers (Arch/AUR, Homebrew, RPM, deb as chosen).
-Do not list packages that do not exist.
-
 ### From source
 
 ```text
-# Add from-source steps when useful for developers.
+git clone https://github.com/f00-sh/joule.git
+cd joule
+cargo build --release -p joule
+./target/release/joule lab
 ```
 
 ## Usage
 
 ```text
-# Show the common commands a new user needs first.
+joule version
+joule lab --peers 3 --stages 2
+joule credits --account alice
 ```
 
-See also the man page for full option reference.
+See the man page for full options.
 
-## Configuration
+## Documents
 
-Document flags, environment variables, and config files.
-Provide a `.env.example` when environment variables are required.
-Never commit real secrets.
-
-## Documentation set
-
-| Surface | Location |
+| Document | Location |
 |---|---|
-| README | [README.md](../README.md) |
-| Man page(s) | [man/](../man/) |
-| This site | `docs/` (GitHub Pages) |
-| Changelog | [CHANGELOG.md](../CHANGELOG.md) |
-| Scene card | [file_id.diz](../file_id.diz) |
-| Security | [SECURITY.md](../SECURITY.md) |
+| Design (mesh-v0) | [design/mesh-v0.md](design/mesh-v0.md) |
+| Operator SOP (NASA PDF) | [sop-joule-ops.pdf](sop-joule-ops.pdf) — generated on release |
+| Release memos | [releases/](releases/) |
+| README | [../README.md](../README.md) |
+| Man page | [../man/joule.1.md](../man/joule.1.md) |
+| Changelog | [../CHANGELOG.md](../CHANGELOG.md) |
+| Scene card | [../file_id.diz](../file_id.diz) |
 
 ## Scene card
 
-Each SemVer release ships a crafted `file_id.diz` scene card (ACiD / 16colo.rs-style
-block ASCII). Keep this preview identical to the repository root file and to the
-GitHub Release asset named `file_id.diz`.
-
 ```text
 ╔══════════════════════════════════════════════════╗
-║▓▓▓▓░░░░  joule  ░░░░▓▓▓▓              ║
+║▓▓▓▓░░░░  joule  ░░░░▓▓▓▓                         ║
 ║████████████████████████████████████████████████  ║
-║  ▄█▀  SCENE CARD  ▀█▄   release identity         ║
+║  ▄█▀  MESH SUPERCOMPUTER  ▀█▄                    ║
 ║████████████████████████████████████████████████  ║
-║  v0.0.0  ·  MIT  ·  2026                     ║
-║  Decentralized mesh supercomputer: pool idle GPUs into open-weight AI inference (Kimi-class)                         ║
-║  github:f00-sh/joule          ║
+║  v0.0.0  ·  MIT  ·  2026                         ║
+║  idle GPUs → open-weight mesh · pay in compute   ║
+║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝
 ```
 
-See [file_id.diz](../file_id.diz) and [CHANGELOG.md](../CHANGELOG.md).
-
 ## Development
 
-See [CONTRIBUTING.md](../CONTRIBUTING.md).
+See [CONTRIBUTING.md](../CONTRIBUTING.md) and [AGENTS.md](../AGENTS.md).
 
-## Versioning
-
-This project uses [Semantic Versioning](https://semver.org/).
-See [CHANGELOG.md](../CHANGELOG.md).
-Every published version refreshes `file_id.diz` and attaches it to the GitHub Release.
+```text
+cargo test --workspace
+cargo run -p joule -- lab
+```
 
 ## License
 

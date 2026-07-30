@@ -1,0 +1,15 @@
+[package]
+name = "joule-proto"
+description = "Wire types and messages for the joule mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }

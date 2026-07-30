@@ -1,0 +1,64 @@
+{
+  "title": "joule operator SOP",
+  "document_id": "JOULE-SOP-OPS-001",
+  "version": "0.0.0",
+  "status": "draft",
+  "purpose": "Day-to-day operation of a joule mesh lab and future public pool gateway.",
+  "scope": "Operators running joule coordinators, donor agents, and release gates for f00-sh/joule.",
+  "audience": "joule operators and release owners",
+  "sections": [
+    {
+      "heading": "Purpose",
+      "body": "This SOP defines how operators run joule safely: mesh lab checks, contribution gates, and release documentation. Graphical flowcharts are mandatory for gate and ship flows."
+    },
+    {
+      "heading": "Day-to-day gates",
+      "body": "Before exposing any gateway: (1) cargo test green, (2) joule lab succeeds, (3) ledger mint/burn demo succeeds, (4) no freeloader path without contribution checks when API is enabled.",
+      "flowchart": {
+        "title": "Day-to-day operator gates",
+        "nodes": [
+          { "id": "start", "label": "Start ops check" },
+          { "id": "test", "label": "cargo test --workspace" },
+          { "id": "lab", "label": "joule lab" },
+          { "id": "ledger", "label": "joule credits" },
+          { "id": "gate_api", "label": "API enabled?" },
+          { "id": "contrib", "label": "Contribution gate live?" },
+          { "id": "ok", "label": "Operate" },
+          { "id": "block", "label": "Block exposure" }
+        ],
+        "edges": [
+          { "from": "start", "to": "test" },
+          { "from": "test", "to": "lab" },
+          { "from": "lab", "to": "ledger" },
+          { "from": "ledger", "to": "gate_api" },
+          { "from": "gate_api", "to": "contrib", "label": "yes" },
+          { "from": "gate_api", "to": "ok", "label": "no (lab only)" },
+          { "from": "contrib", "to": "ok", "label": "yes" },
+          { "from": "contrib", "to": "block", "label": "no" }
+        ]
+      }
+    },
+    {
+      "heading": "Release ship flow",
+      "body": "Ship only via house release workflow: tests green, CHANGELOG, file_id.diz, README/Pages/man sync, SOP PDF, release memo PDF, tag, attach assets.",
+      "flowchart": {
+        "title": "Release ship flow",
+        "nodes": [
+          { "id": "ready", "label": "Release candidate" },
+          { "id": "verify", "label": "Tests + lab" },
+          { "id": "docs", "label": "Docs pack" },
+          { "id": "tag", "label": "SemVer tag" },
+          { "id": "assets", "label": "Attach install + file_id.diz" },
+          { "id": "publish", "label": "GitHub Release" }
+        ],
+        "edges": [
+          { "from": "ready", "to": "verify" },
+          { "from": "verify", "to": "docs" },
+          { "from": "docs", "to": "tag" },
+          { "from": "tag", "to": "assets" },
+          { "from": "assets", "to": "publish" }
+        ]
+      }
+    }
+  ]
+}

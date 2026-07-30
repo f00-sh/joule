@@ -1,0 +1,17 @@
+[package]
+name = "joule-runtime"
+description = "Inference runtime abstraction for joule (stub → pure-Rust / approved backends)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+joule-proto = { workspace = true }
+thiserror = { workspace = true }
+async-trait = "0.1"
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
