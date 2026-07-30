@@ -32,6 +32,14 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) if you expected a corporate CoC —
 - Use the bug or feature issue templates.
 - Search existing issues before opening a new one.
 
+## Operator bus / distribution
+
+- f00 / joule.f00.sh is **website only** — never host weights or release binaries as a product CDN.
+- Operator orders: ed25519 signed envelopes; pin `JOULE_OPERATOR_PUBKEY` in production.
+- Ceremony: [docs/design/operator-ceremony-v0.md](docs/design/operator-ceremony-v0.md).
+- Example bodies: [docs/examples/](docs/examples/). Local demo: `scripts/demo-operator-bus.sh`.
+- Seed content: `scripts/seed-lab-tiny.sh` / `joule seed-blob`.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md). Do not file public issues for vulnerabilities.
