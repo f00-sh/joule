@@ -168,8 +168,21 @@ async fn readiness(State(app): State<App>) -> impl IntoResponse {
     let backends = cap.nodes_healthy;
     let flags = g.runtime_flags();
     let growth = g.vram_growth_mib_per_sec();
+    let operator_paused = g.operator_paused;
+    let nodes_model_loaded = g.nodes_model_loaded.len();
     match readiness_for_pool_ex(vram, backends, flags, growth) {
-        Ok(r) => Json(json!(r)).into_response(),
+        Ok(r) => {
+            let mut v = serde_json::to_value(r).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("operator_paused".into(), json!(operator_paused));
+                obj.insert("nodes_model_loaded".into(), json!(nodes_model_loaded));
+                obj.insert(
+                    "operator_pubkey_configured".into(),
+                    json!(crate::broadcast::operator_pubkey_hex().is_some()),
+                );
+            }
+            Json(v).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))).into_response(),
     }
 }
