@@ -158,9 +158,7 @@ Public (in git + site):
 ## 7. Day-to-day operator flow
 
 ```text
-# Sign a notice (protocol key)
-export JOULE_OPERATOR_PUBKEY=$(grep -v '^#' docs/operator-keys/protocol.ed25519.pub | head -1)
-# (clients ignore env for verify; you need the secret file for sign)
+# Sign a notice with the official protocol secret (clients verify the embed — no env pin)
 joule broadcast sign --kind notice --body docs/examples/notice.json \
   --secret ~/.config/f00/joule/protocol.ed25519.sec --out /tmp/n.env.json
 joule broadcast inject --envelope /tmp/n.env.json

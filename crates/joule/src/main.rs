@@ -463,7 +463,13 @@ fn broadcast_keygen(secret: PathBuf, public: PathBuf) -> Result<()> {
     std::fs::write(&secret, format!("{sec_hex}\n"))?;
     std::fs::write(
         &public,
-        format!("# joule operator ed25519 public key — pin in JOULE_OPERATOR_PUBKEY\n{pub_hex}\n"),
+        format!(
+            "# joule operator ed25519 public key (LAB / unofficial only)\n\
+             # Stock builds verify the embedded official pin — this key is ignored unless:\n\
+             #   JOULE_ALLOW_UNOFFICIAL_OPERATOR=1\n\
+             #   JOULE_OPERATOR_PUBKEY={pub_hex}\n\
+             {pub_hex}\n"
+        ),
     )?;
     #[cfg(unix)]
     {
@@ -472,7 +478,12 @@ fn broadcast_keygen(secret: PathBuf, public: PathBuf) -> Result<()> {
     }
     println!("wrote secret {}", secret.display());
     println!("wrote public {}", public.display());
-    println!("export JOULE_OPERATOR_PUBKEY={pub_hex}");
+    println!("LAB ONLY (forks / local experiments — not production):");
+    println!("  export JOULE_ALLOW_UNOFFICIAL_OPERATOR=1");
+    println!("  export JOULE_OPERATOR_PUBKEY={pub_hex}");
+    println!(
+        "Official network: use embedded pin + ~/.config/f00/joule/protocol.ed25519.sec to sign"
+    );
     println!("(never commit the secret file)");
     Ok(())
 }

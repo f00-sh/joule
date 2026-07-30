@@ -217,7 +217,8 @@ cd joule && cargo build --release -p joule
 
 # terminal 1 — public control (auto-announces to joule.f00.sh directory)
 export JOULE_PUBLIC_URL=https://your.public.host   # HTTPS base of this control
-# export JOULE_OPERATOR_PUBKEY=…   # pin operator key in production
+# stock binary verifies the embedded official protocol key (no env pin needed)
+# lab only: JOULE_ALLOW_UNOFFICIAL_OPERATOR=1 JOULE_OPERATOR_PUBKEY=…
 ./target/release/joule control
 # signed feed → $JOULE_PUBLIC_URL/v1/public/snapshot
 
