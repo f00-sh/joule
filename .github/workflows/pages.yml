@@ -44,7 +44,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy docs --project-name=f00-joule --branch=main --commit-dirty=true
 
-      - name: Attach joule.f00.sh + DNS CNAME
+      - name: Attach joule.f00.sh custom domain
         env:
           CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -53,7 +53,6 @@ jobs:
           PROJECT: f00-joule
         run: |
           set -euo pipefail
-          # Pages custom domain (idempotent-ish)
           code=$(curl -sS -o /tmp/pages-domain.json -w '%{http_code}' -X POST \
             "https://api.cloudflare.com/client/v4/accounts/${CF_ACCOUNT_ID}/pages/projects/${PROJECT}/domains" \
             -H "Authorization: Bearer ${CF_API_TOKEN}" \
@@ -61,26 +60,27 @@ jobs:
             --data "{\"name\":\"${DOMAIN}\"}")
           echo "pages domain HTTP ${code}"
           cat /tmp/pages-domain.json
-          # Accept 200/created or already exists
           python3 - <<'PY'
-          import json
+          import json, sys
           r=json.load(open("/tmp/pages-domain.json"))
           if r.get("success"):
-              print("domain ok", r.get("result",{}).get("name"))
-          else:
-              errs=str(r.get("errors"))
-              if "already" in errs.lower() or "exists" in errs.lower() or "8000014" in errs:
-                  print("domain already attached")
-              else:
-                  # 400 with specific code still may mean attached — log and continue for DNS
-                  print("domain attach note:", errs)
+              print("domain ok", r.get("result",{}).get("name"), r.get("result",{}).get("status"))
+              sys.exit(0)
+          errs=str(r.get("errors"))
+          # already exists / conflict codes are fine
+          if any(x in errs.lower() for x in ("already", "exist", "8000007", "8000014")):
+              print("domain already attached")
+              sys.exit(0)
+          print("domain attach failed:", errs)
+          sys.exit(1)
           PY
-          # Upsert CNAME joule -> f00-joule.pages.dev (proxied)
+          # Best-effort DNS CNAME (token may lack Zone DNS Write — Pages often self-manages)
+          set +e
           list=$(curl -sS "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records?type=CNAME&name=${DOMAIN}" \
             -H "Authorization: Bearer ${CF_API_TOKEN}")
-          rid=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["result"][0]["id"] if d.get("result") else "")' "$list")
+          rid=$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["result"][0]["id"] if d.get("success") and d.get("result") else "")' "$list" 2>/dev/null)
           body='{"type":"CNAME","name":"joule","content":"f00-joule.pages.dev","ttl":1,"proxied":true}'
-          if [ -n "$rid" ]; then
+          if [ -n "${rid:-}" ]; then
             curl -sS -X PUT "https://api.cloudflare.com/client/v4/zones/${ZONE_ID}/dns_records/${rid}" \
               -H "Authorization: Bearer ${CF_API_TOKEN}" \
               -H "Content-Type: application/json" \
@@ -91,4 +91,15 @@ jobs:
               -H "Content-Type: application/json" \
               --data "$body" | tee /tmp/dns.json
           fi
-          python3 -c 'import json; r=json.load(open("/tmp/dns.json")); assert r.get("success"), r; print("dns", r["result"]["name"], "->", r["result"]["content"])'
+          python3 - <<'PY'
+          import json
+          try:
+              r=json.load(open("/tmp/dns.json"))
+          except Exception as e:
+              print("dns skip: no response", e)
+              raise SystemExit(0)
+          if r.get("success"):
+              print("dns", r["result"]["name"], "->", r["result"]["content"])
+          else:
+              print("dns best-effort skipped:", r.get("errors"))
+          PY
