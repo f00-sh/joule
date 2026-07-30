@@ -351,6 +351,29 @@ pub enum Message {
         /// How many content digests this node seeds.
         #[serde(default)]
         blob_count: u32,
+        /// Advertised / verified memory (MiB) for mesh PlanOffer (Phase D).
+        #[serde(default)]
+        mem_mib: u32,
+        /// Throughput class hint (same units as NodeCaps).
+        #[serde(default)]
+        throughput_class: u16,
+    },
+    /// Any peer → mesh: request inference on the logical device (Phase D).
+    /// Coordinator answers with PlanOffer; shards answer PlanAccept; then InferRequest.
+    RequestInfer {
+        request_id: Uuid,
+        account: String,
+        model: String,
+        prompt: String,
+        max_tokens: u32,
+    },
+    /// Shard peer → coordinator: accept or reject a PlanOffer for a request.
+    PlanAccept {
+        plan_id: Uuid,
+        request_id: Uuid,
+        accepted: bool,
+        #[serde(default)]
+        reason: String,
     },
     /// Agent → control / peer: content-addressed blobs this node can seed.
     /// f00 does **not** host these; peers do. See docs/design/distribution-v0.md.

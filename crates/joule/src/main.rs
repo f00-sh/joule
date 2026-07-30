@@ -759,15 +759,12 @@ async fn run_agent(
     let device = parse_device(&device)?;
     let node_id = NodeId::new();
     let _ = model; // single-model cluster; agents always donate to CLUSTER_MODEL
-    let caps = NodeCaps::for_cluster(
-        device,
-        mem_mib,
-        match device {
-            DeviceClass::Gpu => 40,
-            DeviceClass::Metal => 30,
-            DeviceClass::Cpu => 5,
-        },
-    );
+    let throughput_class = match device {
+        DeviceClass::Gpu => 40,
+        DeviceClass::Metal => 30,
+        DeviceClass::Cpu => 5,
+    };
+    let caps = NodeCaps::for_cluster(device, mem_mib, throughput_class);
 
     // Peer listen for direct mesh dial (decentral Phase A/C).
     let local_mesh: peer_net::SharedMesh =
@@ -866,6 +863,8 @@ async fn run_agent(
                             load: 0.1,
                             healthy: true,
                             blob_count,
+                            mem_mib,
+                            throughput_class,
                         },
                     );
                     let _ = writer.write_all(&encode_line(&alive)?).await;
@@ -897,6 +896,8 @@ async fn run_agent(
                                     load: 0.1,
                                     healthy: true,
                                     blob_count,
+                                    mem_mib,
+                                    throughput_class,
                                 },
                             );
                             writer.write_all(&encode_line(&alive)?).await?;
@@ -913,6 +914,8 @@ async fn run_agent(
                         load,
                         healthy,
                         blob_count,
+                        mem_mib: peer_mem,
+                        throughput_class: peer_tp,
                     } => {
                         if healthy {
                             mesh_seen.insert(env.from.clone());
@@ -927,6 +930,8 @@ async fn run_agent(
                                 load,
                                 healthy,
                                 blob_count,
+                                peer_mem,
+                                peer_tp,
                             );
                         }
                         // Re-announce ourselves to new peers (P2P mesh fill).
@@ -943,6 +948,91 @@ async fn run_agent(
                             blob_count,
                             mesh_peers = mesh_seen.len(),
                             "mesh PeerAlive (gossip)"
+                        );
+                    }
+                    Message::RequestInfer {
+                        request_id,
+                        account: req_account,
+                        model: req_model,
+                        prompt: _,
+                        max_tokens: _,
+                    } => {
+                        // Phase D: first healthy peer that can build a plan answers with PlanOffer.
+                        let donors = {
+                            let g = local_mesh.lock().await;
+                            let mut d = g.plan_donors();
+                            // Include self.
+                            d.push((node_id.clone(), mem_mib));
+                            d
+                        };
+                        match joule_cluster::plan_from_mesh_donors(&donors) {
+                            Ok(plan) => {
+                                info!(
+                                    %request_id,
+                                    %req_account,
+                                    %req_model,
+                                    shards = plan.shards.len(),
+                                    "mesh RequestInfer → PlanOffer"
+                                );
+                                let offer = Envelope::new(
+                                    node_id.clone(),
+                                    Message::PlanOffer { plan: plan.clone() },
+                                );
+                                writer.write_all(&encode_line(&offer)?).await?;
+                                // Self-accept as shard if we are in the plan.
+                                if plan.shards.iter().any(|s| s.node == node_id) {
+                                    let acc = Envelope::new(
+                                        node_id.clone(),
+                                        Message::PlanAccept {
+                                            plan_id: plan.plan_id,
+                                            request_id,
+                                            accepted: true,
+                                            reason: "local mesh coordinator".into(),
+                                        },
+                                    );
+                                    writer.write_all(&encode_line(&acc)?).await?;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "mesh PlanOffer failed");
+                            }
+                        }
+                    }
+                    Message::PlanOffer { plan } => {
+                        info!(
+                            plan_id = %plan.plan_id,
+                            shards = plan.shards.len(),
+                            pool_mem = plan.pool_mem_mib,
+                            "received PlanOffer"
+                        );
+                        let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                        let acc = Envelope::new(
+                            node_id.clone(),
+                            Message::PlanAccept {
+                                plan_id: plan.plan_id,
+                                request_id: plan.plan_id, // plan_id doubles until RequestInfer correlation lands
+                                accepted,
+                                reason: if accepted {
+                                    "shard assigned".into()
+                                } else {
+                                    "not in plan".into()
+                                },
+                            },
+                        );
+                        writer.write_all(&encode_line(&acc)?).await?;
+                    }
+                    Message::PlanAccept {
+                        plan_id,
+                        request_id,
+                        accepted,
+                        reason,
+                    } => {
+                        tracing::debug!(
+                            %plan_id,
+                            %request_id,
+                            accepted,
+                            %reason,
+                            "PlanAccept"
                         );
                     }
                     Message::BlobLocate {
@@ -964,7 +1054,7 @@ async fn run_agent(
                                 let addrs = locate_addrs.get(i).cloned().unwrap_or_default();
                                 let size = sizes.get(i).copied().unwrap_or(0);
                                 if !addrs.is_empty() {
-                                    g.apply_peer_alive(peer, addrs.clone(), 0.0, true, 0);
+                                    g.apply_peer_alive(peer, addrs.clone(), 0.0, true, 0, 0, 0);
                                 }
                                 g.dht.put_blob_seeder(
                                     &sha256,

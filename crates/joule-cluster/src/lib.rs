@@ -431,6 +431,77 @@ impl Cluster {
     }
 }
 
+/// Build a VRAM-sharded [`ClusterPlan`] from gossip membership (Phase D mesh coordinator).
+///
+/// `donors` is `(node, mem_mib)` for healthy peers; memory is treated as verified for plan
+/// geometry (callers should only pass trusted/challenge-backed values when available).
+pub fn plan_from_mesh_donors(donors: &[(NodeId, u32)]) -> Result<ClusterPlan, ClusterError> {
+    use joule_proto::{ShardAssignment, ShardRole};
+    use uuid::Uuid;
+
+    if donors.is_empty() {
+        return Err(ClusterError::NoEligibleNodes(CLUSTER_MODEL.to_string()));
+    }
+    let mut donors: Vec<(NodeId, u32)> = donors
+        .iter()
+        .map(|(id, m)| (id.clone(), (*m).max(256)))
+        .collect();
+    donors.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0 .0.cmp(&b.0 .0)));
+
+    let pool_mem: u64 = donors.iter().map(|(_, m)| u64::from(*m)).sum();
+    if pool_mem == 0 {
+        return Err(ClusterError::NoEligibleNodes(CLUSTER_MODEL.to_string()));
+    }
+
+    let layers = scheduler::DEFAULT_MODEL_LAYERS;
+    let mut shards = Vec::with_capacity(donors.len());
+    let mut layer_cursor = 0u32;
+    let mut ppm_acc = 0u32;
+
+    for (i, (id, eff)) in donors.iter().enumerate() {
+        let mem = u64::from(*eff);
+        let mut ppm = ((mem * 1_000_000) / pool_mem) as u32;
+        let is_last = i + 1 == donors.len();
+        if is_last {
+            ppm = 1_000_000u32.saturating_sub(ppm_acc);
+        } else {
+            ppm_acc = ppm_acc.saturating_add(ppm);
+        }
+        let layer_start = layer_cursor.min(layers.saturating_sub(1));
+        let layer_end = if is_last {
+            layers.saturating_sub(1)
+        } else {
+            let span = ((u64::from(layers) * mem) / pool_mem).max(1) as u32;
+            let end = layer_start.saturating_add(span).saturating_sub(1);
+            end.min(layers.saturating_sub(1))
+        };
+        let layer_end = layer_end.max(layer_start);
+        layer_cursor = layer_end.saturating_add(1).min(layers);
+        shards.push(ShardAssignment {
+            node: id.clone(),
+            role: if donors.len() == 1 {
+                ShardRole::Replica
+            } else {
+                ShardRole::Pipeline
+            },
+            layer_start: Some(layer_start),
+            layer_end: Some(layer_end),
+            tp_rank: None,
+            tp_world: None,
+            mem_share_mib: *eff,
+            mem_fraction_ppm: ppm,
+        });
+    }
+
+    Ok(ClusterPlan {
+        plan_id: Uuid::new_v4(),
+        model: CLUSTER_MODEL.to_string(),
+        shards,
+        pool_mem_mib: pool_mem,
+        model_layers: layers,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +509,17 @@ mod tests {
 
     fn node(mem: u32, device: DeviceClass) -> (NodeId, NodeCaps) {
         (NodeId::new(), NodeCaps::for_cluster(device, mem, 10))
+    }
+
+    #[test]
+    fn plan_from_mesh_donors_shards_all() {
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let plan = plan_from_mesh_donors(&[(a.clone(), 8192), (b.clone(), 16384)]).unwrap();
+        assert_eq!(plan.shards.len(), 2);
+        assert_eq!(plan.pool_mem_mib, 8192 + 16384);
+        assert!(plan.shards.iter().any(|s| s.node == a));
+        assert!(plan.shards.iter().any(|s| s.node == b));
     }
 
     #[test]

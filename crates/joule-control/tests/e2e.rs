@@ -523,6 +523,8 @@ async fn mesh_peer_alive_and_blob_locate_multiaddrs() {
                     load: 0.05,
                     healthy: true,
                     blob_count: 1,
+                    mem_mib: 0,
+                    throughput_class: 0,
                 },
             ))
             .unwrap(),
@@ -592,6 +594,8 @@ async fn mesh_peer_alive_and_blob_locate_multiaddrs() {
                     load: 0.05,
                     healthy: true,
                     blob_count: 1,
+                    mem_mib: 0,
+                    throughput_class: 0,
                 },
             ))
             .unwrap(),

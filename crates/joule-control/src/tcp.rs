@@ -145,6 +145,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 load,
                 healthy,
                 blob_count,
+                mem_mib,
+                throughput_class,
             } => {
                 let id = env.from.clone();
                 {
@@ -155,6 +157,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                         load,
                         healthy,
                         blob_count,
+                        mem_mib,
+                        throughput_class,
                     );
                     // Phase C: mirror into DHT peer/<id> (seq = wall ms for LWW).
                     let seq = std::time::SystemTime::now()
@@ -178,6 +182,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     load,
                     healthy,
                     blob_count,
+                    mem_mib,
+                    throughput_class,
                 };
                 for (node, peer_tx) in routes.iter() {
                     if node != &id {

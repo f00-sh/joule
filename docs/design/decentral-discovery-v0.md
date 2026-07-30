@@ -227,14 +227,14 @@ website may **mirror signed** bootstrap/stats; never required as payload or as t
 | **A** | **Landed** | Agent `--peer-listen` (default `127.0.0.1:0`); `PeerAlive` gossip via control flood hub; `GET /v1/mesh/peers`; status `mesh_peers` |
 | **B** | **Landed** | `BlobMeta.multiaddrs`; `BlobLocate.multiaddrs`; agent prefers direct `peer_net` BlobWant/BlobChunk; control relay remains fallback |
 | **C** | **In progress** | `joule-dht` crate; control + **agent LocalMesh** DHT; peer port accepts PeerAlive/BlobsHave; bootstrap.json dial announce; FetchDigests prefers local mesh before control BlobWant; HTTP `/v1/dht/*`, `/v1/bootstrap` |
-| **D** | Not yet | PlanOffer / RequestInfer without permanent control |
+| **D** | **Started** | `RequestInfer` / `PlanAccept` messages; PeerAlive carries `mem_mib`; `plan_from_mesh_donors`; agent answers RequestInfer with PlanOffer; `GET /v1/mesh/plan` |
 | **E** | Not yet | Erasure, QUIC, full NAT traversal |
 
 ### Remaining for production mesh
 
 1. Full DHT k-bucket routing + multi-hop get/put (beyond local view + control mirror).  
-2. Optional pure mesh mode: no control TCP required for chat once PlanOffer lands.  
-3. PlanOffer path without control (Phase D).  
+2. Wire chat HTTP → RequestInfer → multi-peer InferRequest without control dispatch.  
+3. Coordinator election + timeout re-plan when coordinator dies.  
 4. QUIC + NAT (Phase E).
 
 **Honesty:** lab still uses control as rendezvous; production target remains full mesh.

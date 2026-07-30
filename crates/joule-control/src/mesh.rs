@@ -15,6 +15,10 @@ pub struct MeshPeer {
     pub load: f32,
     pub healthy: bool,
     pub blob_count: u32,
+    #[serde(default)]
+    pub mem_mib: u32,
+    #[serde(default)]
+    pub throughput_class: u16,
     #[serde(skip)]
     pub last_seen: Instant,
 }
@@ -29,6 +33,7 @@ impl MeshDirectory {
         Self::default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert(
         &mut self,
         node: NodeId,
@@ -36,6 +41,8 @@ impl MeshDirectory {
         load: f32,
         healthy: bool,
         blob_count: u32,
+        mem_mib: u32,
+        throughput_class: u16,
     ) {
         self.peers.insert(
             node.clone(),
@@ -45,9 +52,23 @@ impl MeshDirectory {
                 load,
                 healthy,
                 blob_count,
+                mem_mib,
+                throughput_class,
                 last_seen: Instant::now(),
             },
         );
+    }
+
+    /// (node, mem_mib) for healthy peers with known memory — Phase D PlanOffer input.
+    pub fn plan_donors(&self) -> Vec<(NodeId, u32)> {
+        let mut v: Vec<_> = self
+            .peers
+            .values()
+            .filter(|p| p.healthy && p.mem_mib > 0)
+            .map(|p| (p.node.clone(), p.mem_mib))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
+        v
     }
 
     pub fn remove(&mut self, node: &NodeId) {
@@ -107,9 +128,12 @@ mod tests {
             0.1,
             true,
             3,
+            8192,
+            40,
         );
         assert_eq!(m.healthy_count(), 1);
         assert_eq!(m.multiaddrs_for(&id), vec!["tcp://127.0.0.1:7702".to_string()]);
+        assert_eq!(m.plan_donors().len(), 1);
         m.remove(&id);
         assert_eq!(m.healthy_count(), 0);
     }

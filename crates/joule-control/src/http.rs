@@ -50,6 +50,7 @@ pub fn router(app: App) -> Router {
         .route("/v1/operator/pins", get(operator_pins))
         .route("/v1/operator/audit", get(operator_key_audit))
         .route("/v1/mesh/peers", get(mesh_peers))
+        .route("/v1/mesh/plan", get(mesh_plan))
         .route("/v1/dht/keys", get(dht_keys))
         .route("/v1/dht/get/{*key}", get(dht_get))
         .route("/v1/bootstrap", get(bootstrap_info))
@@ -106,8 +107,37 @@ async fn mesh_peers(State(app): State<App>) -> impl IntoResponse {
             "load": p.load,
             "healthy": p.healthy,
             "blob_count": p.blob_count,
+            "mem_mib": p.mem_mib,
+            "throughput_class": p.throughput_class,
         })).collect::<Vec<_>>(),
     }))
+}
+
+/// Phase D: PlanOffer geometry from mesh PeerAlive mem (not only cluster registry).
+async fn mesh_plan(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let donors = g.mesh.plan_donors();
+    // Fall back to cluster verified registry when mesh has no mem yet.
+    let plan = if !donors.is_empty() {
+        joule_cluster::plan_from_mesh_donors(&donors)
+    } else {
+        g.cluster.plan_full_pool()
+    };
+    match plan {
+        Ok(p) => Json(json!({
+            "ok": true,
+            "law": "decentral Phase D PlanOffer from mesh membership (docs/design/decentral-discovery-v0.md)",
+            "source": if donors.is_empty() { "cluster_registry" } else { "mesh_peer_alive" },
+            "donors": donors.len(),
+            "plan": p,
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 async fn dht_keys(State(app): State<App>) -> impl IntoResponse {

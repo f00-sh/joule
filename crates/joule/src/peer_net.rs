@@ -19,12 +19,33 @@ use tracing::{info, warn};
 
 const CHUNK: usize = 64 * 1024;
 
+/// Capacity + dial info for one mesh neighbor (Phase C/D).
+#[derive(Debug, Clone, Default)]
+pub struct MeshNeighbor {
+    pub multiaddrs: Vec<String>,
+    pub mem_mib: u32,
+    pub throughput_class: u16,
+    pub healthy: bool,
+    pub load: f32,
+    pub blob_count: u32,
+}
+
+impl MeshNeighbor {
+    /// Compact status line for logs / debug.
+    pub fn summary(&self) -> String {
+        format!(
+            "mem={} load={:.2} thr={} blobs={} healthy={}",
+            self.mem_mib, self.load, self.throughput_class, self.blob_count, self.healthy
+        )
+    }
+}
+
 /// Local mesh + DHT view (Phase C) — filled by control gossip and direct peer messages.
 #[derive(Debug, Default)]
 pub struct LocalMesh {
     pub dht: DhtStore,
-    /// node_id → multiaddrs
-    pub multiaddrs: HashMap<String, Vec<String>>,
+    /// node_id → neighbor presence
+    pub neighbors: HashMap<NodeId, MeshNeighbor>,
 }
 
 impl LocalMesh {
@@ -32,6 +53,7 @@ impl LocalMesh {
         Self::default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_peer_alive(
         &mut self,
         from: &NodeId,
@@ -39,17 +61,26 @@ impl LocalMesh {
         load: f32,
         healthy: bool,
         blob_count: u32,
+        mem_mib: u32,
+        throughput_class: u16,
     ) {
-        let id = from.to_string();
-        if !multiaddrs.is_empty() {
-            self.multiaddrs.insert(id.clone(), multiaddrs.clone());
-        }
+        self.neighbors.insert(
+            from.clone(),
+            MeshNeighbor {
+                multiaddrs: multiaddrs.clone(),
+                mem_mib,
+                throughput_class,
+                healthy,
+                load,
+                blob_count,
+            },
+        );
         let seq = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         self.dht.put_peer(PeerRecord {
-            node_id: id,
+            node_id: from.to_string(),
             multiaddrs,
             load_milli: (load * 1000.0) as u32,
             healthy,
@@ -64,8 +95,8 @@ impl LocalMesh {
         for b in blobs {
             let mut addrs = b.multiaddrs.clone();
             if addrs.is_empty() {
-                if let Some(m) = self.multiaddrs.get(&id) {
-                    addrs = m.clone();
+                if let Some(n) = self.neighbors.get(from) {
+                    addrs = n.multiaddrs.clone();
                 }
             }
             self.dht
@@ -89,7 +120,19 @@ impl LocalMesh {
     }
 
     pub fn peer_count(&self) -> u32 {
-        self.multiaddrs.len() as u32
+        self.neighbors.len() as u32
+    }
+
+    /// Healthy donors with VRAM for mesh PlanOffer (Phase D).
+    pub fn plan_donors(&self) -> Vec<(NodeId, u32)> {
+        let mut v: Vec<_> = self
+            .neighbors
+            .iter()
+            .filter(|(_, n)| n.healthy && n.mem_mib > 0)
+            .map(|(id, n)| (id.clone(), n.mem_mib))
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
+        v
     }
 }
 
@@ -197,10 +240,25 @@ async fn handle_peer_session(
                 load,
                 healthy,
                 blob_count,
+                mem_mib,
+                throughput_class,
             } => {
                 let mut g = mesh.lock().await;
-                g.apply_peer_alive(&env.from, multiaddrs, load, healthy, blob_count);
-                info!(from = %env.from, peers = g.peer_count(), "peer PeerAlive → local DHT");
+                g.apply_peer_alive(
+                    &env.from,
+                    multiaddrs,
+                    load,
+                    healthy,
+                    blob_count,
+                    mem_mib,
+                    throughput_class,
+                );
+                let detail = g
+                    .neighbors
+                    .get(&env.from)
+                    .map(|n| n.summary())
+                    .unwrap_or_default();
+                info!(from = %env.from, peers = g.peer_count(), %detail, "peer PeerAlive → local DHT");
             }
             Message::BlobsHave { blobs } => {
                 let mut g = mesh.lock().await;
@@ -329,6 +387,8 @@ async fn announce_one(
             load: 0.1,
             healthy: true,
             blob_count,
+            mem_mib: 0,
+            throughput_class: 0,
         },
     );
     writer.write_all(&encode_line(&alive)?).await?;
@@ -401,6 +461,8 @@ mod tests {
             0.1,
             true,
             1,
+            8192,
+            40,
         );
         let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         m.apply_blobs_have(
@@ -417,6 +479,7 @@ mod tests {
         assert_eq!(addrs, vec!["tcp://127.0.0.1:9".to_string()]);
         assert_eq!(m.peer_count(), 1);
         assert!(m.dht.len() >= 2);
+        assert_eq!(m.plan_donors().len(), 1);
     }
 
     /// Phase B: seeder peer listen → leech direct BlobWant (no control relay).
