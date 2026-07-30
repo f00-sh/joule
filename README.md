@@ -2,7 +2,7 @@
 
 **Distributed supercomputer cluster** — pool idle GPUs across the internet into open-weight AI inference (Kimi-class).
 
-Donors run a native agent. Nodes join one shared cluster no matter how they reach the net. Placement can span many machines. Access to the OpenAI-compatible API is earned only by contributing compute. Credits are **millijoules**. The **dashboard always shows live pool capacity**.
+Donors run a native agent. Nodes join one shared cluster no matter how they reach the net. Placement can span many machines. Access to the OpenAI-compatible API is earned only by contributing compute — **free on the public pool (no cash)**. Credits are **millijoules** under an auditable fairness algorithm (√VRAM, tenure boost, leecher penalties). The **dashboard always shows live pool capacity**.
 
 | | |
 |---|---|
@@ -10,7 +10,7 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
-| Design | [docs/design/cluster-v0.md](docs/design/cluster-v0.md) |
+| Design | [docs/design/cluster-v0.md](docs/design/cluster-v0.md) · [economy-v0](docs/design/economy-v0.md) |
 
 ## Why
 
@@ -20,12 +20,15 @@ Central API clouds concentrate power and cost. Consumer GPUs sit idle. joule tur
 
 1. Install the **native agent** (`joule agent`) on a machine with a GPU (CPU works for lab only).
 2. Agent joins the **distributed cluster**, advertises VRAM/model class, accepts shard or replica plans.
-3. Account **mints millijoules** from verified contribution.
+3. Account **mints millijoules** from verified contribution (heartbeats, shards, challenges), scaled fairly:
+   - **√VRAM** so small cards are not frozen out
+   - **tenure boost** for continuous healthy time (up to 1.5×)
+   - **leecher penalty** if you consume ≫ contribute (down to 0.25× earn / up to 4× pay)
 4. Point any OpenAI-compatible client at the gateway with your API key.
 5. Usage **burns millijoules**. No live contribution / balance ⇒ no access.
 6. **Dashboard** shows live aggregate compute (healthy nodes, VRAM, throughput class, models online).
 
-The website is for keys, stats, capacity, and installers — **not** for browser-side pool compute.
+The website ([joule.f00.sh](https://joule.f00.sh/)) is a teaser + capacity strip + docs — **not** browser-side pool compute. Full economy: [docs/design/economy-v0.md](docs/design/economy-v0.md).
 
 ## Requirements
 
@@ -136,7 +139,7 @@ See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 an
 | Surface | Location |
 |---|---|
 | This README | [README.md](README.md) |
-| Design | [docs/design/cluster-v0.md](docs/design/cluster-v0.md) |
+| Design | [docs/design/cluster-v0.md](docs/design/cluster-v0.md) · [economy-v0](docs/design/economy-v0.md) |
 | Man page | [man/joule.1.md](man/joule.1.md) |
 | GitHub Pages | [docs/](docs/) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |

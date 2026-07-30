@@ -32,3 +32,10 @@ jobs:
 
       - name: build
         run: cargo build --workspace --release
+
+      - name: economy + site sanity
+        run: |
+          test -f docs/design/economy-v0.md
+          test -f docs/index.html
+          grep -q 'eco=v0' crates/joule-ledger/src/economy.rs
+          grep -q 'leecher' docs/design/economy-v0.md

@@ -1,8 +1,10 @@
 # joule
 
-**Open supercomputer.** One logical GPU (sum of donor VRAM). One model (`kimi-open`). Contribute compute → use the AI.
+**Open supercomputer — free, paid in compute.** One logical GPU (sum of donor VRAM). One model (`kimi-open`). Contribute → use the AI. No cash on the public pool.
 
-**Live site UI:** open [`index.html`](index.html) (milestones, countdown, aggregate compute). Point it at control with `?api=http://127.0.0.1:7700`.
+**Live site:** [joule.f00.sh](https://joule.f00.sh/) ([`index.html`](index.html) teaser + milestones). Point at control with `?api=http://127.0.0.1:7700`.
+
+**Economy:** [design/economy-v0.md](design/economy-v0.md) — millijoules, √VRAM fairness, tenure boost, leecher penalties (`eco=v0`).
 
 | | |
 |---|---|
@@ -58,6 +60,7 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 | Document | Location |
 |---|---|
 | Design (cluster-v0) | [design/cluster-v0.md](design/cluster-v0.md) |
+| Economy (millijoules v0) | [design/economy-v0.md](design/economy-v0.md) |
 | Operator SOP (NASA PDF) | [sop-joule-ops.pdf](sop-joule-ops.pdf) — generated on release |
 | Release memos | [releases/](releases/) |
 | README | [../README.md](../README.md) |

@@ -2,6 +2,15 @@
 //!
 //! Product law: API access requires recent contribution and non-negative spendable balance
 //! (or an active-donor window — see design doc). Mint from verified cluster work; burn on usage.
+//!
+//! Fair scoring lives in [`economy`] — tenure boosts, √VRAM dampening, leecher penalties.
+
+pub mod economy;
+
+pub use economy::{
+    estimate_contribution_millijoules, estimate_usage_millijoules, leecher_factors_bp, score_burn,
+    score_mint, BurnBreakdown, EconomyEvent, FairnessSnapshot, MintBreakdown, ECONOMY_VERSION,
+};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -107,21 +116,6 @@ impl Ledger {
     pub fn restore_balances(&mut self, balances: HashMap<String, Millijoule>) {
         self.balances = balances;
     }
-}
-
-/// Rough default pricing: completion tokens cost more than prompt tokens.
-pub fn estimate_usage_millijoules(prompt_tokens: u32, completion_tokens: u32) -> Millijoule {
-    let prompt = i64::from(prompt_tokens);
-    let completion = i64::from(completion_tokens).saturating_mul(4);
-    prompt.saturating_add(completion)
-}
-
-/// Rough mint: reward effective completion work from a node (placeholder weights).
-pub fn estimate_contribution_millijoules(
-    completion_tokens: u32,
-    device_multiplier: u32,
-) -> Millijoule {
-    i64::from(completion_tokens) * i64::from(device_multiplier.max(1)) * 2
 }
 
 #[cfg(test)]

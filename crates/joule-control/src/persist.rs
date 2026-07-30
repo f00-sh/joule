@@ -1,20 +1,30 @@
-//! Disk persistence for accounts, API keys, and millijoule balances.
+//! Disk persistence for accounts, API keys, millijoule balances, and economy windows.
 
-use crate::state::ControlState;
+use crate::state::{AccountEconomy, ControlState};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EconomySnap {
+    pub contributed_mj_window: i64,
+    pub consumed_mj_window: i64,
+    pub continuous_online_secs: u64,
+    pub best_mem_mib: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Snapshot {
     pub version: u32,
     pub account_keys: HashMap<String, String>,
     pub balances: HashMap<String, i64>,
+    #[serde(default)]
+    pub economy: HashMap<String, EconomySnap>,
 }
 
 impl Snapshot {
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -46,10 +56,29 @@ pub fn load(dir: &Path) -> Result<Option<Snapshot>> {
 
 pub fn save(dir: &Path, state: &ControlState) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("mkdir {}", dir.display()))?;
+    let mut economy = HashMap::new();
+    for (acct, eco) in &state.account_economy {
+        let continuous = match eco.online_since {
+            Some(since) => eco
+                .continuous_online_secs
+                .saturating_add(since.elapsed().as_secs()),
+            None => eco.continuous_online_secs,
+        };
+        economy.insert(
+            acct.clone(),
+            EconomySnap {
+                contributed_mj_window: eco.contributed_mj_window,
+                consumed_mj_window: eco.consumed_mj_window,
+                continuous_online_secs: continuous,
+                best_mem_mib: eco.best_mem_mib,
+            },
+        );
+    }
     let snap = Snapshot {
         version: Snapshot::VERSION,
         account_keys: state.account_keys.clone(),
         balances: state.ledger.balances().clone(),
+        economy,
     };
     let path = snapshot_path(dir);
     let tmp = path.with_extension("json.tmp");
@@ -66,4 +95,17 @@ pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
         state.keys.insert(key.clone(), account.clone());
     }
     state.ledger.restore_balances(snap.balances);
+    state.account_economy.clear();
+    for (acct, e) in snap.economy {
+        state.account_economy.insert(
+            acct,
+            AccountEconomy {
+                contributed_mj_window: e.contributed_mj_window,
+                consumed_mj_window: e.consumed_mj_window,
+                online_since: None,
+                continuous_online_secs: e.continuous_online_secs,
+                best_mem_mib: e.best_mem_mib,
+            },
+        );
+    }
 }

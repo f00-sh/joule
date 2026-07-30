@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Fair millijoule economy v0** (`docs/design/economy-v0.md`, `joule-ledger::economy`): √VRAM mint, tenure boost, leecher penalties; auditable `eco=v0` ledger reasons
+- **Teaser site** on Cloudflare Pages (`docs/index.html` → joule.f00.sh): free/compute pitch, economy explain, pool milestones strip
+- **CI:** GitHub Actions Pages deploy (`pages.yml`) + economy/site sanity in `ci.yml`
+- Account fairness windows persisted (snapshot v2); `/v1/account` exposes leecher + tenure fields
+
 ### Changed
 
 - **Logical device view:** pool = one virtual GPU (`logical_device.vram_mib` = sum of donors)

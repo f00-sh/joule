@@ -17,7 +17,7 @@
 
 1. Compute is the only currency (public pool).
 2. No active contribution ⇒ no API access.
-3. Credits = verified useful work in **millijoules**, not idle theater.
+3. Credits = verified useful work in **millijoules**, not idle theater. Fairness: √VRAM + tenure boost + leecher penalties (`eco=v0`, docs/design/economy-v0.md). Public pool is free (no cash).
 4. Donor retains control (caps, pause, schedule, thermal/battery).
 5. Open weights, open agent, open protocol.
 6. **Distributed cluster across the internet** — connectivity medium is irrelevant.

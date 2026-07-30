@@ -3,8 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>joule — open supercomputer</title>
-  <link rel="stylesheet" href="https://f00.sh/theme/f00-theme.css" />
+  <meta name="theme-color" content="#d44a18" />
+  <meta name="description" content="joule — free open-weight AI by pooling idle GPUs. Pay only in donated compute. No cash. Millijoules." />
+  <meta property="og:title" content="joule — free supercomputer, paid in compute" />
+  <meta property="og:description" content="Donate idle machines. Earn millijoules. Use open Kimi-class AI. Free forever on the public pool — no credit card." />
+  <meta property="og:url" content="https://joule.f00.sh/" />
+  <meta property="og:type" content="website" />
+  <title>joule — free AI supercomputer (pay in compute)</title>
+  <link rel="icon" href="https://f00.sh/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="https://f00.sh/theme/f00-theme.css" data-f00-theme="1" />
   <style>
     :root {
       --bg: #090909;
@@ -15,6 +22,7 @@
       --box: #141414;
       --border: #2a2a2a;
       --ok: #3d9a5f;
+      --warn: #c9a227;
     }
     * { box-sizing: border-box; }
     body {
@@ -22,182 +30,380 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       background: var(--bg);
       color: var(--fg);
-      line-height: 1.45;
+      line-height: 1.5;
     }
-    .wrap { max-width: 920px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
-    h1 { font-size: 1.75rem; letter-spacing: 0.04em; margin: 0 0 0.35rem; }
-    h1 span { color: var(--accent); }
-    .sub { color: var(--muted); margin-bottom: 2rem; }
-    .hero {
-      border: 1px solid var(--border);
-      background: var(--box);
-      padding: 1.25rem 1.5rem;
-      margin-bottom: 1.5rem;
+    a { color: var(--sky); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 880px; margin: 0 auto; padding: 1.5rem 1.25rem 4rem; }
+    header {
+      display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between;
+      gap: 0.75rem; margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1rem;
     }
-    .big {
-      font-size: clamp(2rem, 6vw, 3.25rem);
-      color: var(--sky);
-      margin: 0.25rem 0;
+    .brand { font-size: 1.1rem; letter-spacing: 0.06em; color: var(--fg); }
+    .brand span { color: var(--accent); }
+    nav { display: flex; flex-wrap: wrap; gap: 0.9rem; font-size: 0.85rem; color: var(--muted); }
+    nav a { color: var(--muted); }
+    nav a:hover { color: var(--fg); }
+    .pill-free {
+      display: inline-block;
+      border: 1px solid var(--ok);
+      color: var(--ok);
+      font-size: 0.72rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 0.2rem 0.55rem;
+      margin-bottom: 0.85rem;
+    }
+    h1 {
+      font-size: clamp(1.75rem, 5vw, 2.6rem);
+      line-height: 1.15;
+      margin: 0 0 0.85rem;
+      letter-spacing: -0.01em;
+      font-weight: 600;
+    }
+    h1 em { font-style: normal; color: var(--accent); }
+    .lead {
+      font-size: 1.05rem;
+      color: var(--muted);
+      max-width: 38em;
+      margin: 0 0 1.5rem;
+    }
+    .cta-row { display: flex; flex-wrap: wrap; gap: 0.65rem; margin: 1.25rem 0 2rem; }
+    .btn {
+      display: inline-block;
+      padding: 0.65rem 1.1rem;
+      border: 1px solid var(--accent);
+      background: var(--accent);
+      color: #0a0a0a;
+      font: inherit;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    .btn.ghost {
+      background: transparent;
+      color: var(--fg);
+      border-color: var(--border);
+    }
+    .btn:hover { filter: brightness(1.08); text-decoration: none; }
+    section { margin: 2.25rem 0; }
+    h2 {
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 0.85rem;
+      font-weight: 500;
     }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
       gap: 0.75rem;
-      margin: 1rem 0 1.5rem;
     }
     .card {
       border: 1px solid var(--border);
       background: var(--box);
-      padding: 0.9rem 1rem;
+      padding: 1rem 1.05rem;
     }
-    .label { color: var(--muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; }
-    .value { font-size: 1.35rem; margin-top: 0.3rem; }
-    .value.accent { color: var(--accent); }
-    .milestones { list-style: none; padding: 0; margin: 0; }
-    .milestones li {
+    .card strong { display: block; color: var(--fg); margin-bottom: 0.35rem; }
+    .card p { margin: 0; color: var(--muted); font-size: 0.88rem; }
+    .hero-stat {
       border: 1px solid var(--border);
       background: var(--box);
-      padding: 1rem 1.1rem;
-      margin-bottom: 0.6rem;
-      display: grid;
-      gap: 0.35rem;
+      padding: 1.1rem 1.25rem;
+      margin: 1.5rem 0;
     }
-    .milestones li.done { border-color: #1e4a2e; }
-    .milestones li.next { border-color: var(--accent); }
-    .bar {
-      height: 6px;
-      background: #222;
-      margin-top: 0.4rem;
+    .hero-stat .big {
+      font-size: clamp(1.8rem, 5vw, 2.75rem);
+      color: var(--sky);
+      margin: 0.2rem 0;
     }
-    .bar > i {
-      display: block;
-      height: 100%;
-      background: var(--accent);
-      width: 0%;
-    }
-    .pill {
-      display: inline-block;
-      font-size: 0.7rem;
-      padding: 0.15rem 0.45rem;
+    .muted { color: var(--muted); }
+    .steps { list-style: none; padding: 0; margin: 0; counter-reset: step; }
+    .steps li {
       border: 1px solid var(--border);
+      background: var(--box);
+      padding: 0.95rem 1.05rem;
+      margin-bottom: 0.55rem;
+      counter-increment: step;
+      position: relative;
+      padding-left: 3rem;
+    }
+    .steps li::before {
+      content: counter(step);
+      position: absolute;
+      left: 1rem;
+      top: 0.95rem;
+      color: var(--accent);
+      font-weight: 600;
+    }
+    table.fair {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    table.fair th, table.fair td {
+      border: 1px solid var(--border);
+      padding: 0.55rem 0.7rem;
+      text-align: left;
+    }
+    table.fair th { color: var(--muted); font-weight: 500; background: var(--box); }
+    .callout {
+      border-left: 3px solid var(--accent);
+      background: var(--box);
+      padding: 0.9rem 1.1rem;
+      margin: 1rem 0;
       color: var(--muted);
+      font-size: 0.92rem;
     }
-    .pill.ok { color: var(--ok); border-color: #1e4a2e; }
-    .pill.go { color: var(--accent); border-color: var(--accent); }
-    a { color: var(--sky); }
-    footer { margin-top: 2.5rem; color: var(--muted); font-size: 0.8rem; }
-    .countdown {
-      font-size: 1.1rem;
-      color: var(--fg);
-      margin: 0.75rem 0 0;
+    .callout strong { color: var(--fg); }
+    code, .mono { font-family: inherit; color: var(--fg); }
+    pre {
+      background: var(--box);
+      border: 1px solid var(--border);
+      padding: 0.9rem 1rem;
+      overflow-x: auto;
+      font-size: 0.82rem;
     }
-    .err { color: #e88; }
-    code { color: var(--fg); }
+    footer {
+      margin-top: 3rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    .err { color: #e88; font-size: 0.85rem; }
+    .ok { color: var(--ok); }
+    .bar {
+      height: 6px; background: #222; margin-top: 0.45rem;
+    }
+    .bar > i { display: block; height: 100%; background: var(--accent); width: 0%; }
+    #milestones { list-style: none; padding: 0; margin: 0.75rem 0 0; }
+    #milestones li {
+      border: 1px solid var(--border);
+      background: var(--box);
+      padding: 0.7rem 0.9rem;
+      margin-bottom: 0.45rem;
+      font-size: 0.85rem;
+    }
+    #milestones li.done { border-color: #1e4a2e; }
+    #milestones li.next { border-color: var(--accent); }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1><span>joule</span> supercomputer</h1>
-    <p class="sub">
-      One logical GPU. Aggregate donor compute. Single open model (Kimi).
-      Contribute machines → earn millijoules → use the AI.
+    <header>
+      <a class="brand" href="https://f00.sh/"><span>f00</span> / joule</a>
+      <nav>
+        <a href="#free">Free</a>
+        <a href="#how">How</a>
+        <a href="#millijoules">Millijoules</a>
+        <a href="#fair">Fairness</a>
+        <a href="#pool">Pool</a>
+        <a href="https://github.com/f00-sh/joule">GitHub</a>
+      </nav>
+    </header>
+
+    <p class="pill-free">100% free · no credit card · pay in compute</p>
+    <h1>Open AI on a shared supercomputer.<br /><em>You bring the watts.</em></h1>
+    <p class="lead">
+      joule pools idle machines across the internet into one logical GPU and runs open-weight
+      models (Kimi-class). Access is earned by donating compute — not by buying tokens.
+      Small GPUs count. Leechers pay more. Everyone can audit the math.
     </p>
-
-    <div class="hero">
-      <div class="label">Logical device VRAM</div>
-      <div class="big" id="vram">—</div>
-      <div class="sub" id="device-line">connecting to control…</div>
-      <p class="countdown" id="countdown">—</p>
-      <div class="bar" title="progress to Kimi load gate"><i id="bar"></i></div>
-      <div class="label" style="margin-top:0.5rem" id="progress-label">progress</div>
+    <div class="cta-row">
+      <a class="btn" href="https://github.com/f00-sh/joule#quick-start-local-pool">Run a donor agent</a>
+      <a class="btn ghost" href="#millijoules">How millijoules work</a>
+      <a class="btn ghost" href="https://github.com/f00-sh/joule">Source</a>
     </div>
 
-    <div class="grid">
-      <div class="card"><div class="label">Backends</div><div class="value" id="backends">—</div></div>
-      <div class="card"><div class="label">Model</div><div class="value" id="model">kimi-open</div></div>
-      <div class="card"><div class="label">Mode</div><div class="value accent" id="mode">—</div></div>
-      <div class="card"><div class="label">Service</div><div class="value" id="service">—</div></div>
-    </div>
+    <section id="free">
+      <h2>It is free</h2>
+      <div class="grid">
+        <div class="card">
+          <strong>No cash on the public pool</strong>
+          <p>There is no paid bypass. Compute is the only currency. If you cannot donate, you wait or borrow a friend’s idle box.</p>
+        </div>
+        <div class="card">
+          <strong>Give ↔ get</strong>
+          <p>Mint millijoules while your agent is healthy in the cluster. Burn them when you chat. No live contribution and no balance → no API.</p>
+        </div>
+        <div class="card">
+          <strong>Small machines matter</strong>
+          <p>Rewards use √VRAM, not “only 4090s welcome.” A modest card that stays online earns real credit — and tenure boosts the loyal.</p>
+        </div>
+      </div>
+    </section>
 
-    <h2 class="label" style="margin-bottom:0.75rem">Milestones to load &amp; run Kimi</h2>
-    <ol class="milestones" id="milestones"></ol>
-    <p class="sub" id="msg"></p>
-    <p class="err" id="err"></p>
+    <section id="how">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li>Install the native <code>joule agent</code> on a machine you control (not the browser).</li>
+        <li>It joins the internet-wide cluster and donates VRAM to one logical device.</li>
+        <li>You earn <strong>millijoules</strong> for heartbeats, honest challenges, and real shards.</li>
+        <li>Point any OpenAI-compatible client at the gateway with your key and spend mJ.</li>
+        <li>When the pool crosses milestones (VRAM + backends), we load open Kimi weights and go live.</li>
+      </ol>
+      <div class="callout">
+        <strong>Teaser status:</strong> product is 0.0.0 research / wip. Local lab works today.
+        Public pool capacity and model load unlock with enough donors — watch the strip below.
+      </div>
+    </section>
+
+    <section id="millijoules">
+      <h2>Millijoules, explained</h2>
+      <p class="muted">
+        A <strong class="mono">millijoule (mJ)</strong> is an integer credit on the ledger.
+        1000 mJ = 1 J (display only). You cannot buy them with money on the public pool.
+      </p>
+      <table class="fair">
+        <thead>
+          <tr><th>You do</th><th>Ledger</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Healthy heartbeat</td><td>Mint (small base × fairness factors)</td></tr>
+          <tr><td>Serve an inference shard</td><td>Mint (tokens × factors)</td></tr>
+          <tr><td>Pass a spot challenge</td><td>Mint (anti-cheat honesty)</td></tr>
+          <tr><td>Call chat / completions</td><td>Burn (prompt + 4× completion tokens × leecher factor)</td></tr>
+        </tbody>
+      </table>
+      <p class="muted" style="margin-top:0.9rem">
+        Every ledger line embeds <code>eco=v0</code> and the basis-point factors so you can recompute the total.
+        Spec: <a href="https://github.com/f00-sh/joule/blob/main/docs/design/economy-v0.md">economy-v0.md</a>.
+      </p>
+    </section>
+
+    <section id="fair">
+      <h2>Fairness algorithm (auditable)</h2>
+      <div class="grid">
+        <div class="card">
+          <strong>√VRAM, not aristocracy</strong>
+          <p>1 GiB ≈ 1×, 4 GiB ≈ 2×, 16 GiB ≈ 4×, cap 8×. Linear VRAM would freeze out laptops.</p>
+        </div>
+        <div class="card">
+          <strong>Tenure boost</strong>
+          <p>Continuous healthy time multiplies mint up to 1.5×. Offline resets the streak. Loyalty pays.</p>
+        </div>
+        <div class="card">
+          <strong>Leecher penalty</strong>
+          <p>If consume ≫ contribute in the window: earn down to 0.25×, pay up to 4×. Pure freeloaders get crushed.</p>
+        </div>
+        <div class="card">
+          <strong>Open constants</strong>
+          <p>Pure Rust, integer math, unit tests. No hidden admin multipliers in the public scoring path.</p>
+        </div>
+      </div>
+      <pre aria-label="economy sketch">mint = base × mem_bp × tenure_bp × leecher_mint_bp
+burn = (prompt + 4×completion) × leecher_usage_bp
+# bp in 1/10000 units · eco=v0</pre>
+    </section>
+
+    <section id="pool">
+      <h2>Pool teaser</h2>
+      <div class="hero-stat" id="pool-panel">
+        <div class="muted">Aggregate healthy VRAM (when a control API is reachable)</div>
+        <p class="big" id="vram">—</p>
+        <p class="muted" id="countdown">countdown: connecting…</p>
+        <p class="muted" id="pool-meta"></p>
+        <ul id="milestones"></ul>
+        <p class="err" id="pool-err" hidden></p>
+      </div>
+      <p class="muted" style="font-size:0.8rem">
+        Optional live API: append <code>?api=https://your-control:7700</code>.
+        Default tries same-origin then local control.
+      </p>
+    </section>
+
+    <section id="join">
+      <h2>Join early</h2>
+      <pre>git clone https://github.com/f00-sh/joule.git
+cd joule && cargo build --release -p joule
+./target/release/joule control
+./target/release/joule agent --account you --control 127.0.0.1:7701</pre>
+      <p class="muted">MIT · f00-sh · native agent only · browser is this page + dashboards, not the pool FLOPs.</p>
+    </section>
 
     <footer>
-      Live API:
-      <a href="#" id="link-cap">/v1/cluster/capacity</a> ·
-      <a href="#" id="link-ready">/v1/models/readiness</a> ·
-      <a href="https://github.com/f00-sh/joule">github.com/f00-sh/joule</a>
-      <br />
-      Set control base: <code>?api=http://127.0.0.1:7700</code> (default).
-      <span id="updated"></span>
+      <p>
+        <a href="https://f00.sh/">f00</a> ·
+        <a href="https://github.com/f00-sh/joule">github.com/f00-sh/joule</a> ·
+        <a href="https://github.com/f00-sh/joule/blob/main/docs/design/economy-v0.md">economy-v0</a> ·
+        <a href="https://github.com/f00-sh/joule/blob/main/LICENSE">MIT</a>
+      </p>
+      <p>Teaser site. Model weights load when the pool hits published milestones. Stay online. Don’t leech.</p>
     </footer>
   </div>
+
   <script>
-    const params = new URLSearchParams(location.search);
-    const API = (params.get("api") || "http://127.0.0.1:7700").replace(/\/$/, "");
-    document.getElementById("link-cap").href = API + "/v1/cluster/capacity";
-    document.getElementById("link-ready").href = API + "/v1/models/readiness";
+    (function () {
+      const params = new URLSearchParams(location.search);
+      const candidates = [
+        params.get("api"),
+        "", // same origin (if reverse-proxied later)
+        "http://127.0.0.1:7700",
+      ].filter((x) => x !== null);
 
-    function fmtGib(mib) {
-      if (mib == null) return "—";
-      return (mib / 1024).toFixed(1) + " GiB";
-    }
+      const el = (id) => document.getElementById(id);
 
-    async function tick() {
-      const err = document.getElementById("err");
-      try {
-        const [cap, ready] = await Promise.all([
-          fetch(API + "/v1/cluster/capacity").then(r => r.json()),
-          fetch(API + "/v1/models/readiness").then(r => r.json()),
-        ]);
-        const ld = cap.logical_device || {};
-        document.getElementById("vram").textContent =
-          (ld.vram_gib != null ? ld.vram_gib + " GiB" : fmtGib(cap.mem_mib_healthy));
-        document.getElementById("device-line").textContent =
-          (ld.id || "joule-pool") + " · " + (ld.backends || 0) + " machines · one logical GPU";
-        document.getElementById("backends").textContent = ld.backends ?? cap.nodes_healthy ?? 0;
-        document.getElementById("model").textContent = ready.model || "kimi-open";
-        document.getElementById("mode").textContent = ready.inference_mode || "—";
-        document.getElementById("service").textContent = ready.service_live
-          ? "LIVE"
-          : (ready.model_loaded ? "loaded" : "not yet");
-        document.getElementById("countdown").textContent = ready.countdown_label || "—";
-        const pct = ready.pool_progress_pct || 0;
-        document.getElementById("bar").style.width = pct + "%";
-        document.getElementById("progress-label").textContent =
-          pct + "% toward Kimi pool gate (" +
-          (ready.required_vram_gib || 64) + " GiB / " +
-          (ready.required_backends || 3) + " backends)";
-        document.getElementById("msg").textContent = ready.message || "";
-
-        const ol = document.getElementById("milestones");
-        ol.innerHTML = "";
-        const ms = ready.milestones || [];
-        let foundNext = false;
-        ms.forEach(m => {
-          const li = document.createElement("li");
-          if (m.reached) li.className = "done";
-          else if (!foundNext) { li.className = "next"; foundNext = true; }
-          const pill = m.reached
-            ? '<span class="pill ok">reached</span>'
-            : (li.className === "next" ? '<span class="pill go">next</span>' : '<span class="pill">locked</span>');
-          li.innerHTML =
-            "<div><strong>" + m.title + "</strong> " + pill + "</div>" +
-            "<div class=\"sub\" style=\"margin:0\">" + (m.description || "") + "</div>" +
-            "<div class=\"bar\"><i style=\"width:" + (m.progress_pct || 0) + "%\"></i></div>";
-          ol.appendChild(li);
-        });
-        document.getElementById("updated").textContent =
-          " · updated " + new Date().toLocaleTimeString();
-        err.textContent = "";
-      } catch (e) {
-        err.textContent = "Cannot reach control at " + API + " — start: joule control  (" + e + ")";
+      function fmtGib(mib) {
+        if (mib == null || Number.isNaN(mib)) return "—";
+        return (mib / 1024).toFixed(1) + " GiB";
       }
-    }
-    tick();
-    setInterval(tick, 4000);
+
+      async function tryApi(base) {
+        const root = base.replace(/\/$/, "");
+        const url = root + "/v1/models/readiness";
+        const r = await fetch(url, { mode: "cors" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      }
+
+      async function refresh() {
+        let data = null;
+        let lastErr = null;
+        for (const base of candidates) {
+          try {
+            data = await tryApi(base || location.origin);
+            lastErr = null;
+            break;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+        if (!data) {
+          el("vram").textContent = "pool offline";
+          el("countdown").textContent = "countdown: awaiting public control / local lab";
+          el("pool-meta").textContent = "Spin up joule control to see live numbers.";
+          el("pool-err").hidden = false;
+          el("pool-err").textContent = lastErr ? String(lastErr.message || lastErr) : "no api";
+          return;
+        }
+        el("pool-err").hidden = true;
+        el("vram").textContent = fmtGib(data.pool_vram_mib);
+        el("countdown").textContent = "countdown: " + (data.countdown_label || "—");
+        el("pool-meta").textContent =
+          (data.backends || 0) + " backends · " +
+          (data.model || "kimi-open") + " · " +
+          (data.inference_mode || "") +
+          (data.can_load_model ? " · can load" : "") +
+          (data.can_begin_service ? " · can serve" : "");
+        const list = el("milestones");
+        list.innerHTML = "";
+        (data.milestones || []).forEach((m) => {
+          const li = document.createElement("li");
+          if (m.reached) li.classList.add("done");
+          if (data.next_milestone && data.next_milestone.id === m.id) li.classList.add("next");
+          li.innerHTML =
+            "<div><strong>" + (m.title || m.id) + "</strong> " +
+            (m.reached ? '<span class="ok">reached</span>' : "") + "</div>" +
+            "<div class='muted'>" + (m.description || "") + "</div>" +
+            '<div class="bar"><i style="width:' + (m.progress_pct || 0) + '%"></i></div>';
+          list.appendChild(li);
+        });
+      }
+
+      refresh();
+      setInterval(refresh, 12000);
+    })();
   </script>
 </body>
 </html>

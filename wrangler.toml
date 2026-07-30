@@ -1,0 +1,4 @@
+# Cloudflare Pages — static teaser site for joule.f00.sh
+name = "f00-joule"
+compatibility_date = "2026-07-01"
+pages_build_output_dir = "docs"

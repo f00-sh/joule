@@ -22,8 +22,10 @@ joule credits [--account NAME]
 **joule** runs a **distributed compute cluster**. Donors install an agent that
 joins a control plane and contributes capacity. The control plane exposes live
 pool capacity and an OpenAI-shaped chat API. Accounts **earn millijoules by
-providing compute** (heartbeats and completed work) and **spend millijoules** on
-API usage. No contribution ⇒ no API.
+providing compute** (heartbeats, shards, challenges) under the **economy-v0**
+fairness rules (√VRAM, tenure boost, leecher penalties — see
+docs/design/economy-v0.md) and **spend millijoules** on API usage. The public
+pool is free of cash charges. No contribution ⇒ no API.
 
 How a node reaches the internet is irrelevant. This is not a mesh product.
 

@@ -2,9 +2,7 @@
 
 use crate::persist;
 use joule_cluster::Cluster;
-use joule_ledger::{
-    estimate_contribution_millijoules, estimate_usage_millijoules, Ledger, Millijoule,
-};
+use joule_ledger::{score_burn, score_mint, EconomyEvent, FairnessSnapshot, Ledger, Millijoule};
 use joule_proto::{ClusterPlan, DeviceClass, NodeCaps, NodeId, CLUSTER_MODEL};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -23,6 +21,30 @@ pub struct AccountInfo {
     pub api_key: String,
     pub balance_millijoules: Millijoule,
     pub donating: bool,
+    /// Rolling-window millijoules earned (fairness window).
+    pub contributed_mj_window: Millijoule,
+    /// Rolling-window millijoules spent.
+    pub consumed_mj_window: Millijoule,
+    /// Continuous healthy online seconds (tenure).
+    pub continuous_online_secs: u64,
+    /// Current leecher mint multiplier in basis points (10_000 = 1.0×).
+    pub leecher_mint_bp: u32,
+    /// Current leecher usage multiplier in basis points.
+    pub leecher_usage_bp: u32,
+}
+
+/// Per-account fairness stats for the auditable economy (v0).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AccountEconomy {
+    pub contributed_mj_window: Millijoule,
+    pub consumed_mj_window: Millijoule,
+    /// Wall time when continuous healthy streak started (None if offline).
+    #[serde(skip)]
+    pub online_since: Option<Instant>,
+    /// Accumulated continuous seconds at last disconnect (restored after reboot only partially).
+    pub continuous_online_secs: u64,
+    /// Best healthy mem across this account's nodes (MiB).
+    pub best_mem_mib: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +124,8 @@ pub struct ControlState {
     pub nodes_model_loaded: HashSet<NodeId>,
     /// Operator / automatic flag: public service serving real model.
     pub service_live: bool,
+    /// Per-account rolling fairness + tenure (economy v0).
+    pub account_economy: HashMap<String, AccountEconomy>,
     dirty: bool,
 }
 
@@ -129,7 +153,66 @@ impl ControlState {
             vram_history: VecDeque::new(),
             nodes_model_loaded: HashSet::new(),
             service_live: false,
+            account_economy: HashMap::new(),
             dirty: false,
+        }
+    }
+
+    fn economy_mut(&mut self, account: &str) -> &mut AccountEconomy {
+        self.account_economy.entry(account.to_string()).or_default()
+    }
+
+    /// Build fairness snapshot for scoring (refreshes continuous tenure clock).
+    pub fn fairness_for(&mut self, account: &str) -> FairnessSnapshot {
+        let eco = self.economy_mut(account);
+        let continuous = match eco.online_since {
+            Some(since) => eco
+                .continuous_online_secs
+                .saturating_add(since.elapsed().as_secs()),
+            None => eco.continuous_online_secs,
+        };
+        FairnessSnapshot {
+            mem_mib: eco.best_mem_mib.max(256),
+            continuous_online_secs: continuous,
+            contributed_mj_window: eco.contributed_mj_window,
+            consumed_mj_window: eco.consumed_mj_window,
+        }
+    }
+
+    fn record_contribute(&mut self, account: &str, mj: Millijoule) {
+        let eco = self.economy_mut(account);
+        eco.contributed_mj_window = eco.contributed_mj_window.saturating_add(mj);
+        // Soft decay when window gets huge so old history does not dominate forever.
+        if eco.contributed_mj_window > 1_000_000 {
+            eco.contributed_mj_window /= 2;
+            eco.consumed_mj_window /= 2;
+        }
+    }
+
+    fn record_consume(&mut self, account: &str, mj: Millijoule) {
+        let eco = self.economy_mut(account);
+        eco.consumed_mj_window = eco.consumed_mj_window.saturating_add(mj);
+        if eco.consumed_mj_window > 1_000_000 {
+            eco.contributed_mj_window /= 2;
+            eco.consumed_mj_window /= 2;
+        }
+    }
+
+    fn note_online(&mut self, account: &str, mem_mib: u32, healthy: bool) {
+        let eco = self.economy_mut(account);
+        if mem_mib > eco.best_mem_mib {
+            eco.best_mem_mib = mem_mib;
+        }
+        if healthy {
+            if eco.online_since.is_none() {
+                eco.online_since = Some(Instant::now());
+            }
+        } else if let Some(since) = eco.online_since.take() {
+            eco.continuous_online_secs = eco
+                .continuous_online_secs
+                .saturating_add(since.elapsed().as_secs());
+            // Offline resets continuous streak (loyalty is continuous presence).
+            eco.continuous_online_secs = 0;
         }
     }
 
@@ -295,23 +378,36 @@ impl ControlState {
         healthy: bool,
     ) -> Result<Option<Millijoule>, joule_cluster::ClusterError> {
         self.cluster.set_health(id, healthy, load)?;
-        if !healthy {
-            return Ok(None);
-        }
         let account = self
             .node_account
             .get(id)
             .cloned()
             .unwrap_or_else(|| "unknown".into());
-        let mult = self
-            .cluster
-            .get(id)
-            .map(|n| n.caps.device.contribution_multiplier())
-            .unwrap_or(1);
-        let mint = self.heartbeat_mint_mj.saturating_mul(i64::from(mult));
-        let _ = self
-            .ledger
-            .mint_contribution(&account, mint, format!("heartbeat:{id}"));
+        let mem = self.cluster.get(id).map(|n| n.caps.mem_mib).unwrap_or(256);
+        self.note_online(&account, mem, healthy);
+        if !healthy {
+            self.mark_dirty();
+            self.save_if_dirty();
+            return Ok(None);
+        }
+        let fair = self.fairness_for(&account);
+        let breakdown = score_mint(EconomyEvent::Heartbeat, fair);
+        // Allow operator heartbeat_mint_mj as scale on the scored base path (default 10 matches HEARTBEAT_BASE).
+        let scale = if self.heartbeat_mint_mj > 0 {
+            self.heartbeat_mint_mj
+        } else {
+            10
+        };
+        let mint = if scale == 10 {
+            breakdown.total_mj
+        } else {
+            // rescale from default base 10
+            (breakdown.total_mj.saturating_mul(scale)) / 10
+        }
+        .max(1);
+        let reason = breakdown.reason_tag(&format!("heartbeat:{id}"));
+        let _ = self.ledger.mint_contribution(&account, mint, reason);
+        self.record_contribute(&account, mint);
         self.mark_dirty();
         self.save_if_dirty();
         Ok(Some(mint))
@@ -326,11 +422,29 @@ impl ControlState {
 
     pub fn account_info(&self, account: &str) -> Option<AccountInfo> {
         let api_key = self.account_keys.get(account)?.clone();
+        let eco = self
+            .account_economy
+            .get(account)
+            .cloned()
+            .unwrap_or_default();
+        let continuous = match eco.online_since {
+            Some(since) => eco
+                .continuous_online_secs
+                .saturating_add(since.elapsed().as_secs()),
+            None => eco.continuous_online_secs,
+        };
+        let (leecher_mint_bp, leecher_usage_bp) =
+            joule_ledger::leecher_factors_bp(eco.contributed_mj_window, eco.consumed_mj_window);
         Some(AccountInfo {
             account: account.to_string(),
             api_key,
             balance_millijoules: self.ledger.balance(account),
             donating: self.cluster.account_is_donating(account),
+            contributed_mj_window: eco.contributed_mj_window,
+            consumed_mj_window: eco.consumed_mj_window,
+            continuous_online_secs: continuous,
+            leecher_mint_bp,
+            leecher_usage_bp,
         })
     }
 
@@ -385,27 +499,28 @@ impl ControlState {
         worker: &NodeId,
         is_tail: bool,
     ) {
-        let device = self
+        let mem = self
             .cluster
             .get(worker)
-            .map(|n| n.caps.device)
-            .unwrap_or(DeviceClass::Cpu);
+            .map(|n| n.caps.mem_mib)
+            .unwrap_or(256);
         let worker_account = self
             .node_account
             .get(worker)
             .cloned()
             .unwrap_or_else(|| "unknown".into());
-
-        let mint = estimate_contribution_millijoules(
-            completion_tokens.max(1),
-            device.contribution_multiplier(),
-        )
-        .max(1);
-        let _ = self.ledger.mint_contribution(
-            &worker_account,
-            mint,
-            format!("infer-shard:{request_id}"),
+        self.note_online(&worker_account, mem, true);
+        let fair = self.fairness_for(&worker_account);
+        let breakdown = score_mint(
+            EconomyEvent::Work {
+                completion_tokens: completion_tokens.max(1),
+            },
+            fair,
         );
+        let mint = breakdown.total_mj;
+        let reason = breakdown.reason_tag(&format!("infer-shard:{request_id}"));
+        let _ = self.ledger.mint_contribution(&worker_account, mint, reason);
+        self.record_contribute(&worker_account, mint);
         self.mark_dirty();
 
         let Some(pending) = self.pending.get_mut(&request_id) else {
@@ -452,16 +567,18 @@ impl ControlState {
         let shard_count = pending.plan.shards.len() as u32;
 
         if pending.charge {
-            let burn = estimate_usage_millijoules(prompt_tokens, completion_tokens);
-            if let Err(e) =
-                self.ledger
-                    .burn_usage(&pending.account, burn, format!("chat:{request_id}"))
-            {
+            let payer = pending.account.clone();
+            let fair = self.fairness_for(&payer);
+            let burn = score_burn(prompt_tokens, completion_tokens, fair);
+            let reason = burn.reason_tag(&format!("chat:{request_id}"));
+            if let Err(e) = self.ledger.burn_usage(&payer, burn.total_mj, reason) {
                 if let Some(tx) = pending.tx.take() {
                     let _ = tx.send(Err(e.to_string()));
                 }
                 return;
             }
+            self.record_consume(&payer, burn.total_mj);
+            self.mark_dirty();
         }
         if let Some(tx) = pending.tx.take() {
             let _ = tx.send(Ok(InferOutcome {
@@ -528,11 +645,20 @@ impl ControlState {
         let ok = completion.trim() == pending.expected.trim();
         if ok {
             self.cluster.record_challenge_ok(from);
-            // Small mint for honest challenge work.
             if let Some(account) = self.node_account.get(from).cloned() {
-                let _ =
-                    self.ledger
-                        .mint_contribution(&account, 5, format!("challenge:{challenge_id}"));
+                let mem = self
+                    .cluster
+                    .get(from)
+                    .map(|n| n.caps.mem_mib)
+                    .unwrap_or(256);
+                self.note_online(&account, mem, true);
+                let fair = self.fairness_for(&account);
+                let breakdown = score_mint(EconomyEvent::ChallengeOk, fair);
+                let reason = breakdown.reason_tag(&format!("challenge:{challenge_id}"));
+                let _ = self
+                    .ledger
+                    .mint_contribution(&account, breakdown.total_mj, reason);
+                self.record_contribute(&account, breakdown.total_mj);
                 self.mark_dirty();
             }
         } else {
