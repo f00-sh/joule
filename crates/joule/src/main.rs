@@ -864,6 +864,7 @@ fn identity_path_arg(flag: &str) -> PathBuf {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_agent(
     control: String,
     account: String,
