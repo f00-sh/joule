@@ -104,11 +104,10 @@
     <section id="after">
       <h2>After install</h2>
       <ol class="steps">
-        <li><code>joule version</code> — confirm the binary works</li>
-        <li><code>joule identity init</code> — anonymous account (no name/email; multi-machine file)</li>
-        <li><code>joule agent --control HOST:7701</code> — donate compute (uses identity)</li>
-        <li>Other PCs: <code>identity export</code> → copy file → <code>import</code> (one mJ balance)</li>
-        <li><code>joule tray</code> / <code>monitor</code> — status (optional)</li>
+        <li>Install (above) — then just run the agent. <strong>Done.</strong></li>
+        <li><code>joule agent --control HOST:7701</code> — creates a <strong>joule code</strong> automatically (UUID). No name/email.</li>
+        <li>Other computers: paste the code — <code>joule identity use YOUR-UUID</code> — same millijoules.</li>
+        <li>See code again anytime: <code>joule identity show</code></li>
       </ol>
       <p class="muted">
         Full docs: <a href="./">joule.f00.sh</a> ·

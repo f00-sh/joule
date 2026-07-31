@@ -62,18 +62,19 @@ irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
 | **Homebrew** | Formula `packaging/homebrew/joule.rb` → publish to a tap |
 | **Windows** | ZIP + `install.ps1` (user-local). Signed MSI/EXE when a cert is available |
 
-### Anonymous account (multi-machine, no PII)
+### Your joule code (multi-machine, no PII)
 
 ```text
-joule identity init          # creates j_<random> — not a name/email
+# first machine — just run the agent; a UUID code is created for you
 joule agent --control HOST:7701
-# other machines: copy identity file
-joule identity export --out id.json
-# on other host:
-joule identity import --from id.json
+# banner shows:  550e8400-e29b-41d4-a716-446655440000
+
+# other machines — paste the same code
+joule identity use 550e8400-e29b-41d4-a716-446655440000
+joule agent --control HOST:7701
 ```
 
-Same identity ⇒ same millijoule balance on that pool. See [docs/design/identity-v0.md](docs/design/identity-v0.md).
+Same code ⇒ same millijoule balance. You never pick a username. See [docs/design/identity-v0.md](docs/design/identity-v0.md).
 
 ### From source
 

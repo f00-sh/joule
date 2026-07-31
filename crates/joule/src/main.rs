@@ -78,7 +78,7 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         ephemeral: bool,
     },
-    /// Anonymous multi-device identity (no PII) — one account across machines.
+    /// Your joule code (anonymous multi-machine account — no PII).
     Identity {
         #[command(subcommand)]
         cmd: IdentityCmd,
@@ -88,8 +88,11 @@ enum Commands {
         /// Control plane agent address (host:port).
         #[arg(long, default_value = "127.0.0.1:7701")]
         control: String,
-        /// Ledger account. Default: anonymous id from `joule identity` (no name/email).
-        /// Lab only: pass a string like `lab-alice`. Prefer identity file for multi-machine.
+        /// Paste your joule code to link this machine (same code = same millijoules).
+        /// If omitted, a code is created automatically on first run.
+        #[arg(long, default_value = "")]
+        code: String,
+        /// Lab-only account nickname. Prefer --code / auto identity for real use.
         #[arg(long, default_value = "")]
         account: String,
         /// Path to identity JSON (default: ~/.config/joule/identity.json or $JOULE_IDENTITY).
@@ -256,27 +259,33 @@ enum Commands {
 
 #[derive(Subcommand, Debug)]
 enum IdentityCmd {
-    /// Create anonymous identity if missing; print account id path.
-    Init {
-        #[arg(long, default_value = "")]
-        path: String,
-        /// Overwrite existing identity (new account — loses link to old mJ).
-        #[arg(long, default_value_t = false)]
-        force: bool,
-    },
-    /// Show account id + path (no secrets except account_id).
+    /// Show your joule code (auto-creates one if missing).
     Show {
         #[arg(long, default_value = "")]
         path: String,
     },
-    /// Write identity JSON to stdout or --out (copy this file to other machines).
+    /// Link this machine to an existing code (other PC already has millijoules).
+    Use {
+        /// UUID joule code, e.g. 550e8400-e29b-41d4-a716-446655440000
+        code: String,
+        #[arg(long, default_value = "")]
+        path: String,
+    },
+    /// Create a new random code (only if you want to rotate — loses old link).
+    New {
+        #[arg(long, default_value = "")]
+        path: String,
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
+    /// Advanced: write identity JSON to a file.
     Export {
         #[arg(long, default_value = "")]
         path: String,
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Install identity from a file (multi-machine same millijoule account).
+    /// Advanced: load identity JSON from a file.
     Import {
         #[arg(long)]
         from: PathBuf,
@@ -420,43 +429,33 @@ async fn main() -> Result<()> {
             }
             println!();
             println!("  open the dashboard, then run:");
-            println!("    joule identity init");
             println!("    joule agent --control {agent_listen}");
-            println!("  (anonymous multi-machine: copy identity.json to each host)");
+            println!("  (auto joule code · other PCs: joule identity use <code>)");
             joule_control::serve(app, agent_listen, http_listen).await?;
         }
         Commands::Identity { cmd } => match cmd {
-            IdentityCmd::Init { path, force } => {
+            IdentityCmd::Show { path } => {
+                let p = identity_path_arg(&path);
+                let (id, fresh) = identity::load_or_init(&p)?;
+                identity::print_code_banner(id.code(), &p, fresh);
+            }
+            IdentityCmd::Use { code, path } => {
+                let p = identity_path_arg(&path);
+                let id = identity::use_code(&p, &code)?;
+                println!("this machine is now linked to your joule code.");
+                identity::print_code_banner(id.code(), &p, false);
+            }
+            IdentityCmd::New { path, force } => {
                 let p = identity_path_arg(&path);
                 if p.is_file() && !force {
                     let id = identity::load(&p)?;
-                    println!("identity exists: {}", id.account_id);
-                    println!("path: {}", p.display());
-                    println!("(use --force to rotate — new account, not the old mJ balance)");
+                    println!("already have a code — showing it (use --force for a NEW empty account):");
+                    identity::print_code_banner(id.code(), &p, false);
                 } else {
                     let id = identity::Identity::generate();
                     identity::save(&p, &id)?;
-                    println!("created anonymous account: {}", id.account_id);
-                    println!("path: {}", p.display());
-                    println!("no PII stored · copy this file to other machines for one balance");
+                    identity::print_code_banner(id.code(), &p, true);
                 }
-            }
-            IdentityCmd::Show { path } => {
-                let p = identity_path_arg(&path);
-                let id = identity::load(&p).with_context(|| {
-                    format!("no identity at {} — run: joule identity init", p.display())
-                })?;
-                println!("account_id: {}", id.account_id);
-                println!(
-                    "api_key:    {}",
-                    if id.api_key.is_some() {
-                        "(cached — use for chat/status)"
-                    } else {
-                        "(none yet — run agent once)"
-                    }
-                );
-                println!("path:       {}", p.display());
-                println!("multi-device: joule identity export --out id.json  # then import on other hosts");
             }
             IdentityCmd::Export { path, out } => {
                 let p = identity_path_arg(&path);
@@ -473,12 +472,12 @@ async fn main() -> Result<()> {
                 let dest = identity_path_arg(&path);
                 let id = identity::load(&from)?;
                 identity::save(&dest, &id)?;
-                println!("imported account_id={} → {}", id.account_id, dest.display());
-                println!("all machines with this file share one millijoule balance on the pool");
+                identity::print_code_banner(id.code(), &dest, false);
             }
         },
         Commands::Agent {
             control,
+            code,
             account,
             identity: identity_flag,
             model,
@@ -490,16 +489,22 @@ async fn main() -> Result<()> {
         } => {
             let _ = config;
             let id_path = identity_path_arg(&identity_flag);
+            let code_opt = if code.trim().is_empty() {
+                None
+            } else {
+                Some(code.as_str())
+            };
             let explicit = if account.trim().is_empty() {
                 None
             } else {
                 Some(account.as_str())
             };
-            let (account, id_path) = identity::resolve_account(explicit, &id_path)?;
-            if identity::Identity::is_anonymous_id(&account) {
-                info!(%account, path = %id_path.display(), "using anonymous identity");
-            } else {
-                warn!(%account, "non-anonymous account string (lab); prefer joule identity");
+            let (account, id_path, fresh) =
+                identity::resolve_account(code_opt, explicit, &id_path)?;
+            // Always show code so users know how to link other machines.
+            identity::print_code_banner(&account, &id_path, fresh);
+            if !identity::Identity::is_anonymous_id(&account) {
+                warn!(%account, "lab account nickname (not a UUID code)");
             }
             run_agent(
                 control,
@@ -1016,20 +1021,14 @@ async fn run_agent(
                 let env = decode_line(line.as_bytes()).context("decode control line")?;
                 match env.msg {
                     Message::Welcome { account: acc, api_key: key } => {
-                        println!("joined cluster as account={acc}");
-                        if identity::Identity::is_anonymous_id(&acc) {
-                            println!("(anonymous multi-device id — no PII; same file = same mJ)");
-                        }
-                        println!("API key (save this): {key}");
+                        println!("joined pool · code {acc}");
+                        println!("API key (for chat): {key}");
                         if let Some(ref ip) = identity_path {
                             if let Err(e) = identity::remember_api_key(ip, &key) {
                                 warn!(error = %e, "could not cache api_key on identity");
-                            } else {
-                                println!("identity:   {} (api_key cached)", ip.display());
                             }
                         }
-                        println!("dashboard: http://127.0.0.1:7700/");
-                        println!("readiness: curl -s http://127.0.0.1:7700/v1/models/readiness");
+                        println!("other PC:  joule identity use {acc}");
                         println!("chat:      joule chat --key {key} --prompt \"hello\"");
                         println!("weights:   {}", store.root().display());
                         if !multiaddrs.is_empty() {
