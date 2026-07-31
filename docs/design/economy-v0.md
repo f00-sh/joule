@@ -41,8 +41,11 @@ There is **no cash path** on the public pool. You mint mJ by donating healthy co
 - Capacity challenges use a **mem-bound proof** (`joule_cluster::capacity_proof_hex(seed, credit)`). Public stub strings like `[joule-stub:…]` **never** unlock verified.
 - Each successful challenge credits at most **`CHALLENGE_CREDIT_MIB` (1024)** toward claim — **never** free full-claim unlock.
 - Fail **halves** verified. Expired unanswered challenges count as fails.
-- Mesh placement (control `mesh_plan_donors`, LocalMesh, PeerBus) uses **verified only**; PeerAlive claim is UI.
+- **Control** mesh placement (`mesh_plan_donors`) uses **cluster verified only**.
+- **Peer gossip** path (`LocalMesh::plan_donors`) uses **equal unit weight** only — PeerAlive claim/self-reported verified **never** buy farm geometry.
+- Agents **never** self-increment or advertise verified after solving a challenge; only control `settle_challenge_result` unlocks.
 - `model_update` chunk placement excludes `verified == 0` nodes.
+- PeerBus `MeshDonor::from_untrusted_presence` for gossip; lab tests may inject attested mem intentionally.
 
 ---
 

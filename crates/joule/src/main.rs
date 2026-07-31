@@ -853,9 +853,8 @@ async fn run_agent(
     let mut pending_software: Option<(String, SoftwareTarget)> = None;
     // Unique mesh neighbors seen via gossip (Phase A).
     let mut mesh_seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
-    // Local estimate of protocol-verified MiB (raised on capacity challenge proofs).
-    // Placement/mesh advertise this — never raw claim alone.
-    let mut local_verified_mem_mib: u32 = 0;
+    // Agents never self-attest verified capacity on PeerAlive (always 0).
+    // Control cluster verified is the only mint/placement authority for weighted geometry.
     let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -879,8 +878,9 @@ async fn run_agent(
                             load: 0.1,
                             healthy: true,
                             blob_count,
-                            mem_mib,
-                            verified_mem_mib: local_verified_mem_mib,
+                            mem_mib, // claim for UI only
+                            // Never self-attest: peers must not treat this as control unlock.
+                            verified_mem_mib: 0,
                             throughput_class,
                         },
                     );
@@ -914,7 +914,7 @@ async fn run_agent(
                                     healthy: true,
                                     blob_count,
                                     mem_mib,
-                                    verified_mem_mib: local_verified_mem_mib,
+                                    verified_mem_mib: 0, // never self-attest
                                     throughput_class,
                                 },
                             );
@@ -977,17 +977,15 @@ async fn run_agent(
                         prompt: _,
                         max_tokens: _,
                     } => {
-                        // Phase D: PlanOffer from **verified** donors only (never claim).
+                        // Phase D peer path: equal-unit donors from gossip (no claim/self-attest).
+                        // Weighted VRAM geometry is control-only (mesh_plan_donors / cluster verified).
                         let donors = {
                             let g = local_mesh.lock().await;
                             let mut d = g.plan_donors();
-                            // Include self only when locally verified > 0.
-                            if joule_cluster::placement_mem_mib(local_verified_mem_mib) > 0 {
-                                d.push((
-                                    node_id.clone(),
-                                    joule_cluster::placement_mem_mib(local_verified_mem_mib),
-                                ));
-                            }
+                            d.push((
+                                node_id.clone(),
+                                peer_net::LocalMesh::PEER_GOSSIP_UNIT_MIB,
+                            ));
                             d
                         };
                         match joule_cluster::plan_from_mesh_donors(&donors) {
@@ -1259,22 +1257,13 @@ async fn run_agent(
                         let reply = Envelope::new(node_id.clone(), reply.msg);
                         writer.write_all(&encode_line(&reply)?).await?;
                     }
-                    Message::Challenge {
-                        credit_mib: ch_credit,
-                        ..
-                    } => {
+                    Message::Challenge { .. } => {
+                        // Solve capacity proof only. Do **not** self-increment verified or
+                        // advertise unlock on PeerAlive — only control cluster attestation
+                        // after settle_challenge_result raises verified for mint/placement.
                         let reply = joule_control::agent_handle_challenge(&env, &engine)
                             .await
                             .context("handle challenge")?;
-                        // Local verified estimate tracks capacity proofs we successfully produced.
-                        let credit = if ch_credit == 0 {
-                            joule_cluster::CHALLENGE_CREDIT_MIB
-                        } else {
-                            ch_credit
-                        };
-                        local_verified_mem_mib = local_verified_mem_mib
-                            .saturating_add(credit)
-                            .min(mem_mib);
                         let reply = Envelope::new(node_id.clone(), reply.msg);
                         writer.write_all(&encode_line(&reply)?).await?;
                     }

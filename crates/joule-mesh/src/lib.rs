@@ -17,15 +17,31 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// Peer identity + **verified** capacity for election / planning.
+/// Peer identity + capacity for election / planning.
 ///
-/// `verified_mem_mib` must be protocol-attested capacity. Raw GPU claims must
-/// never be stored here (see capacity challenges / control verified registry).
+/// **Trust boundary:** `verified_mem_mib` is only safe when the **caller** populated
+/// it from control-cluster challenge unlock (or a lab test fixture). It must **never**
+/// be filled from PeerAlive gossip self-reports — use
+/// [`MeshDonor::from_untrusted_presence`] for gossip (equal unit).
 #[derive(Debug, Clone)]
 pub struct MeshDonor {
     pub node: NodeId,
     pub verified_mem_mib: u32,
     pub healthy: bool,
+}
+
+/// Equal unit for untrusted peer-gossip presence (cannot mint a farm).
+pub const PEER_GOSSIP_UNIT_MIB: u32 = 1024;
+
+impl MeshDonor {
+    /// Presence from untrusted PeerAlive gossip — equal unit only.
+    pub fn from_untrusted_presence(node: NodeId, healthy: bool) -> Self {
+        Self {
+            node,
+            verified_mem_mib: if healthy { PEER_GOSSIP_UNIT_MIB } else { 0 },
+            healthy,
+        }
+    }
 }
 
 /// Deterministic coordinator: max **verified** mem, then node id string.
@@ -586,6 +602,25 @@ mod tests {
         (0..n)
             .map(|i| (NodeId::new(), 8192u32 + (i as u32) * 1024))
             .collect()
+    }
+
+    #[test]
+    fn untrusted_gossip_presence_is_equal_unit_not_claim() {
+        let a = NodeId::new();
+        let b = NodeId::new();
+        // Caller must use from_untrusted_presence for PeerAlive — never raw claim.
+        let donors = vec![
+            MeshDonor::from_untrusted_presence(a.clone(), true),
+            MeshDonor::from_untrusted_presence(b.clone(), true),
+        ];
+        assert_eq!(donors[0].verified_mem_mib, PEER_GOSSIP_UNIT_MIB);
+        assert_eq!(donors[1].verified_mem_mib, PEER_GOSSIP_UNIT_MIB);
+        let plan = replan(&donors).expect("equal plan");
+        assert_eq!(
+            plan.pool_mem_mib,
+            2 * u64::from(PEER_GOSSIP_UNIT_MIB),
+            "gossip path must not carry farm claims"
+        );
     }
 
     #[test]

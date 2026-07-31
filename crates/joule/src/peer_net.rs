@@ -133,23 +133,26 @@ impl LocalMesh {
         self.neighbors.len() as u32
     }
 
-    /// Healthy donors with **verified** VRAM for mesh PlanOffer (Phase D).
-    /// Claim-only peers (`verified_mem_mib == 0`) are excluded.
+    /// Equal unit weight for peer-gossip PlanOffer (Phase D).
+    ///
+    /// **CRITICAL:** PeerAlive `mem_mib` and `verified_mem_mib` are **self-reports**.
+    /// A cheater can set verified=65536 on gossip; that must **never** buy placement.
+    /// Control-coordinated placement uses `ControlState::mesh_plan_donors()` (cluster
+    /// challenge-backed verified only). Peer-path geometry is equal-unit among healthy
+    /// dialable peers so gossip cannot mint a GPU farm.
+    pub const PEER_GOSSIP_UNIT_MIB: u32 = 1024;
+
+    /// Healthy dialable peers for mesh PlanOffer — **equal unit only**.
+    /// Ignores claim and self-reported verified from PeerAlive entirely.
     pub fn plan_donors(&self) -> Vec<(NodeId, u32)> {
         let mut v: Vec<_> = self
             .neighbors
             .iter()
-            .filter(|(_, n)| {
-                n.healthy && joule_cluster::placement_mem_mib(n.verified_mem_mib) > 0
-            })
-            .map(|(id, n)| {
-                (
-                    id.clone(),
-                    joule_cluster::placement_mem_mib(n.verified_mem_mib),
-                )
-            })
+            .filter(|(_, n)| n.healthy && !n.multiaddrs.is_empty())
+            .map(|(id, _)| (id.clone(), Self::PEER_GOSSIP_UNIT_MIB))
             .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
+        // Stable order by node id (weights are equal — no mem aristocracy from gossip).
+        v.sort_by_key(|a| a.0.to_string());
         v
     }
 }
@@ -482,11 +485,13 @@ mod tests {
             0.1,
             true,
             1,
-            8192, // claim
-            0,    // verified — claim-only excluded from plan_donors
+            8192, // claim — ignored for placement
+            0,
             40,
         );
-        assert!(m.plan_donors().is_empty());
+        // Healthy + multiaddr → equal unit (not claim, not verified gossip).
+        assert_eq!(m.plan_donors().len(), 1);
+        assert_eq!(m.plan_donors()[0].1, LocalMesh::PEER_GOSSIP_UNIT_MIB);
         m.apply_peer_alive(
             &id,
             vec!["tcp://127.0.0.1:9".into()],
@@ -494,11 +499,15 @@ mod tests {
             true,
             1,
             8192,
-            4096, // verified
+            65_536, // self-reported "verified farm" — still equal unit only
             40,
         );
         assert_eq!(m.plan_donors().len(), 1);
-        assert_eq!(m.plan_donors()[0].1, 4096);
+        assert_eq!(
+            m.plan_donors()[0].1,
+            LocalMesh::PEER_GOSSIP_UNIT_MIB,
+            "gossip verified must not inflate placement"
+        );
         let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         m.apply_blobs_have(
             &id,
@@ -515,6 +524,56 @@ mod tests {
         assert_eq!(m.peer_count(), 1);
         assert!(m.dht.len() >= 2);
         assert_eq!(m.plan_donors().len(), 1);
+    }
+
+    /// CRITICAL: PeerAlive self-reported verified without control unlock cannot
+    /// create farm-weighted geometry on the peer-only path.
+    #[test]
+    fn gossip_self_reported_verified_cannot_mint_farm_placement() {
+        use joule_cluster::plan_from_mesh_donors;
+        let mut m = LocalMesh::new();
+        let faker = NodeId::new();
+        let honest = NodeId::new();
+        m.apply_peer_alive(
+            &faker,
+            vec!["tcp://10.0.0.1:1".into()],
+            0.0,
+            true,
+            0,
+            65_536, // claim farm
+            65_536, // self-attested verified farm (forged)
+            99,
+        );
+        m.apply_peer_alive(
+            &honest,
+            vec!["tcp://10.0.0.2:2".into()],
+            0.0,
+            true,
+            0,
+            1024,
+            0, // honest does not self-attest
+            10,
+        );
+        let donors = m.plan_donors();
+        assert_eq!(donors.len(), 2, "both healthy dialable peers participate equally");
+        for (_, w) in &donors {
+            assert_eq!(
+                *w,
+                LocalMesh::PEER_GOSSIP_UNIT_MIB,
+                "no peer may carry claim/verified weight from gossip"
+            );
+        }
+        let plan = plan_from_mesh_donors(&donors).expect("equal plan");
+        assert_eq!(
+            plan.pool_mem_mib,
+            2 * u64::from(LocalMesh::PEER_GOSSIP_UNIT_MIB),
+            "pool must not be 65536+… from gossip"
+        );
+        assert!(plan.pool_mem_mib < 65_536);
+        // No multiaddr → not in plan_donors (not dialable).
+        let ghost = NodeId::new();
+        m.apply_peer_alive(&ghost, vec![], 0.0, true, 0, 99_999, 99_999, 1);
+        assert_eq!(m.plan_donors().len(), 2);
     }
 
     /// Phase B: seeder peer listen → leech direct BlobWant (no control relay).
