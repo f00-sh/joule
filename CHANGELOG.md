@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Anonymous multi-device identity**: `joule identity init|show|export|import` — opaque `j_…` account id, no PII; same identity file → same millijoule balance; agent defaults to identity ([docs/design/identity-v0.md](docs/design/identity-v0.md))
 - **Multi-platform release CI**: `.github/workflows/release.yml` builds linux/darwin/windows artifacts on `v*` tags (and manual dispatch)
 - **Dummy-easy install**: `scripts/install.sh` (Unix) + `scripts/install.ps1` (Windows) from GitHub Releases
 - **Download page**: [docs/download.html](docs/download.html) OS autodetect + all-platform links ([joule.f00.sh/download.html](https://joule.f00.sh/download.html))

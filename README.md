@@ -62,6 +62,19 @@ irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
 | **Homebrew** | Formula `packaging/homebrew/joule.rb` → publish to a tap |
 | **Windows** | ZIP + `install.ps1` (user-local). Signed MSI/EXE when a cert is available |
 
+### Anonymous account (multi-machine, no PII)
+
+```text
+joule identity init          # creates j_<random> — not a name/email
+joule agent --control HOST:7701
+# other machines: copy identity file
+joule identity export --out id.json
+# on other host:
+joule identity import --from id.json
+```
+
+Same identity ⇒ same millijoule balance on that pool. See [docs/design/identity-v0.md](docs/design/identity-v0.md).
+
 ### From source
 
 ```text
