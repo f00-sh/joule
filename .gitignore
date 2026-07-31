@@ -83,6 +83,7 @@ ENV/
 .terraform/
 *.tfstate*
 .serverless/
+.wrangler/
 
 # --- Archives ---
 *.7z

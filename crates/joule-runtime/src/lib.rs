@@ -294,4 +294,101 @@ mod tests {
         assert!(r.weights_published);
         assert!(r.can_load_model);
     }
+
+    /// Shipped path: prepare lab-tiny → load_model → ClusterEngine::install_loaded → infer.
+    /// Must be tensor-backed (`joule-tensor`), not stub echo.
+    #[tokio::test]
+    async fn cluster_engine_lab_tiny_infer_is_tensor_backed() {
+        use crate::load::load_model;
+        use crate::manifest::ManifestFile;
+        use crate::weights::WeightsStore;
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "joule-cluster-eng-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WeightsStore::new(&dir);
+        let m = ManifestFile::load_default().expect("manifest");
+        let spec = m.model("kimi-open").expect("kimi-open");
+        let quant = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "lab-tiny")
+            .expect("lab-tiny quant");
+        store.prepare(spec, quant).expect("prepare lab-tiny");
+        let loaded = load_model(&store, spec, quant).expect("load lab-tiny");
+        assert!(
+            !loaded.tensors.is_empty(),
+            "lab-tiny must install real tensors"
+        );
+
+        let eng = ClusterEngine::new();
+        let plan = ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            shards: vec![ShardAssignment {
+                node: NodeId::new(),
+                role: ShardRole::Replica,
+                layer_start: Some(0),
+                layer_end: Some(0),
+                tp_rank: None,
+                tp_world: None,
+                mem_share_mib: 1024,
+                mem_fraction_ppm: 1_000_000,
+            }],
+            pool_mem_mib: 1024,
+            model_layers: 1,
+        };
+        eng.load_plan(&plan).await.expect("load_plan");
+        eng.install_loaded(loaded);
+        assert!(eng.has_resident_weights());
+        assert!(eng.is_model_loaded());
+
+        let out = eng
+            .infer(InferRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "hello joule tensor path".into(),
+                max_tokens: 24,
+            })
+            .await
+            .expect("infer");
+        assert!(
+            out.text.contains("joule-tensor"),
+            "must use tensor decode path, got {}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("joule-stub"),
+            "must not fall back to stub, got {}",
+            out.text
+        );
+        assert!(
+            out.text.contains("hello"),
+            "prompt should influence tensor output, got {}",
+            out.text
+        );
+
+        // Without tensors: plan-only ClusterEngine is stub-mode, proving the branch.
+        let eng2 = ClusterEngine::new();
+        eng2.load_plan(&plan).await.unwrap();
+        let stub_out = eng2
+            .infer(InferRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "no weights".into(),
+                max_tokens: 8,
+            })
+            .await
+            .unwrap();
+        assert!(
+            stub_out.text.contains("joule-stub") || stub_out.text.contains("stub"),
+            "unloaded engine must use stub path, got {}",
+            stub_out.text
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

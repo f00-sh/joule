@@ -40,8 +40,10 @@ pool is free of cash charges. No contribution ⇒ no API.
 
 How a node reaches the internet is irrelevant. This is not a mesh product.
 
-Version **0.0.0** loads **lab-tiny** tensors when seeded and gates full Kimi on
-pool VRAM. Weights and software are **peer-seeded by sha256** (f00 is website
+Version **0.1.3** loads **lab-tiny** tensors when seeded and gates full Kimi on
+pool VRAM. After an agent Welcome, **`joule connect`** shows Base URL + full
+pool-issued `joule_…` API key + model `kimi-open` for Cursor / other OpenAI
+clients. Weights and software are **peer-seeded by sha256** (f00 is website
 only). Operator orders are **ed25519-signed** and flooded by the swarm.
 
 ## COMMANDS

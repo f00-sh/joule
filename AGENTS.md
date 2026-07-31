@@ -9,7 +9,7 @@
 | Domain | joule.f00.sh |
 | License | MIT |
 | Language | **Rust** (workspace; strict purity for first-party code) |
-| Status | 0.0.0 research / wip |
+| Status | 0.1.3 released (lab-tiny tensors; Kimi gated on pool) |
 
 **One-liner:** Distributed internet-wide supercomputer cluster — pool idle GPUs into open-weight AI inference (Kimi-class).
 
@@ -43,7 +43,7 @@ crates/joule             CLI binary (+ status/monitor/tray/service)
 crates/joule-client      shared ClientStatus + OS service unit generation
 crates/joule-proto       wire types / ClusterCapacity / plans
 crates/joule-cluster     membership + capacity + placement
-crates/joule-runtime     Engine trait + StubEngine
+crates/joule-runtime     Engine trait + ClusterEngine + StubEngine
 crates/joule-ledger      millijoule accounting
 crates/joule-control     control plane (agents + HTTP API)
 ```
@@ -60,7 +60,8 @@ cargo build --workspace --release
 cargo run -p joule --release -- control
 cargo run -p joule --release -- agent --account alice
 cargo run -p joule --release -- capacity --api http://127.0.0.1:7700 --json
-cargo run -p joule --release -- chat --key joule_… --prompt "hi"
+cargo run -p joule --release -- connect
+cargo run -p joule --release -- chat --prompt "hi"
 cargo run -p joule -- lab
 cargo run -p joule -- seed-blob --path models/fixtures/lab-tiny/model.safetensors
 cargo run -p joule -- blobs

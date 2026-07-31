@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| Status | 0.0.0 research / wip |
+| Status | 0.1.3 released (lab-tiny tensors; Kimi gated on pool) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
 | License | MIT |
 
@@ -48,10 +48,15 @@ cargo build --release -p joule
 joule control
 # open http://127.0.0.1:7700/ for the live dashboard
 joule agent --account alice
+# after Welcome: Base URL + full pool-issued joule_… key + model kimi-open
+joule connect
 joule capacity --api http://127.0.0.1:7700 --json
-joule chat --key joule_… --prompt "hello"
-joule chat --key joule_… --stream --prompt "hello"
+joule whoami
+joule chat --prompt "hello"
+joule chat --stream --prompt "hello"
 ```
+
+`joule connect` is the external-app path (Cursor / Continue / any OpenAI client): Base URL `…/v1`, API key `joule_…`, model `kimi-open`. Chat/whoami use the Welcome-cached key when `--key` is omitted.
 
 See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 
@@ -83,7 +88,7 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 ║████████████████████████████████████████████████  ║
 ║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
-║  v0.0.0  ·  MIT  ·  2026                         ║
+║  v0.1.3  ·  MIT  ·  2026                         ║
 ║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝
