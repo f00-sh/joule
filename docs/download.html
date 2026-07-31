@@ -104,10 +104,10 @@
     <section id="after">
       <h2>After install</h2>
       <ol class="steps">
-        <li>Install (above) — then just run the agent. <strong>Done.</strong></li>
-        <li><code>joule agent --control HOST:7701</code> — auto <strong>CODE</strong> (secret UUID) + signed account the pool accepts.</li>
-        <li>Other PCs: <code>joule identity use YOUR-CODE</code> — same millijoules (code derives the key; signatures prove it).</li>
-        <li>See code again: <code>joule identity show</code> — never share CODE publicly.</li>
+        <li>Install (above) — run the agent. A <strong>CODE</strong> is created for you.</li>
+        <li><strong>Do not lose the CODE</strong> — also saved as <code>JOULE-RECOVERY.txt</code> next to your identity file. Back it up.</li>
+        <li>Other PCs: <code>joule identity use YOUR-CODE</code> (or copy the recovery file).</li>
+        <li>See code again: <code>joule identity show</code> — never post CODE publicly.</li>
       </ol>
       <p class="muted">
         Full docs: <a href="./">joule.f00.sh</a> ·
