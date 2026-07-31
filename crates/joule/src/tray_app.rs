@@ -50,26 +50,50 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
         ("pbcopy", &[]),
         ("clip.exe", &[]), // WSL
     ];
-    let has_display = std::env::var_os("DISPLAY").is_some()
-        || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let has_x11 = std::env::var_os("DISPLAY").is_some();
+    let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
     for (bin, args) in candidates {
-        // xclip/xsel block forever with no X/Wayland (headless SSH/CI).
-        if matches!(*bin, "xclip" | "xsel") && !has_display {
+        // Clipboard tools block forever without a session (headless SSH/CI).
+        if *bin == "wl-copy" && !has_wayland {
             continue;
         }
-        if which(bin) {
-            let mut child = Command::new(bin)
-                .args(*args)
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .with_context(|| format!("spawn {bin}"))?;
-            use std::io::Write;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(text.as_bytes())?;
-            }
-            let st = child.wait()?;
-            if st.success() {
-                return Ok(());
+        if matches!(*bin, "xclip" | "xsel") && !has_x11 {
+            continue;
+        }
+        if !which(bin) {
+            continue;
+        }
+        let mut child = Command::new(bin)
+            .args(*args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawn {bin}"))?;
+        use std::io::Write;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+            // drop stdin so tools that wait for EOF can finish
+        }
+        // Hard cap: never hang product CLI if a clipboard daemon is stuck.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(800);
+        loop {
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    if st.success() {
+                        return Ok(());
+                    }
+                    break;
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                Err(_) => break,
             }
         }
     }
