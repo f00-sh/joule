@@ -86,10 +86,28 @@ pub struct NodeView {
     pub models: Vec<String>,
 }
 
+/// How a chat/infer was coordinated (Phase D mesh vs classic control stream).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinationPath {
+    /// Classic: cluster registry + try_acquire_stream + InferRequest fan-out.
+    ControlDispatch,
+    /// Mesh: RequestInfer → plan_from_mesh_donors → PlanOffer → PlanAccept → InferRequest.
+    MeshRequestInfer,
+}
+
+impl CoordinationPath {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlDispatch => "control_dispatch",
+            Self::MeshRequestInfer => "mesh_request_infer",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PendingInfer {
     pub account: String,
-    /// Full VRAM-sharded plan; stream reserved on every shard.
+    /// Full VRAM-sharded plan; stream reserved on every shard when `stream_reserved`.
     pub plan: ClusterPlan,
     /// Shards still expected to ACK (node ids).
     pub awaiting: std::collections::HashSet<NodeId>,
@@ -97,7 +115,19 @@ pub struct PendingInfer {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub charge: bool,
+    /// True if cluster.try_acquire_stream was used (must release_stream).
+    pub stream_reserved: bool,
+    pub coordination: CoordinationPath,
     pub tx: Option<oneshot::Sender<Result<InferOutcome, String>>>,
+}
+
+/// In-flight PlanOffer acceptance wait (mesh Phase D).
+#[derive(Debug)]
+pub struct PendingPlanAccept {
+    pub plan_id: Uuid,
+    pub expected: std::collections::HashSet<NodeId>,
+    pub accepted: std::collections::HashSet<NodeId>,
+    pub tx: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +141,8 @@ pub struct InferOutcome {
     /// Aggregate pool VRAM the request was sharded over.
     pub pool_mem_mib: u64,
     pub shard_count: u32,
+    /// `mesh_request_infer` or `control_dispatch`.
+    pub coordination: String,
 }
 
 #[derive(Debug)]
@@ -130,6 +162,8 @@ pub struct ControlState {
     pub account_keys: HashMap<String, String>,
     pub node_account: HashMap<NodeId, String>,
     pub pending: HashMap<Uuid, PendingInfer>,
+    /// request_id → PlanAccept collector (mesh Phase D).
+    pub pending_plan_accepts: HashMap<Uuid, PendingPlanAccept>,
     pub pending_challenges: HashMap<Uuid, PendingChallenge>,
     pub heartbeat_mint_mj: Millijoule,
     /// Every Nth chat request also runs a second-worker verify (0 = off).
@@ -181,6 +215,7 @@ impl ControlState {
             account_keys: HashMap::new(),
             node_account: HashMap::new(),
             pending: HashMap::new(),
+            pending_plan_accepts: HashMap::new(),
             pending_challenges: HashMap::new(),
             heartbeat_mint_mj: 10,
             dual_verify_every: 3,
@@ -620,8 +655,10 @@ impl ControlState {
         let Some(mut pending) = self.pending.remove(&request_id) else {
             return;
         };
-        self.cluster.release_stream(&pending.plan);
-        self.wake_scheduler();
+        if pending.stream_reserved {
+            self.cluster.release_stream(&pending.plan);
+            self.wake_scheduler();
+        }
 
         let text = pending
             .tail_text
@@ -646,6 +683,7 @@ impl ControlState {
             .unwrap_or_else(|| "unknown".into());
         let pool_mem_mib = pending.plan.pool_mem_mib;
         let shard_count = pending.plan.shards.len() as u32;
+        let coordination = pending.coordination.as_str().to_string();
 
         if pending.charge {
             let payer = pending.account.clone();
@@ -681,6 +719,7 @@ impl ControlState {
                 worker_id: tail,
                 pool_mem_mib,
                 shard_count,
+                coordination,
             }));
         }
     }
@@ -705,10 +744,49 @@ impl ControlState {
 
     pub fn settle_infer_error(&mut self, request_id: Uuid, error: String) {
         if let Some(mut pending) = self.pending.remove(&request_id) {
-            self.cluster.release_stream(&pending.plan);
-            self.wake_scheduler();
+            if pending.stream_reserved {
+                self.cluster.release_stream(&pending.plan);
+                self.wake_scheduler();
+            }
             if let Some(tx) = pending.tx.take() {
                 let _ = tx.send(Err(error));
+            }
+        }
+    }
+
+    /// Record PlanAccept for a mesh-coordinated request; completes wait when all expected accept.
+    pub fn settle_plan_accept(
+        &mut self,
+        request_id: Uuid,
+        from: &NodeId,
+        plan_id: Uuid,
+        accepted: bool,
+    ) {
+        let Some(p) = self.pending_plan_accepts.get_mut(&request_id) else {
+            return;
+        };
+        if p.plan_id != plan_id {
+            return;
+        }
+        if !p.expected.contains(from) {
+            return;
+        }
+        if accepted {
+            p.accepted.insert(from.clone());
+        } else {
+            // Hard reject: fail the wait.
+            if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
+                if let Some(tx) = p.tx.take() {
+                    let _ = tx.send(Err(format!("plan rejected by {from}")));
+                }
+            }
+            return;
+        }
+        if p.accepted.len() >= p.expected.len() {
+            if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
+                if let Some(tx) = p.tx.take() {
+                    let _ = tx.send(Ok(()));
+                }
             }
         }
     }

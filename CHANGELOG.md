@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Decentral discovery Phase A/B**: agent peer listen + `PeerAlive` gossip; `BlobLocate.multiaddrs`; direct peer BlobWant/BlobChunk (`peer_net`); `GET /v1/mesh/peers`; status `mesh_peers` — [docs/design/decentral-discovery-v0.md](docs/design/decentral-discovery-v0.md)
 - **Decentral Phase C**: `joule-dht` (peer/blob keys, XOR distance, bootstrap.json); control DHT mirror; agent **LocalMesh** + P2P PeerAlive/BlobsHave on peer port; bootstrap dial announce; FetchDigests uses local DHT before control; `GET /v1/dht/keys`, `/v1/dht/get/{*key}`, `/v1/bootstrap`; example [docs/examples/bootstrap.json](docs/examples/bootstrap.json)
 - **Decentral Phase D start**: `RequestInfer` / `PlanAccept`; PeerAlive `mem_mib`/`throughput_class`; `plan_from_mesh_donors`; agent mesh PlanOffer; `GET /v1/mesh/plan`
+- **Decentral Phase D chat path**: `dispatch_mesh_infer` (RequestInfer→PlanOffer→PlanAccept→Infer) when mesh donors advertise mem; control stream fallback; chat returns `joule_coordination`; e2e `mesh_request_infer_chat_multi_donor`
 - **Cross-platform client status**: `joule status` / `monitor` / `tray` (Linux, macOS, Windows CLI) — connection, API/account, millijoule balance, tokens used, pool dash (`joule-client` shared snapshot)
 - **Service install helpers**: `joule service generate|install-help` for systemd (Linux), launchd (macOS), Task Scheduler XML (Windows); user-session preferred for tray+GPU
 - Account API fields `prompt_tokens_used` / `completion_tokens_used` (lifetime chat usage)

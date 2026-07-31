@@ -55,6 +55,22 @@ async fn spawn_agent(
         },
     );
     writer.write_all(&encode_line(&hb).unwrap()).await.unwrap();
+    // Phase D: advertise multiaddrs + mem so mesh plan_donors is non-empty.
+    let alive = Envelope::new(
+        node_id.clone(),
+        Message::PeerAlive {
+            multiaddrs: vec![format!("tcp://127.0.0.1:{}", 17000 + (mem % 1000))],
+            load: 0.05,
+            healthy: true,
+            blob_count: 0,
+            mem_mib: mem,
+            throughput_class: 40,
+        },
+    );
+    writer
+        .write_all(&encode_line(&alive).unwrap())
+        .await
+        .unwrap();
 
     let handle = tokio::spawn(async move {
         let stub = StubEngine::new();
@@ -69,12 +85,49 @@ async fn spawn_agent(
                     if writer.write_all(&encode_line(&hb).unwrap()).await.is_err() {
                         break;
                     }
+                    let alive = Envelope::new(
+                        node_id.clone(),
+                        Message::PeerAlive {
+                            multiaddrs: vec![format!("tcp://127.0.0.1:{}", 17000 + (mem % 1000))],
+                            load: 0.05,
+                            healthy: true,
+                            blob_count: 0,
+                            mem_mib: mem,
+                            throughput_class: 40,
+                        },
+                    );
+                    let _ = writer.write_all(&encode_line(&alive).unwrap()).await;
                 }
                 line = lines.next_line() => {
                     let Ok(Some(line)) = line else { break; };
                     if line.trim().is_empty() { continue; }
                     let env = decode_line(line.as_bytes()).unwrap();
                     match &env.msg {
+                        Message::PlanOffer {
+                            plan,
+                            request_id,
+                        } => {
+                            let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                            let reply = Envelope::new(
+                                node_id.clone(),
+                                Message::PlanAccept {
+                                    plan_id: plan.plan_id,
+                                    request_id: *request_id,
+                                    accepted,
+                                    reason: if accepted {
+                                        "e2e shard ok".into()
+                                    } else {
+                                        "not in plan".into()
+                                    },
+                                },
+                            );
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::RequestInfer { .. } => {
+                            // Coordinator handles plan; agents may log only.
+                        }
                         Message::InferRequest { .. } => {
                             let reply = joule_control::agent_handle_infer(&env, &stub)
                                 .await
@@ -191,9 +244,123 @@ async fn pool_capacity_and_chat() {
         .as_str()
         .unwrap_or("");
     assert!(content.contains("ping"), "content={content}");
+    // With PeerAlive mem_mib, chat uses mesh RequestInfer path (not control-only).
+    assert_eq!(
+        chat["joule_coordination"].as_str().unwrap_or(""),
+        "mesh_request_infer",
+        "chat={chat}"
+    );
+    assert!(chat["joule_shard_count"].as_u64().unwrap_or(0) >= 1);
 
     agent.abort();
     assert_eq!(PROTOCOL_VERSION, "0.1.0");
+}
+
+/// Phase D: ≥2 donors with PeerAlive mem → mesh PlanOffer geometry → chat InferDone.
+#[tokio::test]
+async fn mesh_request_infer_chat_multi_donor() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    let (key_a, a) = spawn_agent(agent_addr, "mesh-alice", 8192).await;
+    let (_kb, b) = spawn_agent(agent_addr, "mesh-bob", 16384).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    // Mesh plan geometry from PeerAlive mem (not only cluster registry).
+    assert!(
+        joule_control::mesh_donors_ready(&app).await,
+        "mesh donors with mem_mib must be ready"
+    );
+    let donors = {
+        let g = app.state.read().await;
+        g.mesh.plan_donors()
+    };
+    assert!(
+        donors.len() >= 2,
+        "need ≥2 mesh donors, got {}",
+        donors.len()
+    );
+    let mesh_plan = joule_cluster::plan_from_mesh_donors(&donors).expect("mesh plan");
+    assert_eq!(mesh_plan.shards.len(), donors.len());
+    assert_eq!(
+        mesh_plan.pool_mem_mib,
+        donors.iter().map(|(_, m)| u64::from(*m)).sum::<u64>()
+    );
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+
+    let mesh_http: serde_json::Value = client
+        .get(format!("{base}/v1/mesh/plan"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(mesh_http["ok"], true);
+    assert_eq!(mesh_http["source"], "mesh_peer_alive");
+    assert!(mesh_http["donors"].as_u64().unwrap() >= 2);
+
+    // Direct shipped mesh coordinator (proves not solely dispatch_infer stream path).
+    let direct = joule_control::dispatch_mesh_infer(
+        &app,
+        "mesh-alice",
+        CLUSTER_MODEL,
+        "user: mesh-phase-d-hello",
+        32,
+    )
+    .await
+    .expect("dispatch_mesh_infer");
+    assert_eq!(direct.coordination, "mesh_request_infer");
+    assert!(!direct.text.is_empty(), "empty mesh completion");
+    assert!(
+        direct.text.contains("mesh-phase-d-hello") || direct.text.len() > 4,
+        "text={}",
+        direct.text
+    );
+    assert!(direct.shard_count >= 2, "shards={}", direct.shard_count);
+    assert_eq!(direct.pool_mem_mib, mesh_plan.pool_mem_mib);
+
+    // Chat contract also uses mesh path when donors ready.
+    let chat: serde_json::Value = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&key_a)
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role": "user", "content": "mesh-chat-ok"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let content = chat["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        content.contains("mesh-chat-ok") || !content.is_empty(),
+        "content={content}"
+    );
+    assert_eq!(
+        chat["joule_coordination"].as_str().unwrap_or(""),
+        "mesh_request_infer"
+    );
+    assert!(chat["joule_shard_count"].as_u64().unwrap_or(0) >= 2);
+
+    a.abort();
+    b.abort();
 }
 
 #[tokio::test]

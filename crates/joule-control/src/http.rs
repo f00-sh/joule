@@ -561,6 +561,10 @@ struct ChatResponse {
     model: String,
     choices: Vec<Choice>,
     usage: Usage,
+    /// Phase D coordinator: `mesh_request_infer` or `control_dispatch`.
+    joule_coordination: String,
+    joule_pool_mem_mib: u64,
+    joule_shard_count: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -647,6 +651,8 @@ async fn chat_completions(
     let max_tokens = body.max_tokens.unwrap_or(256);
     let stream = body.stream.unwrap_or(false);
 
+    // Phase D: dispatch_infer prefers mesh RequestInfer path when mesh donors
+    // advertise mem_mib; falls back to control try_acquire_stream.
     let out = dispatch_infer(&app, &account, &model, &prompt, max_tokens)
         .await
         .map_err(map_err)?;
@@ -679,6 +685,9 @@ async fn chat_completions(
             completion_tokens: out.completion_tokens,
             total_tokens: out.prompt_tokens + out.completion_tokens,
         },
+        joule_coordination: out.coordination,
+        joule_pool_mem_mib: out.pool_mem_mib,
+        joule_shard_count: out.shard_count,
     };
     Ok(Json(resp).into_response())
 }

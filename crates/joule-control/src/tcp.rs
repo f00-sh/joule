@@ -1,7 +1,9 @@
 //! TCP agent protocol: newline-delimited JSON envelopes.
 
 use crate::app::{AgentRoutes, App};
-use crate::state::{InferOutcome, PendingChallenge, PendingInfer};
+use crate::state::{
+    CoordinationPath, InferOutcome, PendingChallenge, PendingInfer, PendingPlanAccept,
+};
 use anyhow::{Context, Result};
 use joule_proto::{
     decode_line, encode_line, resolve_cluster_model, Envelope, Message, NodeId, CLUSTER_MODEL,
@@ -367,6 +369,25 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     }
                 }
             }
+            Message::PlanAccept {
+                plan_id,
+                request_id,
+                accepted,
+                reason,
+            } => {
+                tracing::debug!(
+                    %plan_id,
+                    %request_id,
+                    accepted,
+                    %reason,
+                    from = %env.from,
+                    "PlanAccept"
+                );
+                app.state
+                    .write()
+                    .await
+                    .settle_plan_accept(request_id, &env.from, plan_id, accepted);
+            }
             Message::InferDone {
                 request_id,
                 text,
@@ -464,8 +485,9 @@ async fn send_to_agent(routes: &AgentRoutes, node: &NodeId, env: Envelope) -> bo
 
 /// Dispatch one generation across the **VRAM-sharded pool** (all healthy donors).
 ///
-/// One request is spread over aggregate pool memory (e.g. 8+16×4 GiB), not parked
-/// exclusively on a single GPU. Concurrent users share stream slots on that mesh.
+/// **Phase D:** when mesh PeerAlive donors with `mem_mib` are connected, prefer
+/// [`dispatch_mesh_infer`] (RequestInfer → PlanOffer → PlanAccept → InferRequest)
+/// over classic control-only `try_acquire_stream`. Control stream remains fallback.
 pub async fn dispatch_infer(
     app: &App,
     account: &str,
@@ -485,133 +507,35 @@ pub async fn dispatch_infer(
         }
     }
 
-    let plan = acquire_stream_with_wait(app, Duration::from_secs(20)).await?;
-    let request_id = Uuid::new_v4();
-    let (tx, rx) = oneshot::channel();
-
-    let awaiting: std::collections::HashSet<NodeId> =
-        plan.shards.iter().map(|s| s.node.clone()).collect();
-    let tail = plan
-        .shards
-        .last()
-        .map(|s| s.node.clone())
-        .ok_or_else(|| "empty shard plan".to_string())?;
-
-    {
-        let mut g = app.state.write().await;
-        g.pending.insert(
-            request_id,
-            PendingInfer {
-                account: account.to_string(),
-                plan: plan.clone(),
-                awaiting,
-                tail_text: None,
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                charge: true,
-                tx: Some(tx),
-            },
-        );
-    }
-
-    info!(
-        %request_id,
-        shards = plan.shards.len(),
-        pool_mem_mib = plan.pool_mem_mib,
-        "dispatching sharded infer across pool"
-    );
-
-    // Fan-out: every shard runs its slice; tail produces user-visible tokens (stub).
-    let mut sent = 0usize;
-    for shard in &plan.shards {
-        let is_tail = shard.node == tail;
-        let env = Envelope::new(
-            shard.node.clone(),
-            Message::InferRequest {
-                request_id,
-                model: model.clone(),
-                prompt: prompt.to_string(),
-                max_tokens,
-                plan: plan.clone(),
-                is_tail,
-            },
-        );
-        if send_to_agent(&app.routes, &shard.node, env).await {
-            sent += 1;
-        } else {
-            warn!(node = %shard.node, "shard agent not connected");
-        }
-    }
-
-    if sent == 0 {
-        let mut g = app.state.write().await;
-        g.pending.remove(&request_id);
-        g.cluster.release_stream(&plan);
-        g.wake_scheduler();
-        return Err("no connected agents for sharded plan".into());
-    }
-
-    // If some shards offline, drop them from awaiting so we don't hang.
-    if sent < plan.shards.len() {
-        let connected: std::collections::HashSet<_> =
-            app.routes.lock().await.keys().cloned().collect();
-        let mut g = app.state.write().await;
-        if let Some(p) = g.pending.get_mut(&request_id) {
-            p.awaiting.retain(|n| connected.contains(n));
-            if p.awaiting.is_empty() {
-                g.pending.remove(&request_id);
-                g.cluster.release_stream(&plan);
-                g.wake_scheduler();
-                return Err("all shards disconnected mid-dispatch".into());
+    // Mesh-happy path: geometry from PeerAlive mem, not control registry acquire.
+    if mesh_donors_ready(app).await {
+        match dispatch_mesh_infer(app, account, &model, prompt, max_tokens).await {
+            Ok(out) => return Ok(out),
+            Err(e) => {
+                warn!(error = %e, "mesh RequestInfer path failed; falling back to control_dispatch");
             }
         }
     }
 
-    let first = match tokio::time::timeout(Duration::from_secs(45), rx).await {
-        Ok(Ok(Ok(outcome))) => outcome,
-        Ok(Ok(Err(e))) => return Err(e),
-        Ok(Err(_)) => return Err("infer channel closed".into()),
-        Err(_) => {
-            let mut g = app.state.write().await;
-            if let Some(mut p) = g.pending.remove(&request_id) {
-                g.cluster.release_stream(&p.plan);
-                g.wake_scheduler();
-                let _ = p.tx.take();
-            }
-            return Err("sharded infer timed out".into());
-        }
-    };
-
-    // Optional dual-verify: second full pool pass; log mismatch (tensor decode may differ).
-    let dual = {
-        let mut g = app.state.write().await;
-        g.should_dual_verify()
-    };
-    if dual {
-        match Box::pin(dispatch_infer_once(
-            app, account, &model, prompt, max_tokens,
-        ))
-        .await
-        {
-            Ok(second) => {
-                if second.text.trim() != first.text.trim() {
-                    warn!(
-                        first_len = first.text.len(),
-                        second_len = second.text.len(),
-                        "dual_verify text mismatch (accepted primary; tensors may be non-deterministic)"
-                    );
-                } else {
-                    info!("dual_verify matched");
-                }
-            }
-            Err(e) => warn!(error = %e, "dual_verify second pass failed"),
-        }
-    }
-    Ok(first)
+    dispatch_control_stream(app, account, &model, prompt, max_tokens, true).await
 }
 
-/// One sharded infer without dual-verify recursion.
-async fn dispatch_infer_once(
+/// True when ≥1 mesh donor has mem_mib and is on agent routes.
+pub async fn mesh_donors_ready(app: &App) -> bool {
+    let donors = {
+        let g = app.state.read().await;
+        g.mesh.plan_donors()
+    };
+    if donors.is_empty() {
+        return false;
+    }
+    let routes = app.routes.lock().await;
+    donors.iter().any(|(id, _)| routes.contains_key(id))
+}
+
+/// Phase D mesh coordination: RequestInfer → plan_from_mesh_donors → PlanOffer →
+/// PlanAccept → InferRequest → InferDone. Does **not** call try_acquire_stream.
+pub async fn dispatch_mesh_infer(
     app: &App,
     account: &str,
     model: &str,
@@ -628,8 +552,184 @@ async fn dispatch_infer_once(
             );
         }
     }
+
+    let connected: std::collections::HashSet<NodeId> =
+        app.routes.lock().await.keys().cloned().collect();
+    let donors: Vec<(NodeId, u32)> = {
+        let g = app.state.read().await;
+        g.mesh
+            .plan_donors()
+            .into_iter()
+            .filter(|(id, _)| connected.contains(id))
+            .collect()
+    };
+    if donors.is_empty() {
+        return Err("mesh has no connected donors with mem_mib".into());
+    }
+
+    let plan = joule_cluster::plan_from_mesh_donors(&donors).map_err(|e| e.to_string())?;
+    let request_id = Uuid::new_v4();
+
+    info!(
+        %request_id,
+        shards = plan.shards.len(),
+        pool_mem_mib = plan.pool_mem_mib,
+        donors = donors.len(),
+        "mesh RequestInfer coordination (plan_from_mesh_donors)"
+    );
+
+    // Emit RequestInfer to all connected donors (protocol honesty / agent logs).
+    for (node, _) in &donors {
+        let env = Envelope::new(
+            node.clone(),
+            Message::RequestInfer {
+                request_id,
+                account: account.to_string(),
+                model: model.clone(),
+                prompt: prompt.to_string(),
+                max_tokens,
+            },
+        );
+        let _ = send_to_agent(&app.routes, node, env).await;
+    }
+
+    // Collect PlanAccept from every shard in the mesh plan.
+    let expected: std::collections::HashSet<NodeId> =
+        plan.shards.iter().map(|s| s.node.clone()).collect();
+    let (accept_tx, accept_rx) = oneshot::channel();
+    {
+        let mut g = app.state.write().await;
+        g.pending_plan_accepts.insert(
+            request_id,
+            PendingPlanAccept {
+                plan_id: plan.plan_id,
+                expected: expected.clone(),
+                accepted: std::collections::HashSet::new(),
+                tx: Some(accept_tx),
+            },
+        );
+    }
+
+    for shard in &plan.shards {
+        let env = Envelope::new(
+            shard.node.clone(),
+            Message::PlanOffer {
+                plan: plan.clone(),
+                request_id,
+            },
+        );
+        if !send_to_agent(&app.routes, &shard.node, env).await {
+            let mut g = app.state.write().await;
+            g.pending_plan_accepts.remove(&request_id);
+            return Err(format!("PlanOffer: shard {} not connected", shard.node));
+        }
+    }
+
+    match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            app.state.write().await.pending_plan_accepts.remove(&request_id);
+            return Err(e);
+        }
+        Ok(Err(_)) => {
+            app.state.write().await.pending_plan_accepts.remove(&request_id);
+            return Err("PlanAccept channel closed".into());
+        }
+        Err(_) => {
+            app.state.write().await.pending_plan_accepts.remove(&request_id);
+            return Err("timed out waiting for PlanAccept from mesh shards".into());
+        }
+    }
+
+    // Fan-out InferRequest (no control stream reservation).
+    fanout_infer(
+        app,
+        account,
+        &model,
+        prompt,
+        max_tokens,
+        plan,
+        request_id,
+        true,
+        false,
+        CoordinationPath::MeshRequestInfer,
+    )
+    .await
+}
+
+/// Classic control path: try_acquire_stream + InferRequest.
+async fn dispatch_control_stream(
+    app: &App,
+    account: &str,
+    model: &str,
+    prompt: &str,
+    max_tokens: u32,
+    charge: bool,
+) -> Result<InferOutcome, String> {
     let plan = acquire_stream_with_wait(app, Duration::from_secs(20)).await?;
     let request_id = Uuid::new_v4();
+    info!(
+        %request_id,
+        shards = plan.shards.len(),
+        pool_mem_mib = plan.pool_mem_mib,
+        "control_dispatch sharded infer (try_acquire_stream)"
+    );
+    let out = fanout_infer(
+        app,
+        account,
+        model,
+        prompt,
+        max_tokens,
+        plan,
+        request_id,
+        charge,
+        true,
+        CoordinationPath::ControlDispatch,
+    )
+    .await?;
+
+    if charge {
+        let dual = {
+            let mut g = app.state.write().await;
+            g.should_dual_verify()
+        };
+        if dual {
+            match Box::pin(dispatch_control_stream(
+                app, account, model, prompt, max_tokens, false,
+            ))
+            .await
+            {
+                Ok(second) => {
+                    if second.text.trim() != out.text.trim() {
+                        warn!(
+                            first_len = out.text.len(),
+                            second_len = second.text.len(),
+                            "dual_verify text mismatch (accepted primary; tensors may be non-deterministic)"
+                        );
+                    } else {
+                        info!("dual_verify matched");
+                    }
+                }
+                Err(e) => warn!(error = %e, "dual_verify second pass failed"),
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fanout_infer(
+    app: &App,
+    account: &str,
+    model: &str,
+    prompt: &str,
+    max_tokens: u32,
+    plan: joule_proto::ClusterPlan,
+    request_id: Uuid,
+    charge: bool,
+    stream_reserved: bool,
+    coordination: CoordinationPath,
+) -> Result<InferOutcome, String> {
     let (tx, rx) = oneshot::channel();
     let awaiting: std::collections::HashSet<NodeId> =
         plan.shards.iter().map(|s| s.node.clone()).collect();
@@ -638,6 +738,7 @@ async fn dispatch_infer_once(
         .last()
         .map(|s| s.node.clone())
         .ok_or_else(|| "empty shard plan".to_string())?;
+
     {
         let mut g = app.state.write().await;
         g.pending.insert(
@@ -649,11 +750,14 @@ async fn dispatch_infer_once(
                 tail_text: None,
                 prompt_tokens: 0,
                 completion_tokens: 0,
-                charge: false, // dual pass does not double-charge
+                charge,
+                stream_reserved,
+                coordination,
                 tx: Some(tx),
             },
         );
     }
+
     let mut sent = 0usize;
     for shard in &plan.shards {
         let is_tail = shard.node == tail;
@@ -661,7 +765,7 @@ async fn dispatch_infer_once(
             shard.node.clone(),
             Message::InferRequest {
                 request_id,
-                model: model.clone(),
+                model: model.to_string(),
                 prompt: prompt.to_string(),
                 max_tokens,
                 plan: plan.clone(),
@@ -670,27 +774,52 @@ async fn dispatch_infer_once(
         );
         if send_to_agent(&app.routes, &shard.node, env).await {
             sent += 1;
+        } else {
+            warn!(node = %shard.node, "shard agent not connected");
         }
     }
+
     if sent == 0 {
         let mut g = app.state.write().await;
         g.pending.remove(&request_id);
-        g.cluster.release_stream(&plan);
-        g.wake_scheduler();
-        return Err("no connected agents for dual_verify".into());
+        if stream_reserved {
+            g.cluster.release_stream(&plan);
+            g.wake_scheduler();
+        }
+        return Err("no connected agents for sharded plan".into());
     }
+
+    if sent < plan.shards.len() {
+        let connected: std::collections::HashSet<_> =
+            app.routes.lock().await.keys().cloned().collect();
+        let mut g = app.state.write().await;
+        if let Some(p) = g.pending.get_mut(&request_id) {
+            p.awaiting.retain(|n| connected.contains(n));
+            if p.awaiting.is_empty() {
+                g.pending.remove(&request_id);
+                if stream_reserved {
+                    g.cluster.release_stream(&plan);
+                    g.wake_scheduler();
+                }
+                return Err("all shards disconnected mid-dispatch".into());
+            }
+        }
+    }
+
     match tokio::time::timeout(Duration::from_secs(45), rx).await {
         Ok(Ok(Ok(outcome))) => Ok(outcome),
         Ok(Ok(Err(e))) => Err(e),
-        Ok(Err(_)) => Err("dual_verify channel closed".into()),
+        Ok(Err(_)) => Err("infer channel closed".into()),
         Err(_) => {
             let mut g = app.state.write().await;
             if let Some(mut p) = g.pending.remove(&request_id) {
-                g.cluster.release_stream(&p.plan);
-                g.wake_scheduler();
+                if p.stream_reserved {
+                    g.cluster.release_stream(&p.plan);
+                    g.wake_scheduler();
+                }
                 let _ = p.tx.take();
             }
-            Err("dual_verify timed out".into())
+            Err("sharded infer timed out".into())
         }
     }
 }

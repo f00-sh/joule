@@ -976,7 +976,10 @@ async fn run_agent(
                                 );
                                 let offer = Envelope::new(
                                     node_id.clone(),
-                                    Message::PlanOffer { plan: plan.clone() },
+                                    Message::PlanOffer {
+                                        plan: plan.clone(),
+                                        request_id,
+                                    },
                                 );
                                 writer.write_all(&encode_line(&offer)?).await?;
                                 // Self-accept as shard if we are in the plan.
@@ -998,9 +1001,13 @@ async fn run_agent(
                             }
                         }
                     }
-                    Message::PlanOffer { plan } => {
+                    Message::PlanOffer {
+                        plan,
+                        request_id: plan_req_id,
+                    } => {
                         info!(
                             plan_id = %plan.plan_id,
+                            %plan_req_id,
                             shards = plan.shards.len(),
                             pool_mem = plan.pool_mem_mib,
                             "received PlanOffer"
@@ -1010,7 +1017,7 @@ async fn run_agent(
                             node_id.clone(),
                             Message::PlanAccept {
                                 plan_id: plan.plan_id,
-                                request_id: plan.plan_id, // plan_id doubles until RequestInfer correlation lands
+                                request_id: plan_req_id,
                                 accepted,
                                 reason: if accepted {
                                     "shard assigned".into()

@@ -291,6 +291,9 @@ pub enum Message {
     },
     PlanOffer {
         plan: ClusterPlan,
+        /// Correlates with RequestInfer / PlanAccept / InferRequest.
+        #[serde(default = "Uuid::nil")]
+        request_id: Uuid,
     },
     CapacitySnapshot {
         capacity: ClusterCapacity,
