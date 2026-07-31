@@ -92,12 +92,17 @@ pub async fn apply_model_update(app: &App, envelope: &SignedEnvelope) {
         let g = app.state.read().await;
         g.cluster
             .nodes()
-            .filter(|n| n.healthy)
-            .map(|n| (n.id.clone(), n.verified_mem_mib.max(256)))
+            .filter(|n| n.healthy && joule_cluster::placement_mem_mib(n.verified_mem_mib) > 0)
+            .map(|n| {
+                (
+                    n.id.clone(),
+                    joule_cluster::placement_mem_mib(n.verified_mem_mib),
+                )
+            })
             .collect()
     };
     if nodes.is_empty() {
-        warn!("model_update: no healthy nodes");
+        warn!("model_update: no healthy nodes with verified capacity");
         return;
     }
 

@@ -323,14 +323,22 @@ pub enum Message {
         request_id: Uuid,
         error: String,
     },
-    /// Spot anti-cheat challenge: agent must run model on prompt.
+    /// Spot capacity attestation: agent must solve mem-bound work for `capacity_seed_hex`.
+    /// `completion` in ChallengeResult is the capacity proof hex — **not** a public stub format.
     Challenge {
         challenge_id: Uuid,
         model: String,
         prompt: String,
+        /// 32-byte seed as lowercase hex (64 chars). Empty = invalid / legacy reject.
+        #[serde(default)]
+        capacity_seed_hex: String,
+        /// MiB of verified credit this challenge can unlock (typically 1024).
+        #[serde(default)]
+        credit_mib: u32,
     },
     ChallengeResult {
         challenge_id: Uuid,
+        /// Capacity proof hex from `joule_cluster::capacity_proof_hex` (or fail).
         completion: String,
         latency_ms: u32,
     },
@@ -354,9 +362,12 @@ pub enum Message {
         /// How many content digests this node seeds.
         #[serde(default)]
         blob_count: u32,
-        /// Advertised / verified memory (MiB) for mesh PlanOffer (Phase D).
+        /// Self-reported claim (UI only — never placement).
         #[serde(default)]
         mem_mib: u32,
+        /// Protocol-verified capacity (MiB) for mesh PlanOffer — claim alone is ignored.
+        #[serde(default)]
+        verified_mem_mib: u32,
         /// Throughput class hint (same units as NodeCaps).
         #[serde(default)]
         throughput_class: u16,

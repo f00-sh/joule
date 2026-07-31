@@ -853,6 +853,9 @@ async fn run_agent(
     let mut pending_software: Option<(String, SoftwareTarget)> = None;
     // Unique mesh neighbors seen via gossip (Phase A).
     let mut mesh_seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    // Local estimate of protocol-verified MiB (raised on capacity challenge proofs).
+    // Placement/mesh advertise this — never raw claim alone.
+    let mut local_verified_mem_mib: u32 = 0;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -877,6 +880,7 @@ async fn run_agent(
                             healthy: true,
                             blob_count,
                             mem_mib,
+                            verified_mem_mib: local_verified_mem_mib,
                             throughput_class,
                         },
                     );
@@ -910,6 +914,7 @@ async fn run_agent(
                                     healthy: true,
                                     blob_count,
                                     mem_mib,
+                                    verified_mem_mib: local_verified_mem_mib,
                                     throughput_class,
                                 },
                             );
@@ -928,6 +933,7 @@ async fn run_agent(
                         healthy,
                         blob_count,
                         mem_mib: peer_mem,
+                        verified_mem_mib: peer_verified,
                         throughput_class: peer_tp,
                     } => {
                         if healthy {
@@ -944,6 +950,7 @@ async fn run_agent(
                                 healthy,
                                 blob_count,
                                 peer_mem,
+                                peer_verified,
                                 peer_tp,
                             );
                         }
@@ -970,12 +977,17 @@ async fn run_agent(
                         prompt: _,
                         max_tokens: _,
                     } => {
-                        // Phase D: first healthy peer that can build a plan answers with PlanOffer.
+                        // Phase D: PlanOffer from **verified** donors only (never claim).
                         let donors = {
                             let g = local_mesh.lock().await;
                             let mut d = g.plan_donors();
-                            // Include self.
-                            d.push((node_id.clone(), mem_mib));
+                            // Include self only when locally verified > 0.
+                            if joule_cluster::placement_mem_mib(local_verified_mem_mib) > 0 {
+                                d.push((
+                                    node_id.clone(),
+                                    joule_cluster::placement_mem_mib(local_verified_mem_mib),
+                                ));
+                            }
                             d
                         };
                         match joule_cluster::plan_from_mesh_donors(&donors) {
@@ -1074,7 +1086,16 @@ async fn run_agent(
                                 let addrs = locate_addrs.get(i).cloned().unwrap_or_default();
                                 let size = sizes.get(i).copied().unwrap_or(0);
                                 if !addrs.is_empty() {
-                                    g.apply_peer_alive(peer, addrs.clone(), 0.0, true, 0, 0, 0);
+                                    g.apply_peer_alive(
+                                        peer,
+                                        addrs.clone(),
+                                        0.0,
+                                        true,
+                                        0,
+                                        0, // claim
+                                        0, // verified unknown from locate
+                                        0,
+                                    );
                                 }
                                 g.dht.put_blob_seeder(
                                     &sha256,
@@ -1238,10 +1259,22 @@ async fn run_agent(
                         let reply = Envelope::new(node_id.clone(), reply.msg);
                         writer.write_all(&encode_line(&reply)?).await?;
                     }
-                    Message::Challenge { .. } => {
+                    Message::Challenge {
+                        credit_mib: ch_credit,
+                        ..
+                    } => {
                         let reply = joule_control::agent_handle_challenge(&env, &engine)
                             .await
                             .context("handle challenge")?;
+                        // Local verified estimate tracks capacity proofs we successfully produced.
+                        let credit = if ch_credit == 0 {
+                            joule_cluster::CHALLENGE_CREDIT_MIB
+                        } else {
+                            ch_credit
+                        };
+                        local_verified_mem_mib = local_verified_mem_mib
+                            .saturating_add(credit)
+                            .min(mem_mib);
                         let reply = Envelope::new(node_id.clone(), reply.msg);
                         writer.write_all(&encode_line(&reply)?).await?;
                     }

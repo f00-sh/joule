@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use joule_proto::{
     decode_line, encode_line, resolve_cluster_model, Envelope, Message, NodeId, CLUSTER_MODEL,
 };
-use joule_runtime::{Engine, InferRequest, StubEngine};
+use joule_runtime::{Engine, InferRequest};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -148,12 +148,13 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 healthy,
                 blob_count,
                 mem_mib,
+                verified_mem_mib: _peer_verified,
                 throughput_class,
             } => {
                 let id = env.from.clone();
-                {
+                let verified = {
                     let mut g = app.state.write().await;
-                    // Placement uses **cluster verified** only — PeerAlive mem is claim/UI.
+                    // Placement uses **cluster verified** only — PeerAlive claim/self-report ignored.
                     let verified = g.cluster.verified_mem_mib(&id);
                     g.mesh.upsert(
                         id.clone(),
@@ -179,7 +180,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                         seq,
                         updated_unix_ms: seq,
                     });
-                }
+                    verified
+                };
                 // Gossip to other agents (control as temporary flood hub).
                 let routes = app.routes.lock().await;
                 let msg = Message::PeerAlive {
@@ -188,6 +190,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     healthy,
                     blob_count,
                     mem_mib,
+                    verified_mem_mib: verified,
                     throughput_class,
                 };
                 for (node, peer_tx) in routes.iter() {
@@ -873,7 +876,12 @@ pub async fn challenge_loop(app: App) {
                 let challenge_id = Uuid::new_v4();
                 let model = CLUSTER_MODEL.to_string();
                 let prompt = format!("joule-challenge:{challenge_id}");
-                let expected = StubEngine::expected_text(&model, &prompt);
+                // Non-public capacity oracle: random seed → mem-bound proof (not stub format).
+                let mut seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+                let credit_mib = joule_cluster::CHALLENGE_CREDIT_MIB;
+                let capacity_seed_hex = hex::encode(seed);
+                let expected = joule_cluster::capacity_proof_hex(&seed, credit_mib);
                 g.pending_challenges.insert(
                     challenge_id,
                     PendingChallenge {
@@ -881,15 +889,18 @@ pub async fn challenge_loop(app: App) {
                         model: model.clone(),
                         prompt: prompt.clone(),
                         expected,
+                        capacity_seed_hex: capacity_seed_hex.clone(),
+                        credit_mib,
                         started: Instant::now(),
                     },
                 );
-                Some((id, model, prompt, challenge_id))
+                Some((id, model, prompt, challenge_id, capacity_seed_hex, credit_mib))
             } else {
                 None
             }
         };
-        let Some((node, model, prompt, challenge_id)) = challenge else {
+        let Some((node, model, prompt, challenge_id, capacity_seed_hex, credit_mib)) = challenge
+        else {
             continue;
         };
 
@@ -899,6 +910,8 @@ pub async fn challenge_loop(app: App) {
                 challenge_id,
                 model,
                 prompt,
+                capacity_seed_hex,
+                credit_mib,
             },
         );
         if !send_to_agent(&app.routes, &node, env).await {
@@ -971,51 +984,40 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
     }
 }
 
-/// Agent-side challenge handler.
+/// Agent-side capacity challenge handler.
 ///
-/// Returns **only** `engine.infer(...).text` — never a hardcoded answer key.
-/// Control exact-matches against its oracle; a zero-GPU / formula-only agent
-/// without a real engine that produces the expected output cannot unlock claim.
-pub async fn agent_handle_challenge(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
+/// Unlocks verified capacity only via **mem-bound capacity proof**
+/// (`joule_cluster::capacity_proof_hex`). Public stub strings like
+/// `[joule-stub:…]` never unlock. Loaded vs unloaded engines both pass by
+/// performing the same work unit (infer text is not the oracle).
+pub async fn agent_handle_challenge(env: &Envelope, _engine: &impl Engine) -> Result<Envelope> {
     match &env.msg {
         Message::Challenge {
             challenge_id,
-            model,
-            prompt,
+            capacity_seed_hex,
+            credit_mib,
+            ..
         } => {
             let started = Instant::now();
-            use joule_proto::{ClusterPlan, ShardAssignment, ShardRole};
-            let plan = ClusterPlan {
-                plan_id: Uuid::new_v4(),
-                model: model.clone(),
-                shards: vec![ShardAssignment {
-                    node: env.from.clone(),
-                    role: ShardRole::Replica,
-                    layer_start: Some(0),
-                    layer_end: Some(0),
-                    tp_rank: None,
-                    tp_world: None,
-                    mem_share_mib: 0,
-                    mem_fraction_ppm: 1_000_000,
-                }],
-                pool_mem_mib: 0,
-                model_layers: 1,
+            let seed = joule_cluster::parse_seed_hex(capacity_seed_hex)
+                .context("challenge missing/invalid capacity_seed_hex")?;
+            let credit = if *credit_mib == 0 {
+                joule_cluster::CHALLENGE_CREDIT_MIB
+            } else {
+                *credit_mib
             };
-            engine.load_plan(&plan).await.context("challenge load_plan")?;
-            let out = engine
-                .infer(InferRequest {
-                    model: model.clone(),
-                    prompt: prompt.clone(),
-                    max_tokens: 64,
-                })
-                .await
-                .context("challenge infer")?;
+            // Blocking mem-bound work — run off the async scheduler when large.
+            let proof = tokio::task::spawn_blocking(move || {
+                joule_cluster::capacity_proof_hex(&seed, credit)
+            })
+            .await
+            .context("capacity challenge join")?;
             let latency_ms = started.elapsed().as_millis() as u32;
             Ok(Envelope::new(
                 env.from.clone(),
                 Message::ChallengeResult {
                     challenge_id: *challenge_id,
-                    completion: out.text,
+                    completion: proof,
                     latency_ms,
                 },
             ))

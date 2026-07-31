@@ -64,6 +64,7 @@ async fn spawn_agent(
             healthy: true,
             blob_count: 0,
             mem_mib: mem,
+            verified_mem_mib: 0,
             throughput_class: 40,
         },
     );
@@ -93,6 +94,7 @@ async fn spawn_agent(
                             healthy: true,
                             blob_count: 0,
                             mem_mib: mem,
+                            verified_mem_mib: 0,
                             throughput_class: 40,
                         },
                     );
@@ -691,6 +693,7 @@ async fn mesh_peer_alive_and_blob_locate_multiaddrs() {
                     healthy: true,
                     blob_count: 1,
                     mem_mib: 0,
+                    verified_mem_mib: 0,
                     throughput_class: 0,
                 },
             ))
@@ -762,6 +765,7 @@ async fn mesh_peer_alive_and_blob_locate_multiaddrs() {
                     healthy: true,
                     blob_count: 1,
                     mem_mib: 0,
+                    verified_mem_mib: 0,
                     throughput_class: 0,
                 },
             ))
@@ -1193,6 +1197,11 @@ async fn late_joiner_gets_model_digests() {
         .await
         .unwrap();
     let _ = lines.next_line().await.unwrap(); // welcome
+    // Late joiner must have verified capacity before chunk placement includes them.
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
     let slot = got.clone();
     let late = tokio::spawn(async move {
         loop {
@@ -1210,6 +1219,22 @@ async fn late_joiner_gets_model_digests() {
             }
         }
     });
+
+    // New envelope id (dedupe would reject re-inject of same id) after verified unlock.
+    let mut env2 = env;
+    env2.id = Uuid::new_v4();
+    env2.issued_at_unix_ms = now_ms();
+    env2.body_sha256 = body_sha256_hex(body);
+    let pre2 = operator_preimage(&env2);
+    env2.sig_ed25519_hex = hex::encode(sk.sign(&pre2).to_bytes());
+    client
+        .post(format!("http://{http_addr}/v1/broadcasts/inject"))
+        .json(&env2)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
 
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {

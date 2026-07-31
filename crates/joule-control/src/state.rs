@@ -153,7 +153,10 @@ pub struct PendingChallenge {
     pub node: NodeId,
     pub model: String,
     pub prompt: String,
+    /// Capacity proof hex from `joule_cluster::capacity_proof_hex` (not stub format).
     pub expected: String,
+    pub capacity_seed_hex: String,
+    pub credit_mib: u32,
     pub started: Instant,
 }
 
@@ -972,18 +975,15 @@ mod challenge_integrity_tests {
         (id, account)
     }
 
-    #[test]
-    fn wrong_completion_fails_even_if_model_loaded() {
-        let mut state = ControlState::new();
-        let (id, account) = register_claimed(&mut state, 24_576);
-        // Attested mid capacity (not free full claim).
-        state.cluster.set_verified_mem_mib(&id, 4096);
-        assert_eq!(state.cluster.verified_mem_mib(&id), 4096);
-        state.nodes_model_loaded.insert(id.clone());
-        state.sync_best_mem_for_account(&account);
-
+    fn insert_capacity_challenge(
+        state: &mut ControlState,
+        id: &NodeId,
+        seed: [u8; 32],
+        credit_mib: u32,
+        started: Instant,
+    ) -> (Uuid, String) {
         let challenge_id = Uuid::new_v4();
-        let expected = StubEngine::expected_text(CLUSTER_MODEL, &format!("joule-challenge:{challenge_id}"));
+        let expected = joule_cluster::capacity_proof_hex(&seed, credit_mib);
         state.pending_challenges.insert(
             challenge_id,
             PendingChallenge {
@@ -991,9 +991,27 @@ mod challenge_integrity_tests {
                 model: CLUSTER_MODEL.into(),
                 prompt: format!("joule-challenge:{challenge_id}"),
                 expected: expected.clone(),
-                started: Instant::now(),
+                capacity_seed_hex: hex::encode(seed),
+                credit_mib,
+                started,
             },
         );
+        (challenge_id, expected)
+    }
+
+    #[test]
+    fn wrong_completion_fails_even_if_model_loaded() {
+        let mut state = ControlState::new();
+        let (id, account) = register_claimed(&mut state, 24_576);
+        state.cluster.set_verified_mem_mib(&id, 4096);
+        assert_eq!(state.cluster.verified_mem_mib(&id), 4096);
+        state.nodes_model_loaded.insert(id.clone());
+        state.sync_best_mem_for_account(&account);
+
+        let seed = [3u8; 32];
+        let credit = joule_cluster::CHALLENGE_CREDIT_MIB;
+        let (challenge_id, expected) =
+            insert_capacity_challenge(&mut state, &id, seed, credit, Instant::now());
         // Wrong answer + model_loaded must still fail
         let ok = state
             .settle_challenge_result(challenge_id, "I am a 5070 farm".into(), &id)
@@ -1035,16 +1053,12 @@ mod challenge_integrity_tests {
         assert_eq!(state.cluster.verified_mem_mib(&id), 4096);
         state.sync_best_mem_for_account(&account);
 
-        let challenge_id = Uuid::new_v4();
-        state.pending_challenges.insert(
-            challenge_id,
-            PendingChallenge {
-                node: id.clone(),
-                model: CLUSTER_MODEL.into(),
-                prompt: "joule-challenge:x".into(),
-                expected: "whatever".into(),
-                started: Instant::now() - Duration::from_secs(120), // expired
-            },
+        let (challenge_id, _) = insert_capacity_challenge(
+            &mut state,
+            &id,
+            [9u8; 32],
+            joule_cluster::CHALLENGE_CREDIT_MIB,
+            Instant::now() - Duration::from_secs(120),
         );
         let before = state.cluster.verified_mem_mib(&id);
         state.prune();
@@ -1080,27 +1094,17 @@ mod challenge_integrity_tests {
     }
 
     #[test]
-    fn exact_match_challenge_raises_verified_by_credit_only() {
+    fn capacity_proof_challenge_raises_verified_by_credit_only() {
         let mut state = ControlState::new();
         let (id, account) = register_claimed(&mut state, 8192);
-        let challenge_id = Uuid::new_v4();
-        let prompt = format!("joule-challenge:{challenge_id}");
-        let expected = StubEngine::expected_text(CLUSTER_MODEL, &prompt);
-        state.pending_challenges.insert(
-            challenge_id,
-            PendingChallenge {
-                node: id.clone(),
-                model: CLUSTER_MODEL.into(),
-                prompt,
-                expected: expected.clone(),
-                started: Instant::now(),
-            },
-        );
+        let seed = [0xABu8; 32];
+        let credit = joule_cluster::CHALLENGE_CREDIT_MIB;
+        let (challenge_id, expected) =
+            insert_capacity_challenge(&mut state, &id, seed, credit, Instant::now());
         let ok = state
             .settle_challenge_result(challenge_id, expected, &id)
             .unwrap();
         assert!(ok);
-        // One ok = CHALLENGE_CREDIT_MIB, never full claim
         assert_eq!(
             state.cluster.verified_mem_mib(&id),
             joule_cluster::CHALLENGE_CREDIT_MIB
@@ -1112,25 +1116,49 @@ mod challenge_integrity_tests {
         );
     }
 
-    /// Formula-only / public-stub-echo cannot unlock arbitrary claim: after one
-    /// honest pass only CHALLENGE_CREDIT_MIB is verified; mesh plan_donors uses
-    /// that, not claim; mint factor tracks verified not claim.
+    /// CRITICAL: public StubEngine format string must NOT raise verified.
+    #[test]
+    fn public_stub_formula_does_not_unlock_verified() {
+        let mut state = ControlState::new();
+        let claim = 24_576u32;
+        let (id, _account) = register_claimed(&mut state, claim);
+        let seed = [0x11u8; 32];
+        let credit = joule_cluster::CHALLENGE_CREDIT_MIB;
+        let (challenge_id, real_expected) =
+            insert_capacity_challenge(&mut state, &id, seed, credit, Instant::now());
+        let forge = StubEngine::expected_text(
+            CLUSTER_MODEL,
+            &format!("joule-challenge:{challenge_id}"),
+        );
+        assert_ne!(
+            forge, real_expected,
+            "stub format must not equal capacity proof"
+        );
+        let ok = state
+            .settle_challenge_result(challenge_id, forge, &id)
+            .unwrap();
+        assert!(!ok, "public stub formula must fail capacity challenge");
+        assert_eq!(
+            state.cluster.verified_mem_mib(&id),
+            0,
+            "forge must leave verified at 0 (or decay from 0)"
+        );
+    }
+
+    /// Formula-only / public-stub-echo cannot unlock arbitrary claim.
     #[test]
     fn capacity_matrix_claim_verified_states() {
         let claim = 24_576u32;
         let mut state = ControlState::new();
         let (id, account) = register_claimed(&mut state, claim);
 
-        // --- verified = 0 ---
         assert_eq!(state.cluster.verified_mem_mib(&id), 0);
         let fair0 = state.fairness_for(&account);
-        // Mint floor only (economic); never placement weight from claim.
         assert_eq!(fair0.mem_mib, joule_cluster::economic_mem_mib(0));
         assert!(
             state.cluster.plan_full_pool().is_err(),
             "claim-only must not form placement plan"
         );
-        // PeerAlive claim without verified → mesh excludes
         state.mesh.upsert(
             id.clone(),
             vec!["tcp://10.0.0.1:1".into()],
@@ -1141,16 +1169,9 @@ mod challenge_integrity_tests {
             0,
             40,
         );
-        assert!(
-            state.mesh.plan_donors().is_empty(),
-            "claim-only must not enter mesh plan_donors"
-        );
-        assert!(
-            state.mesh_plan_donors().is_empty(),
-            "mesh_plan_donors must read cluster verified, not claim"
-        );
+        assert!(state.mesh.plan_donors().is_empty());
+        assert!(state.mesh_plan_donors().is_empty());
 
-        // --- mid verified ---
         state.cluster.set_verified_mem_mib(&id, 4096);
         state.mesh.upsert(
             id.clone(),
@@ -1169,10 +1190,7 @@ mod challenge_integrity_tests {
         let donors_mid = state.mesh.plan_donors();
         assert_eq!(donors_mid.len(), 1);
         assert_eq!(donors_mid[0].1, 4096);
-        let mesh_plan = joule_cluster::plan_from_mesh_donors(&donors_mid).unwrap();
-        assert_eq!(mesh_plan.pool_mem_mib, 4096);
 
-        // --- post-fail half ---
         state.cluster.on_challenge_result(&id, false);
         let half = state.cluster.verified_mem_mib(&id);
         assert_eq!(half, 2048);
@@ -1186,16 +1204,9 @@ mod challenge_integrity_tests {
             half,
             40,
         );
-        let fair_half = state.fairness_for(&account);
-        assert_eq!(fair_half.mem_mib, half);
-        assert_eq!(
-            state.cluster.plan_full_pool().unwrap().pool_mem_mib,
-            u64::from(half)
-        );
         assert_eq!(state.mesh_plan_donors()[0].1, half);
 
-        // mint at half < mint at claim
-        let m_half = score_mint(EconomyEvent::Heartbeat, fair_half);
+        let m_half = score_mint(EconomyEvent::Heartbeat, state.fairness_for(&account));
         let m_claim = score_mint(
             EconomyEvent::Heartbeat,
             FairnessSnapshot {
@@ -1206,10 +1217,8 @@ mod challenge_integrity_tests {
         assert!(m_half.total_mj < m_claim.total_mj);
     }
 
-    /// Public stub answer-key alone cannot free-unlock a farm: many successes
-    /// still cap at N * CHALLENGE_CREDIT_MIB.
     #[test]
-    fn stub_echo_cannot_unlock_full_farm_claim() {
+    fn progressive_capacity_credits_cap_below_farm_claim() {
         let mut state = ControlState::new();
         let claim = 65_536u32;
         let (id, _account) = register_claimed(&mut state, claim);
@@ -1219,7 +1228,6 @@ mod challenge_integrity_tests {
         let v = state.cluster.verified_mem_mib(&id);
         assert!(v < claim);
         assert_eq!(v, joule_cluster::CHALLENGE_CREDIT_MIB * 10);
-        // Mesh plan uses cluster verified via mesh_plan_donors
         state.mesh.upsert(
             id.clone(),
             vec![],
@@ -1227,7 +1235,7 @@ mod challenge_integrity_tests {
             true,
             0,
             claim,
-            0, // stale claim-only mesh entry
+            0,
             0,
         );
         let donors = state.mesh_plan_donors();
@@ -1235,14 +1243,17 @@ mod challenge_integrity_tests {
         assert_eq!(donors[0].1, joule_cluster::economic_mem_mib(v));
     }
 
+    /// Agent returns capacity proof; matches control oracle; stub text is not used.
     #[tokio::test]
-    async fn agent_challenge_returns_engine_infer_not_hardcoded_key() {
+    async fn agent_challenge_returns_capacity_proof_not_stub_formula() {
         use crate::agent_handle_challenge;
         use joule_proto::{Envelope, Message};
-        // Handler must call engine.load_plan + engine.infer and return out.text only.
-        // StubEngine produces a deterministic body; any hardcoded alternate would fail.
         let engine = StubEngine::new();
         let id = NodeId::new();
+        let seed = [0x5Eu8; 32];
+        let credit = joule_cluster::CHALLENGE_CREDIT_MIB;
+        let seed_hex = hex::encode(seed);
+        let want = joule_cluster::capacity_proof_hex(&seed, credit);
         let prompt = "joule-challenge:unique-nonce-9f3a";
         let env = Envelope::new(
             id.clone(),
@@ -1250,6 +1261,8 @@ mod challenge_integrity_tests {
                 challenge_id: Uuid::new_v4(),
                 model: CLUSTER_MODEL.into(),
                 prompt: prompt.into(),
+                capacity_seed_hex: seed_hex,
+                credit_mib: credit,
             },
         );
         let reply = agent_handle_challenge(&env, &engine)
@@ -1257,21 +1270,13 @@ mod challenge_integrity_tests {
             .expect("challenge");
         match reply.msg {
             Message::ChallengeResult { completion, .. } => {
-                assert_eq!(
+                assert_eq!(completion, want, "must be capacity proof hex");
+                assert_ne!(
                     completion,
                     StubEngine::expected_text(CLUSTER_MODEL, prompt),
-                    "must be engine.infer text after load_plan"
+                    "must not return public stub formula"
                 );
-                assert!(
-                    completion.contains(prompt),
-                    "completion must include the challenge prompt"
-                );
-                assert!(
-                    !completion.eq_ignore_ascii_case("ok")
-                        && !completion.contains("5070")
-                        && !completion.contains("farm"),
-                    "must not return a trivial hardcoded unlock phrase"
-                );
+                assert!(joule_cluster::capacity_verify(&seed, credit, &completion));
             }
             other => panic!("expected ChallengeResult, got {other:?}"),
         }

@@ -38,10 +38,11 @@ There is **no cash path** on the public pool. You mint mJ by donating healthy co
 | PeerAlive `mem_mib` | self-report | claim | UI / display only |
 
 - Join starts `verified_mem_mib = 0` regardless of claim.
-- Each successful challenge credits at most **`CHALLENGE_CREDIT_MIB` (1024)** toward claim — **never** free full-claim unlock after N stub answers.
+- Capacity challenges use a **mem-bound proof** (`joule_cluster::capacity_proof_hex(seed, credit)`). Public stub strings like `[joule-stub:…]` **never** unlock verified.
+- Each successful challenge credits at most **`CHALLENGE_CREDIT_MIB` (1024)** toward claim — **never** free full-claim unlock.
 - Fail **halves** verified. Expired unanswered challenges count as fails.
-- Agent challenge path returns **only** `engine.infer().text` (no hardcoded answer key).
-- Mesh `mesh_plan_donors()` always re-reads **cluster verified**, not PeerAlive claim.
+- Mesh placement (control `mesh_plan_donors`, LocalMesh, PeerBus) uses **verified only**; PeerAlive claim is UI.
+- `model_update` chunk placement excludes `verified == 0` nodes.
 
 ---
 

@@ -3,10 +3,15 @@
 //! Internet-wide volunteer pool. Nodes join the control plane over any path.
 //! Scheduling of free/loaded compute lives in [`scheduler`].
 
+mod capacity_challenge;
 mod chunks;
 mod erasure;
 mod scheduler;
 
+pub use capacity_challenge::{
+    parse_seed_hex, proof_hex as capacity_proof_hex, solve as capacity_solve,
+    verify as capacity_verify, BYTES_PER_CREDIT_MIB,
+};
 pub use chunks::{
     live_replica_counts, plan_redundant_chunks, plan_survives, required_digests_for_node,
     ChunkHold, ChunkRole, ModelChunk, NodeChunkPlan, RedundantChunkPlan, DEFAULT_REPLICA_FACTOR,

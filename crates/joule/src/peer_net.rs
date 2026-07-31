@@ -23,7 +23,10 @@ const CHUNK: usize = 64 * 1024;
 #[derive(Debug, Clone, Default)]
 pub struct MeshNeighbor {
     pub multiaddrs: Vec<String>,
+    /// Self-reported claim (UI only).
     pub mem_mib: u32,
+    /// Protocol-verified capacity for placement (claim ignored).
+    pub verified_mem_mib: u32,
     pub throughput_class: u16,
     pub healthy: bool,
     pub load: f32,
@@ -34,8 +37,13 @@ impl MeshNeighbor {
     /// Compact status line for logs / debug.
     pub fn summary(&self) -> String {
         format!(
-            "mem={} load={:.2} thr={} blobs={} healthy={}",
-            self.mem_mib, self.load, self.throughput_class, self.blob_count, self.healthy
+            "claim={} verified={} load={:.2} thr={} blobs={} healthy={}",
+            self.mem_mib,
+            self.verified_mem_mib,
+            self.load,
+            self.throughput_class,
+            self.blob_count,
+            self.healthy
         )
     }
 }
@@ -62,6 +70,7 @@ impl LocalMesh {
         healthy: bool,
         blob_count: u32,
         mem_mib: u32,
+        verified_mem_mib: u32,
         throughput_class: u16,
     ) {
         self.neighbors.insert(
@@ -69,6 +78,7 @@ impl LocalMesh {
             MeshNeighbor {
                 multiaddrs: multiaddrs.clone(),
                 mem_mib,
+                verified_mem_mib,
                 throughput_class,
                 healthy,
                 load,
@@ -123,13 +133,21 @@ impl LocalMesh {
         self.neighbors.len() as u32
     }
 
-    /// Healthy donors with VRAM for mesh PlanOffer (Phase D).
+    /// Healthy donors with **verified** VRAM for mesh PlanOffer (Phase D).
+    /// Claim-only peers (`verified_mem_mib == 0`) are excluded.
     pub fn plan_donors(&self) -> Vec<(NodeId, u32)> {
         let mut v: Vec<_> = self
             .neighbors
             .iter()
-            .filter(|(_, n)| n.healthy && n.mem_mib > 0)
-            .map(|(id, n)| (id.clone(), n.mem_mib))
+            .filter(|(_, n)| {
+                n.healthy && joule_cluster::placement_mem_mib(n.verified_mem_mib) > 0
+            })
+            .map(|(id, n)| {
+                (
+                    id.clone(),
+                    joule_cluster::placement_mem_mib(n.verified_mem_mib),
+                )
+            })
             .collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
         v
@@ -241,6 +259,7 @@ async fn handle_peer_session(
                 healthy,
                 blob_count,
                 mem_mib,
+                verified_mem_mib,
                 throughput_class,
             } => {
                 let mut g = mesh.lock().await;
@@ -251,6 +270,7 @@ async fn handle_peer_session(
                     healthy,
                     blob_count,
                     mem_mib,
+                    verified_mem_mib,
                     throughput_class,
                 );
                 let detail = g
@@ -388,6 +408,7 @@ async fn announce_one(
             healthy: true,
             blob_count,
             mem_mib: 0,
+            verified_mem_mib: 0,
             throughput_class: 0,
         },
     );
@@ -461,9 +482,23 @@ mod tests {
             0.1,
             true,
             1,
-            8192,
+            8192, // claim
+            0,    // verified — claim-only excluded from plan_donors
             40,
         );
+        assert!(m.plan_donors().is_empty());
+        m.apply_peer_alive(
+            &id,
+            vec!["tcp://127.0.0.1:9".into()],
+            0.1,
+            true,
+            1,
+            8192,
+            4096, // verified
+            40,
+        );
+        assert_eq!(m.plan_donors().len(), 1);
+        assert_eq!(m.plan_donors()[0].1, 4096);
         let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         m.apply_blobs_have(
             &id,

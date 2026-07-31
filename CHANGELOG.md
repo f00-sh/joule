@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **Structural capacity invariant**: single verified-only API for anything affecting mJ or placement — `placement_mem_mib` (0 if unverified) vs `economic_mem_mib` (mint floor only); stream slots / plan_sharded_pool / mesh_plan_donors / rank exclude claim-only peers
-- **Challenge unlock**: at most `CHALLENGE_CREDIT_MIB` (1024) per success — **no** free full-claim unlock after N stub passes; agent returns engine.infer text only
+- **Capacity challenges (non-forgeable oracle)**: mem-bound `capacity_proof_hex(seed, credit)` replaces public `StubEngine::expected_text`; stub formula **cannot** unlock verified; loaded/unloaded agents both solve the same work unit
+- **Challenge unlock**: at most `CHALLENGE_CREDIT_MIB` (1024) per success — **no** free full-claim unlock
+- **Mesh verified-only**: LocalMesh + PeerBus + PeerAlive `verified_mem_mib`; model_update excludes unverified nodes
 - **E2E mesh geometry**: tests assert `mesh_plan_donors()` (cluster verified), not PeerAlive claim
 
 ### Added

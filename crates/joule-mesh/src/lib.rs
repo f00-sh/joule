@@ -17,34 +17,45 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// Peer identity + capacity for election / planning.
+/// Peer identity + **verified** capacity for election / planning.
+///
+/// `verified_mem_mib` must be protocol-attested capacity. Raw GPU claims must
+/// never be stored here (see capacity challenges / control verified registry).
 #[derive(Debug, Clone)]
 pub struct MeshDonor {
     pub node: NodeId,
-    pub mem_mib: u32,
+    pub verified_mem_mib: u32,
     pub healthy: bool,
 }
 
-/// Deterministic coordinator: max mem_mib, then node id string.
+/// Deterministic coordinator: max **verified** mem, then node id string.
 pub fn elect_coordinator(donors: &[MeshDonor]) -> Option<NodeId> {
-    let mut eligible: Vec<&MeshDonor> = donors.iter().filter(|d| d.healthy && d.mem_mib > 0).collect();
+    let mut eligible: Vec<&MeshDonor> = donors
+        .iter()
+        .filter(|d| d.healthy && joule_cluster::placement_mem_mib(d.verified_mem_mib) > 0)
+        .collect();
     if eligible.is_empty() {
         return None;
     }
     eligible.sort_by(|a, b| {
-        b.mem_mib
-            .cmp(&a.mem_mib)
+        joule_cluster::placement_mem_mib(b.verified_mem_mib)
+            .cmp(&joule_cluster::placement_mem_mib(a.verified_mem_mib))
             .then_with(|| a.node.to_string().cmp(&b.node.to_string()))
     });
     Some(eligible[0].node.clone())
 }
 
-/// Build plan from remaining donors (re-plan entry).
+/// Build plan from remaining donors (re-plan entry) — verified placement only.
 pub fn replan(donors: &[MeshDonor]) -> Result<ClusterPlan> {
     let pairs: Vec<(NodeId, u32)> = donors
         .iter()
-        .filter(|d| d.healthy && d.mem_mib > 0)
-        .map(|d| (d.node.clone(), d.mem_mib))
+        .filter(|d| d.healthy && joule_cluster::placement_mem_mib(d.verified_mem_mib) > 0)
+        .map(|d| {
+            (
+                d.node.clone(),
+                joule_cluster::placement_mem_mib(d.verified_mem_mib),
+            )
+        })
         .collect();
     plan_from_mesh_donors(&pairs).map_err(|e| anyhow::anyhow!(e))
 }
@@ -544,7 +555,7 @@ pub async fn peer_only_chat(
         bus.register_peer(
             MeshDonor {
                 node: id.clone(),
-                mem_mib: *mem,
+                verified_mem_mib: *mem,
                 healthy: true,
             },
             tx,
@@ -584,12 +595,12 @@ mod tests {
         let d = vec![
             MeshDonor {
                 node: a.clone(),
-                mem_mib: 8192,
+                verified_mem_mib: 8192,
                 healthy: true,
             },
             MeshDonor {
                 node: b.clone(),
-                mem_mib: 16384,
+                verified_mem_mib: 16384,
                 healthy: true,
             },
         ];
@@ -630,7 +641,7 @@ mod tests {
             bus.register_peer(
                 MeshDonor {
                     node: id.clone(),
-                    mem_mib: *mem,
+                    verified_mem_mib: *mem,
                     healthy: true,
                 },
                 tx,
