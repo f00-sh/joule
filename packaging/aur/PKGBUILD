@@ -1,0 +1,44 @@
+# Maintainer: f00 joule packagers <william@theesfeld.net>
+# Binary package from GitHub Releases (prebuilt). Source build: use joule-git if published.
+#
+# Publish to AUR as package name `joule-bin` (or `joule`) by copying this directory
+# into the AUR repo and updating pkgver / sha256sums from the release SHA256SUMS.
+#
+#   curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/SHA256SUMS
+#
+# Dummy-easy end user:
+#   yay -S joule-bin
+#   # or once this PKGBUILD is on AUR
+
+pkgname=joule-bin
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Donate idle compute, earn millijoules, use open-weight AI (prebuilt binary)"
+arch=('x86_64' 'aarch64')
+url="https://joule.f00.sh/"
+license=('MIT')
+depends=()
+provides=('joule')
+conflicts=('joule')
+options=('!strip')
+source_x86_64=("https://github.com/f00-sh/joule/releases/download/v${pkgver}/joule-${pkgver}-linux-x86_64.tar.gz")
+source_aarch64=("https://github.com/f00-sh/joule/releases/download/v${pkgver}/joule-${pkgver}-linux-aarch64.tar.gz")
+# Update from release SHA256SUMS when cutting a version:
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd "${srcdir}"
+  # Tarball may extract as joule-${pkgver}-linux-* or flat
+  local root
+  root="$(find . -maxdepth 2 -type f -name joule | head -1 | xargs dirname)"
+  install -Dm755 "${root}/joule" "${pkgdir}/usr/bin/joule"
+  if [[ -f "${root}/man/joule.1" ]]; then
+    install -Dm644 "${root}/man/joule.1" "${pkgdir}/usr/share/man/man1/joule.1"
+  elif [[ -f "${root}/man/joule.1.md" ]]; then
+    install -Dm644 "${root}/man/joule.1.md" "${pkgdir}/usr/share/doc/joule/joule.1.md"
+  fi
+  if [[ -f "${root}/LICENSE" ]]; then
+    install -Dm644 "${root}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  fi
+}

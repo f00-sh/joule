@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# joule — install binary + man page.
+# joule — install binary + man page (dummy easy).
+#
+# One-liner (Linux / macOS):
+#   curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh
 #
 # Modes:
-#   1) Local tree (default when run from a clone after cargo build):
+#   1) From GitHub Releases (default for curl | sh):
+#        JOULE_FROM_RELEASE=1 ./scripts/install.sh
+#   2) Local tree after cargo build:
 #        ./scripts/install.sh
-#   2) From GitHub Releases (when assets exist):
-#        curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh
-#        or: JOULE_FROM_RELEASE=1 ./scripts/install.sh
 #
-# f00 does **not** host the binary as a CDN product path — releases are on GitHub;
-# peer seed is for swarm software_update digests after you already have a binary.
+# Installers / binaries: GitHub Releases only.
+# Model weights: never from f00 — peers + official sources + sha256.
 set -euo pipefail
 
 PROJECT="joule"
@@ -28,10 +30,19 @@ need_cmd() {
 }
 
 need_cmd mkdir
-need_cmd install
 need_cmd uname
 
-os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+# Normalize OS → asset name (linux | darwin)
+raw_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+case "$raw_os" in
+  linux*) os="linux" ;;
+  darwin*) os="darwin" ;;
+  msys* | mingw* | cygwin*)
+    die "use install.ps1 on Windows: irm https://github.com/${REPO}/releases/latest/download/install.ps1 | iex"
+    ;;
+  *) die "unsupported OS: $raw_os" ;;
+esac
+
 arch="$(uname -m)"
 case "$arch" in
   x86_64 | amd64) arch="x86_64" ;;
@@ -46,16 +57,24 @@ install_man_from_repo() {
   if [[ -f "${man_src}/joule.1" ]]; then
     install -m 0644 "${man_src}/joule.1" "${INSTALL_MAN_DIR}/joule.1"
   elif [[ -f "${man_src}/joule.1.md" ]]; then
-    # Ship markdown as man-source until pandoc man is generated on release.
     install -m 0644 "${man_src}/joule.1.md" "${INSTALL_MAN_DIR}/joule.1.md"
-    printf 'note: installed joule.1.md (run pandoc on release for roff man)\n' >&2
-  else
-    die "man page not found under ${man_src}"
+    printf 'note: installed joule.1.md (roff man ships in release tarballs when built)\n' >&2
   fi
+}
+
+path_hint() {
+  case ":${PATH}:" in
+    *":${INSTALL_BIN_DIR}:"*) ;;
+    *)
+      printf '\nAdd to PATH (zsh/bash):\n  export PATH="%s:$PATH"\n' "${INSTALL_BIN_DIR}" >&2
+      printf 'Or:  echo '\''export PATH="%s:$PATH"'\'' >> ~/.bashrc\n' "${INSTALL_BIN_DIR}" >&2
+      ;;
+  esac
 }
 
 install_local() {
   need_cmd cargo
+  need_cmd install
   [[ -n "${ROOT}" && -f "${ROOT}/Cargo.toml" ]] || die "not a joule checkout"
   cd "${ROOT}"
   if [[ ! -x target/release/joule ]]; then
@@ -63,44 +82,57 @@ install_local() {
   fi
   install -m 0755 target/release/joule "${INSTALL_BIN_DIR}/joule"
   install_man_from_repo "${ROOT}/man"
-  printf 'installed %s/joule\n' "${INSTALL_BIN_DIR}"
-  printf 'man sources in %s\n' "${INSTALL_MAN_DIR}"
+  printf 'installed %s/joule (local build)\n' "${INSTALL_BIN_DIR}"
+  path_hint
   printf 'run: joule version\n'
 }
 
 install_release() {
   need_cmd curl
   need_cmd tar
-  local tag ver asset url tmp
-  tag="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
-  [[ -n "${tag}" ]] || die "could not resolve latest release tag"
+  need_cmd install
+  local tag ver asset url tmp api
+  api="https://api.github.com/repos/${REPO}/releases/latest"
+  tag="$(curl -fsSL "${api}" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
+  [[ -n "${tag}" ]] || die "could not resolve latest release tag (${api})"
   ver="${tag#v}"
   asset="${PROJECT}-${ver}-${os}-${arch}.tar.gz"
   url="https://github.com/${REPO}/releases/download/${tag}/${asset}"
   tmp="$(mktemp -d)"
   trap 'rm -rf "${tmp}"' EXIT
+  printf 'downloading %s\n' "${url}"
   if ! curl -fsSL "${url}" -o "${tmp}/${asset}"; then
-    die "release asset missing (${url}). Build from source: git clone + ./scripts/install.sh"
+    die "release asset missing (${url}). Try another platform on https://joule.f00.sh/download.html or build: git clone + cargo build --release -p joule"
   fi
   tar -C "${tmp}" -xzf "${tmp}/${asset}"
+  # Tarball may be flat or a single top-level dir.
+  local bin=""
   if [[ -x "${tmp}/joule" ]]; then
-    install -m 0755 "${tmp}/joule" "${INSTALL_BIN_DIR}/joule"
+    bin="${tmp}/joule"
   elif [[ -x "${tmp}/bin/joule" ]]; then
-    install -m 0755 "${tmp}/bin/joule" "${INSTALL_BIN_DIR}/joule"
+    bin="${tmp}/bin/joule"
   else
-    die "tarball has no joule binary"
+    bin="$(find "${tmp}" -type f -name joule -perm -111 2>/dev/null | head -1 || true)"
   fi
-  if [[ -f "${tmp}/joule.1" ]]; then
-    install -m 0644 "${tmp}/joule.1" "${INSTALL_MAN_DIR}/joule.1"
-  elif [[ -f "${tmp}/man/joule.1" ]]; then
-    install -m 0644 "${tmp}/man/joule.1" "${INSTALL_MAN_DIR}/joule.1"
+  [[ -n "${bin}" && -x "${bin}" ]] || die "tarball has no joule binary"
+  install -m 0755 "${bin}" "${INSTALL_BIN_DIR}/joule"
+
+  local manf=""
+  manf="$(find "${tmp}" -type f \( -name 'joule.1' -o -name 'joule.1.md' \) 2>/dev/null | head -1 || true)"
+  if [[ -n "${manf}" ]]; then
+    install -m 0644 "${manf}" "${INSTALL_MAN_DIR}/$(basename "${manf}")"
   else
     printf 'warning: no man page in tarball\n' >&2
   fi
-  printf 'installed %s/joule from %s\n' "${INSTALL_BIN_DIR}" "${tag}"
-  printf 'run: joule version && man joule\n'
+
+  printf '\ninstalled %s/joule from %s\n' "${INSTALL_BIN_DIR}" "${tag}"
+  path_hint
+  printf 'run: joule version\n'
+  printf 'then: joule agent --account YOU\n'
+  printf 'site: https://joule.f00.sh/download.html\n'
 }
 
+# curl | sh → no git root → release. Local clone defaults to local build unless forced.
 if [[ "${JOULE_FROM_RELEASE:-0}" == "1" ]] || [[ ! -f "${ROOT}/Cargo.toml" ]]; then
   install_release
 else

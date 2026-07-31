@@ -1,0 +1,228 @@
+# Build multi-platform joule binaries and publish a GitHub Release.
+# Trigger: push tag v*  or  workflow_dispatch (manual, dry-run without tag).
+#
+# Assets (example v0.1.0):
+#   joule-0.1.0-linux-x86_64.tar.gz
+#   joule-0.1.0-linux-aarch64.tar.gz
+#   joule-0.1.0-darwin-x86_64.tar.gz
+#   joule-0.1.0-darwin-aarch64.tar.gz
+#   joule-0.1.0-windows-x86_64.zip
+#   install.sh  install.ps1  SHA256SUMS  file_id.diz
+#
+# Installers are published on GitHub Releases only. joule.f00.sh download page
+# links here — f00 never hosts model weights.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build artifacts without creating a GitHub Release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C debuginfo=0"
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset_os: linux
+            asset_arch: x86_64
+            ext: tar.gz
+            cross: false
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            asset_os: linux
+            asset_arch: aarch64
+            ext: tar.gz
+            cross: true
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset_os: darwin
+            asset_arch: x86_64
+            ext: tar.gz
+            cross: false
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset_os: darwin
+            asset_arch: aarch64
+            ext: tar.gz
+            cross: false
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset_os: windows
+            asset_arch: x86_64
+            ext: zip
+            cross: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross (linux aarch64)
+        if: matrix.cross
+        shell: bash
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VER="${TAG#v}"
+          else
+            TAG="v0.0.0-dev.${GITHUB_SHA::7}"
+            VER="0.0.0-dev.${GITHUB_SHA::7}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "ver=${VER}" >> "$GITHUB_OUTPUT"
+          echo "asset=joule-${VER}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}.${{ matrix.ext }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build release binary (native)
+        if: ${{ !matrix.cross }}
+        shell: bash
+        run: cargo build --release -p joule --target ${{ matrix.target }}
+
+      - name: Build release binary (cross)
+        if: matrix.cross
+        shell: bash
+        run: cross build --release -p joule --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: matrix.ext == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.ver }}"
+          ASSET="${{ steps.ver.outputs.asset }}"
+          STAGING="dist/${ASSET%.tar.gz}"
+          mkdir -p "${STAGING}/man"
+          BIN="target/${{ matrix.target }}/release/joule"
+          test -x "${BIN}"
+          cp "${BIN}" "${STAGING}/joule"
+          chmod 755 "${STAGING}/joule"
+          if [[ -f man/joule.1 ]]; then
+            cp man/joule.1 "${STAGING}/man/"
+          fi
+          cp man/joule.1.md "${STAGING}/man/" 2>/dev/null || true
+          cp README.md LICENSE CHANGELOG.md "${STAGING}/" 2>/dev/null || true
+          printf '%s\n' "${VER}" > "${STAGING}/VERSION"
+          tar -C dist -czf "dist/${ASSET}" "${ASSET%.tar.gz}"
+          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256")
+          ls -la dist/
+
+      - name: Package (windows)
+        if: matrix.ext == 'zip'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.ver }}"
+          ASSET="${{ steps.ver.outputs.asset }}"
+          STAGING="dist/${ASSET%.zip}"
+          mkdir -p "${STAGING}/man"
+          BIN="target/${{ matrix.target }}/release/joule.exe"
+          test -f "${BIN}"
+          cp "${BIN}" "${STAGING}/joule.exe"
+          cp scripts/install.ps1 "${STAGING}/"
+          cp packaging/windows/README.txt "${STAGING}/" 2>/dev/null || true
+          cp man/joule.1.md "${STAGING}/man/" 2>/dev/null || true
+          cp README.md LICENSE CHANGELOG.md "${STAGING}/" 2>/dev/null || true
+          printf '%s\n' "${VER}" > "${STAGING}/VERSION"
+          (cd dist && 7z a -tzip "${ASSET}" "${ASSET%.zip}/*")
+          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256" || shasum -a 256 "${ASSET}" > "${ASSET}.sha256")
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: joule-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten + checksums + install scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) -exec cp -v {} dist/ \;
+          cp scripts/install.sh dist/install.sh
+          cp scripts/install.ps1 dist/install.ps1
+          chmod 755 dist/install.sh
+          if [[ -f file_id.diz ]]; then cp file_id.diz dist/; fi
+          (
+            cd dist
+            : > SHA256SUMS
+            for f in *.tar.gz *.zip; do
+              [[ -f "$f" ]] || continue
+              sha256sum "$f" >> SHA256SUMS
+            done
+            cat SHA256SUMS
+            ls -la
+          )
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v0.0.0-dev.{0}', github.sha) }}
+          name: joule ${{ github.ref_type == 'tag' && github.ref_name || format('dev {0}', github.sha) }}
+          draft: ${{ github.ref_type != 'tag' }}
+          generate_release_notes: true
+          body: |
+            ## Install (dummy easy)
+
+            **Linux / macOS**
+            ```bash
+            curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh
+            ```
+
+            **Windows (PowerShell)**
+            ```powershell
+            irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
+            ```
+
+            Or pick your platform on https://joule.f00.sh/download.html
+
+            Binaries are content on **GitHub Releases**. Model weights are **never** hosted on f00 — peers + official sources + sha256 only.
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

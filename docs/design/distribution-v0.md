@@ -7,26 +7,29 @@
 
 ## 1. Laws
 
-1. **We do not host payloads.** No model weights, no installers, no release tarballs on f00 infrastructure as a product requirement.  
-2. **Install populates itself.** After you have a `joule` binary (built from source, or obtained however *you* choose), the agent fills what it needs **locally** and from **peers**.  
-3. **Content is addressed by hash.** Manifest pins `sha256` (+ size). Trust the digest, never the hostname.  
-4. **Seeding, not serving.** Whoever already has a blob can seed it into the pool. Version bumps and weight files spread the same way: peer → peer.  
-5. **External HTTP is optional and off by default.** Third-party mirrors (HF, IPFS gateways, a friend’s NAS) may be listed in the manifest as *hints*, but agents only hit them if the operator sets `JOULE_ALLOW_EXTERNAL_FETCH=1`. f00 never appears as a required origin.  
-6. **Website stays dumb glass.** Live stats multi-source (signed snapshots). No binary download farm.
+1. **We do not host model weights on f00.** Kimi-class / multi-hundred-GB files never live on Cloudflare as a product CDN. Official third-party origins + **peer seed** + **sha256** only.  
+2. **Install binaries live on GitHub Releases** (automated CI). The site may **link / autodetect** (`/download.html`) — it does not re-host multi-GB weight blobs.  
+3. **Install populates itself.** After you have a `joule` binary, the agent fills weights **locally** and from **peers** (and optional official HTTP with hash verify).  
+4. **Content is addressed by hash.** Manifest pins `sha256` (+ size). Trust the digest, never the hostname.  
+5. **Seeding, not serving weights.** Whoever already has a blob can seed it. Software updates can also be peer-seeded digests after first install.  
+6. **External HTTP for weights is optional and off by default** (`JOULE_ALLOW_EXTERNAL_FETCH=1`). f00 never appears as a required weight origin.  
+7. **Website is glass + download UX.** Live stats multi-source (signed snapshots). Download page points at **GitHub** assets only.
 
 ---
 
 ## 2. What “our server” is
 
-| Role | joule.f00.sh / f00 |
-|---|---|
-| Landing / teaser | Yes |
-| Live pool *viewer* | Yes (optional mirrors of **public** signed stats) |
-| Distribute `joule` binaries | **No** (not product path) |
-| Distribute Kimi weights | **No** |
-| Push OTA updates from f00 | **No** — updates are **seeded** as content-addressed blobs |
+| Role | joule.f00.sh / f00 | GitHub Releases |
+|---|---|---|
+| Landing / teaser | Yes | — |
+| Live pool *viewer* | Yes | — |
+| Download page (autodetect) | Yes (links only) | Canonical **binary** assets |
+| `joule` installers / tarballs | Link only | **Yes** (CI) |
+| Distribute Kimi weights | **No** | **No** |
+| Push weight OTA from f00 | **No** | **No** |
 
-Chicken-and-egg for the first node: build from **git** (or any path the user trusts). After one node has content, the mesh can seed the rest.
+Chicken-and-egg for **weights**: first bytes from official source or git fixtures; then peers.  
+Chicken-and-egg for **binary**: `curl \| sh` / `irm \| iex` from GitHub, or package managers (AUR / Homebrew templates in `packaging/`).
 
 ---
 

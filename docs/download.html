@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#1E78C8" />
+  <meta name="description" content="Download joule — one-click install for Linux, macOS, and Windows. Autodetects your system." />
+  <meta property="og:title" content="Download joule" />
+  <meta property="og:url" content="https://joule.f00.sh/download.html" />
+  <link rel="canonical" href="https://joule.f00.sh/download.html" />
+  <title>Download joule — free AI pool agent</title>
+  <link rel="icon" href="https://f00.sh/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="https://f00.sh/theme/f00-theme.css" data-f00-theme="1" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="download.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="nav-shell">
+      <a class="brand" href="./" aria-label="joule home">
+        <span class="brand-mark">f00</span>
+        <span class="brand-sub">/joule</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="./">Home</a>
+        <a href="./#pool">Live pool</a>
+        <a href="./download.html" aria-current="page">Download</a>
+        <a href="https://github.com/f00-sh/joule/releases" rel="noopener">All releases</a>
+        <a href="https://github.com/f00-sh/joule" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+    <section class="hero" id="top">
+      <p class="pill-free">dummy easy · one command · GitHub-built releases</p>
+      <h1>Install joule.<br /><em>Detects your machine.</em></h1>
+      <p class="lead">
+        Prebuilt binaries from <strong>GitHub Releases</strong> (automatic CI).
+        This page only <strong>links</strong> — model weights are never hosted on f00
+        (peers + official sources + sha256).
+      </p>
+
+      <div class="download-hero" id="primary-download">
+        <p class="muted" id="detect-line">Detecting your system…</p>
+        <p class="big" id="detect-label">—</p>
+        <div class="cta-row" id="primary-cta">
+          <!-- filled by download.js -->
+        </div>
+        <pre class="install-cmd" id="primary-cmd" hidden><code></code></pre>
+        <button type="button" class="btn ghost" id="copy-cmd" hidden>Copy install command</button>
+      </div>
+    </section>
+
+    <section id="all-platforms">
+      <h2>All platforms</h2>
+      <p class="muted">Download for another machine, or use a package manager.</p>
+      <div class="platform-grid" id="platform-grid">
+        <article class="platform-card" data-key="linux-x86_64">
+          <h3>Linux x86_64</h3>
+          <p class="muted">Ubuntu, Fedora, Arch, …</p>
+          <pre class="install-cmd"><code>curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh</code></pre>
+          <p><a class="btn ghost asset-link" data-match="linux-x86_64" href="https://github.com/f00-sh/joule/releases/latest">Binary tarball</a></p>
+        </article>
+        <article class="platform-card" data-key="linux-aarch64">
+          <h3>Linux aarch64</h3>
+          <p class="muted">ARM64 servers / SBCs</p>
+          <pre class="install-cmd"><code>curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh</code></pre>
+          <p><a class="btn ghost asset-link" data-match="linux-aarch64" href="https://github.com/f00-sh/joule/releases/latest">Binary tarball</a></p>
+        </article>
+        <article class="platform-card" data-key="darwin-aarch64">
+          <h3>macOS Apple Silicon</h3>
+          <p class="muted">M1 / M2 / M3 / M4</p>
+          <pre class="install-cmd"><code>curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh</code></pre>
+          <p class="muted">Homebrew (when tap published): <code>brew install f00-sh/tap/joule</code></p>
+          <p><a class="btn ghost asset-link" data-match="darwin-aarch64" href="https://github.com/f00-sh/joule/releases/latest">Binary tarball</a></p>
+        </article>
+        <article class="platform-card" data-key="darwin-x86_64">
+          <h3>macOS Intel</h3>
+          <p class="muted">x86_64</p>
+          <pre class="install-cmd"><code>curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh</code></pre>
+          <p><a class="btn ghost asset-link" data-match="darwin-x86_64" href="https://github.com/f00-sh/joule/releases/latest">Binary tarball</a></p>
+        </article>
+        <article class="platform-card" data-key="windows-x86_64">
+          <h3>Windows x64</h3>
+          <p class="muted">PowerShell — no admin required</p>
+          <pre class="install-cmd"><code>irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex</code></pre>
+          <p class="muted">Or unzip the release and run <code>joule.exe</code>.</p>
+          <p><a class="btn ghost asset-link" data-match="windows-x86_64" href="https://github.com/f00-sh/joule/releases/latest">ZIP package</a></p>
+        </article>
+        <article class="platform-card" data-key="aur">
+          <h3>Arch Linux (AUR)</h3>
+          <p class="muted">After <code>joule-bin</code> is published</p>
+          <pre class="install-cmd"><code>yay -S joule-bin</code></pre>
+          <p class="muted">PKGBUILD lives in the repo under <code>packaging/aur/</code>.</p>
+        </article>
+      </div>
+      <p id="release-meta" class="muted" style="margin-top:1rem">Latest release: loading…</p>
+      <p class="err" id="release-err" hidden></p>
+    </section>
+
+    <section id="after">
+      <h2>After install</h2>
+      <ol class="steps">
+        <li><code>joule version</code> — confirm the binary works</li>
+        <li><code>joule agent --account YOURNAME</code> — join the pool (donate compute)</li>
+        <li><code>joule tray</code> or <code>joule monitor</code> — status (optional)</li>
+        <li><code>joule service generate --platform …</code> — auto-start helpers</li>
+      </ol>
+      <p class="muted">
+        Full docs: <a href="./">joule.f00.sh</a> ·
+        <a href="https://github.com/f00-sh/joule">source</a> ·
+        packaging notes: <a href="https://github.com/f00-sh/joule/tree/main/packaging">packaging/</a>
+      </p>
+    </section>
+  </main>
+
+  <footer class="site-footer wrap">
+    <p>Binaries: GitHub Releases · Weights: never f00 · © f00 / joule</p>
+  </footer>
+</body>
+</html>

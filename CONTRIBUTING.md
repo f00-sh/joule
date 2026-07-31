@@ -34,7 +34,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) if you expected a corporate CoC —
 
 ## Operator bus / distribution
 
-- f00 / joule.f00.sh is **website only** — never host weights or release binaries as a product CDN.
+- f00 / joule.f00.sh is **website + download glass** — never host **model weights** as a product CDN. Installer binaries live on **GitHub Releases**; the site may link/autodetect only.
 - Operator orders: ed25519 signed envelopes verified against **embedded official pin**.
 - Master OpenPGP `tj@f00.sh` certifies the protocol key; design: [master-key-trust-v0](docs/design/master-key-trust-v0.md).
 - Lab overrides need `JOULE_ALLOW_UNOFFICIAL_OPERATOR=1` — never ship that as default.

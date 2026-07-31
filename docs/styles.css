@@ -367,3 +367,72 @@ pre.cmd {
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--f00-border);
 }
+
+/* —— download page —— */
+.download-hero {
+  margin: 1.5rem 0 0;
+  padding: 1.25rem 1.35rem;
+  border: 1px solid var(--f00-border);
+  border-radius: 8px;
+  background: var(--f00-bg-elevated, transparent);
+}
+
+.download-hero .big {
+  font-size: 1.45rem;
+  margin: 0.35rem 0 1rem;
+}
+
+.install-cmd {
+  overflow-x: auto;
+  padding: 0.85rem 1rem;
+  border-radius: 6px;
+  border: 1px solid var(--f00-border);
+  background: var(--f00-bg, #0b0f14);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.install-cmd code {
+  font-family: var(--f00-font-mono, ui-monospace, monospace);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.platform-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.platform-card {
+  border: 1px solid var(--f00-border);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  background: var(--f00-bg-elevated, transparent);
+}
+
+.platform-card.is-detected {
+  border-color: var(--f00-accent, #1e78c8);
+  box-shadow: 0 0 0 1px var(--f00-accent, #1e78c8);
+}
+
+.platform-card h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.platform-card .install-cmd {
+  font-size: 0.75rem;
+  margin: 0.65rem 0;
+}
+
+.steps {
+  padding-left: 1.25rem;
+  line-height: 1.7;
+}
+
+.steps code {
+  font-family: var(--f00-font-mono, ui-monospace, monospace);
+  font-size: 0.9em;
+}

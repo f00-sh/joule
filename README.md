@@ -38,15 +38,29 @@ The website ([joule.f00.sh](https://joule.f00.sh/)) is a f00-themed teaser with 
 
 ## Install
 
-Every install method installs man page(s). Prefer curl from releases when version ≥ 0.1.0 ships.
+**Dummy easy:** [joule.f00.sh/download.html](https://joule.f00.sh/download.html) autodetects your OS.
+Prebuilt binaries are produced by GitHub Actions and published on **GitHub Releases** (the website only links).
 
-### Curl (releases)
+### One-liner
 
 ```text
+# Linux / macOS
 curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh
 ```
 
-*(Asset download is wired when the first binary release ships.)*
+```powershell
+# Windows (PowerShell — no admin)
+irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
+```
+
+### Package managers
+
+| Channel | Notes |
+|---------|--------|
+| **GitHub Releases** | Canonical — tag `vX.Y.Z` runs `.github/workflows/release.yml` |
+| **AUR** | Template `packaging/aur/PKGBUILD` → publish as `joule-bin` |
+| **Homebrew** | Formula `packaging/homebrew/joule.rb` → publish to a tap |
+| **Windows** | ZIP + `install.ps1` (user-local). Signed MSI/EXE when a cert is available |
 
 ### From source
 

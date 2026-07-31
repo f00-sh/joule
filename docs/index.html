@@ -33,6 +33,7 @@
         <a href="#free">Free</a>
         <a href="#millijoules">Millijoules</a>
         <a href="#fair">Fairness</a>
+        <a href="download.html">Download</a>
         <a href="#join">Join</a>
         <a href="https://github.com/f00-sh/joule" rel="noopener">GitHub</a>
       </nav>
@@ -61,7 +62,8 @@
         The numbers below are the live cluster.
       </p>
       <div class="cta-row">
-        <a class="btn" href="#join">Run a donor agent</a>
+        <a class="btn" href="download.html">Download</a>
+        <a class="btn ghost" href="#join">Join the pool</a>
         <a class="btn ghost" href="#pool">Live pool</a>
         <a class="btn ghost" href="https://github.com/f00-sh/joule">Source</a>
       </div>
@@ -198,35 +200,36 @@ burn = (prompt + 4×completion) × leecher_usage_bp
     <section id="join">
       <h2>Join the pool</h2>
       <div class="callout">
+        <strong>Dummy easy install:</strong>
+        <a href="download.html">Download page</a> autodetects your OS.
+        Or one command — Linux/macOS:
+        <code>curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh</code>
+        · Windows PowerShell:
+        <code>irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex</code>
+        Binaries are on <strong>GitHub Releases</strong> (CI). This site only links.
+      </div>
+      <div class="callout">
         <strong>Yes — decentralized listing:</strong> set
         <code>JOULE_PUBLIC_URL=https://your-control</code> and run control.
         It <em>announces</em> with your pool key to
         <code>/api/announce</code> (no f00 token). The site loads
-        <code>/api/sources</code> automatically. Optional KV mirror uses
-        <code>~/.config/f00/joule/edge.token</code>.
+        <code>/api/sources</code> automatically.
       </div>
       <div class="callout">
-        <strong>Peer seed, not CDN:</strong> this site never hosts weights or
-        installers. Content is <code>sha256</code>-addressed. Seed a file with
-        <code>joule seed-blob</code>; operators sign digests offline
-        (<a href="https://github.com/f00-sh/joule/blob/main/docs/design/operator-ceremony-v0.md">ceremony</a>).
-        Agents fetch only their assigned chunks / matching software targets.
+        <strong>Weights ≠ installers:</strong> f00 never hosts model weights.
+        Content is <code>sha256</code>-addressed and peer-seeded (or official sources).
+        Seed with <code>joule seed-blob</code>.
       </div>
-      <pre class="cmd">git clone https://github.com/f00-sh/joule.git
+      <pre class="cmd"># after install:
+joule version
+joule agent --account you --control 127.0.0.1:7701
+
+# developers (from source):
+git clone https://github.com/f00-sh/joule.git
 cd joule && cargo build --release -p joule
-
-# terminal 1 — public control (auto-announces to joule.f00.sh directory)
-export JOULE_PUBLIC_URL=https://your.public.host   # HTTPS base of this control
-# stock binary verifies the embedded official protocol key (no env pin needed)
-# lab only: JOULE_ALLOW_UNOFFICIAL_OPERATOR=1 JOULE_OPERATOR_PUBKEY=…
 ./target/release/joule control
-# signed feed → $JOULE_PUBLIC_URL/v1/public/snapshot
-
-# terminal 2 — donate
-./target/release/joule agent --account you --control 127.0.0.1:7701
-# optional: seed lab fixture so peers can pull
-./target/release/joule seed-blob --path models/fixtures/lab-tiny/model.safetensors --kind weight</pre>
-      <p class="muted">MIT · f00-sh · native agent only · browser is this page, not pool FLOPs.</p>
+./target/release/joule agent --account you --control 127.0.0.1:7701</pre>
+      <p class="muted">MIT · f00-sh · native agent only · browser is this page, not pool FLOPs · <a href="download.html">download</a></p>
     </section>
 
     <footer class="site-footer">

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-platform release CI**: `.github/workflows/release.yml` builds linux/darwin/windows artifacts on `v*` tags (and manual dispatch)
+- **Dummy-easy install**: `scripts/install.sh` (Unix) + `scripts/install.ps1` (Windows) from GitHub Releases
+- **Download page**: [docs/download.html](docs/download.html) OS autodetect + all-platform links ([joule.f00.sh/download.html](https://joule.f00.sh/download.html))
+- **Packaging templates**: AUR `packaging/aur/PKGBUILD`, Homebrew `packaging/homebrew/joule.rb`, Windows zip notes
+
 ### Changed
 
 - **Structural capacity invariant**: single verified-only API for anything affecting mJ or placement — `placement_mem_mib` (0 if unverified) vs `economic_mem_mib` (mint floor only); stream slots / plan_sharded_pool / mesh_plan_donors / rank exclude claim-only peers
