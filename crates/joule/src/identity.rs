@@ -598,6 +598,18 @@ mod tests {
             cached_api_key(&id_path).as_deref(),
             Some("joule_deadbeefcafebabe")
         );
+        // Round-trip: second remember is stable; reload sees same key.
+        remember_api_key(&id_path, "joule_deadbeefcafebabe").unwrap();
+        assert_eq!(
+            cached_api_key(&id_path).as_deref(),
+            Some("joule_deadbeefcafebabe")
+        );
+        remember_api_key(&id_path, "joule_newkeyfromwelcome").unwrap();
+        assert_eq!(
+            cached_api_key(&id_path).as_deref(),
+            Some("joule_newkeyfromwelcome")
+        );
+        assert_eq!(connect_note_path(&id_path), dir.join("JOULE-CONNECT.txt"));
         let _ = fs::remove_dir_all(&dir);
     }
 

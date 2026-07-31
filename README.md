@@ -111,16 +111,24 @@ cargo run -p joule --release -- agent --account alice --control 127.0.0.1:7701
 cargo run -p joule --release -- agent --account bob --control 127.0.0.1:7701 --mem-mib 16384
 ```
 
-Each agent prints an **API key**. Dashboard should show healthy nodes + VRAM.
+Each agent prints an **API key** and a CONNECT card. Dashboard should show healthy nodes + VRAM.
 
-### Terminal 3 — use the pool
+### Terminal 3 — use the pool (or Cursor / any OpenAI client)
 
 ```text
+# After agent Welcome, key is cached — no manual --key needed:
+joule connect                         # Base URL + full API key + model
+joule connect --copy                  # copy key for Cursor paste
+joule whoami
+joule chat --prompt "hello from the pool"
+joule chat --stream --prompt "stream me"
+
+# Still works with an explicit key:
 curl -s http://127.0.0.1:7700/v1/cluster/capacity | jq
 joule whoami --key joule_…
-joule chat --key joule_… --prompt "hello from the pool"
-joule chat --key joule_… --stream --prompt "stream me"
 ```
+
+**Connect other apps:** paste the three fields from `joule connect` (or `~/.config/joule/JOULE-CONNECT.txt`) into Cursor / Continue / Open WebUI: Base URL `http://HOST:7700/v1`, API key `joule_…`, model `kimi-open`.
 
 **Law:** no active donor agent for that account → chat forbidden. Invalid keys → 401.
 

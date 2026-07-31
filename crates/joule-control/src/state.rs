@@ -1008,6 +1008,34 @@ mod challenge_integrity_tests {
     }
 
     #[test]
+    fn pool_issues_joule_api_key_and_wrong_key_fails_closed() {
+        let mut state = ControlState::new();
+        let key = state.ensure_account("connect-alice");
+        assert!(
+            key.starts_with("joule_"),
+            "pool-issued keys must use joule_ prefix, got {key}"
+        );
+        assert!(key.len() > 10, "key must be non-trivial");
+        assert_eq!(state.account_for_key(&key), Some("connect-alice"));
+        // Stable: second ensure returns same key for account.
+        assert_eq!(state.ensure_account("connect-alice"), key);
+        // Fail closed: invented / wrong / empty never map to an account.
+        assert_eq!(state.account_for_key("joule_deadbeefnotreal"), None);
+        assert_eq!(state.account_for_key(""), None);
+        assert_eq!(state.account_for_key("sk-openai-style-fake"), None);
+        // register_node also issues via ensure_account path.
+        let id = NodeId::new();
+        let reg = state.register_node(
+            id,
+            "connect-bob",
+            NodeCaps::for_cluster(DeviceClass::Gpu, 8192, 40),
+        );
+        assert!(reg.starts_with("joule_"));
+        assert_eq!(state.account_for_key(&reg), Some("connect-bob"));
+        assert_ne!(reg, key);
+    }
+
+    #[test]
     fn wrong_completion_fails_even_if_model_loaded() {
         let mut state = ControlState::new();
         let (id, account) = register_claimed(&mut state, 24_576);

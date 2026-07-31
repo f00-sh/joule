@@ -80,9 +80,18 @@ HTTP routes:
 
 ### joule agent
 
-Join the pool. Prints an API key on welcome. Heartbeats mint millijoules.
-Handles infer/challenge, **BlobProvide/BlobChunk**, **FetchDigests**, and
-operator bus actions (model/software digests, notices).
+Join the pool. Prints an API key on welcome and caches it on identity.
+Heartbeats mint millijoules. Handles infer/challenge, **BlobProvide/BlobChunk**,
+**FetchDigests**, and operator bus actions (model/software digests, notices).
+
+### joule connect
+
+Show Base URL (`…/v1`) + full pool-issued API key + model for external
+OpenAI-compatible apps (Cursor, Continue, etc.). Writes `JOULE-CONNECT.txt`
+next to the identity file. Flags: `--copy` (key), `--copy-url`, `--open`.
+Tray: `joule tray --connect` / `--copy-api-key`. Key is issued by the pool on
+Welcome — not invented client-side. `chat` / `whoami` use the cached key when
+`--key` is omitted.
 
 ### joule seed-blob / software
 
@@ -122,6 +131,8 @@ synthetic offline demo.
 
 Client helpers for the HTTP API. Chat requires a key whose account is
 **currently donating** (healthy agent online). Pass `--stream` for SSE chunks.
+If `--key` is empty, uses the Welcome-cached key from identity (`joule connect`
+to display it).
 
 ### joule lab / credits
 

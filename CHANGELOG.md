@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-07-31
+
+Connect path for external OpenAI-compatible apps + ship hygiene after v0.1.2.
+
+### Added
+
+- **`joule connect`** — idiot-proof CONNECT card: Base URL (`…/v1`), full pool-issued `joule_…` API key, and model (`kimi-open`) for Cursor / Continue / any OpenAI client
+- **JOULE-CONNECT.txt** next to identity (0600) with paste-ready fields; `--copy` / `--copy-url` / `--open`
+- **Tray connect surface**: `tray --connect`, `tray --copy-api-key`
+- **Welcome key cache**: agent caches pool API key on identity; `chat` / `whoami` / `status` resolve key without manual `--key` once joined
+- E2E/unit: Welcome `joule_` key auth + wrong/missing key fail-closed; connect note + remember/load round-trip
+
+### Fixed
+
+- **cargo fmt** on tray help line (CI red after connect-card)
+- Headless clipboard skip + install trap; clipboard tools timeout without session
+- Live f00 package docs; soft tray copy-code when clipboard unavailable
+- Homebrew template test matches live tap (version may lag Cargo until formula pin)
+
+### Changed
+
+- Workspace **Cargo package version 0.1.3** aligned with this SemVer cut (reduces prior tag/binary lag)
+- `file_id.diz` → v0.1.3
+
 ## [0.1.0] — 2026-07-31
 
 First public multi-platform release under **f00-sh/joule**.

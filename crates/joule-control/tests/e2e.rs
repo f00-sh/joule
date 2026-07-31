@@ -261,6 +261,88 @@ async fn pool_capacity_and_chat() {
     assert_eq!(PROTOCOL_VERSION, "0.1.0");
 }
 
+/// Welcome issues a real `joule_…` key; that key authenticates HTTP; wrong/missing fail closed.
+#[tokio::test]
+async fn welcome_api_key_auth_fail_closed() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let (api_key, agent) = spawn_agent(agent_addr, "key-alice", 8192).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    assert!(
+        api_key.starts_with("joule_"),
+        "Welcome must issue pool key with joule_ prefix, got {api_key}"
+    );
+    // Same key is what control maps for the account (not client-invented).
+    {
+        let g = app.state.read().await;
+        assert_eq!(g.account_for_key(&api_key), Some("key-alice"));
+        assert_eq!(g.account_for_key("joule_notissued"), None);
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+
+    let ok = client
+        .get(format!("{base}/v1/account"))
+        .bearer_auth(&api_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = ok.json().await.unwrap();
+    assert_eq!(body["account"].as_str().unwrap_or(""), "key-alice");
+
+    let missing = client
+        .get(format!("{base}/v1/account"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let wrong = client
+        .get(format!("{base}/v1/account"))
+        .bearer_auth("joule_deadbeefnotarealkey")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let chat_bad = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth("joule_deadbeefnotarealkey")
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role": "user", "content": "nope"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_bad.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let chat_ok = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&api_key)
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role": "user", "content": "auth-ok"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_ok.status(), reqwest::StatusCode::OK);
+
+    agent.abort();
+}
+
 /// Phase D: ≥2 donors with PeerAlive mem → mesh PlanOffer geometry → chat InferDone.
 #[tokio::test]
 async fn mesh_request_infer_chat_multi_donor() {
