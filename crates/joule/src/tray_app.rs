@@ -114,9 +114,7 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
 
 /// Open a path with the OS default handler (`xdg-open` / `open` / `cmd start`).
 pub fn open_path(path: &Path) -> Result<()> {
-    let p = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let p = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if which("xdg-open") {
         Command::new("xdg-open").arg(&p).spawn()?.wait()?;
         return Ok(());

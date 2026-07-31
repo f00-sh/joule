@@ -39,8 +39,8 @@ pub use pins::{
 pub use state::{AccountInfo, ControlState, NodeView, SharedState};
 pub use state::{CoordinationPath, InferOutcome};
 pub use tcp::{
-    agent_handle_challenge, agent_handle_infer, challenge_loop, dispatch_infer, dispatch_mesh_infer,
-    mesh_donors_ready, run_agent_listener, run_agent_session,
+    agent_handle_challenge, agent_handle_infer, challenge_loop, dispatch_infer,
+    dispatch_mesh_infer, mesh_donors_ready, run_agent_listener, run_agent_session,
 };
 
 use anyhow::{Context, Result};

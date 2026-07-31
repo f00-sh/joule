@@ -109,8 +109,7 @@ impl LocalMesh {
                     addrs = n.multiaddrs.clone();
                 }
             }
-            self.dht
-                .put_blob_seeder(&b.sha256, &id, b.size, addrs);
+            self.dht.put_blob_seeder(&b.sha256, &id, b.size, addrs);
         }
     }
 
@@ -193,11 +192,7 @@ pub async fn run_peer_listener(
     }
 }
 
-async fn handle_peer_session(
-    sock: TcpStream,
-    node_id: NodeId,
-    mesh: SharedMesh,
-) -> Result<()> {
+async fn handle_peer_session(sock: TcpStream, node_id: NodeId, mesh: SharedMesh) -> Result<()> {
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await? {
@@ -306,7 +301,12 @@ pub async fn fetch_blob_direct(multiaddr: &str, sha256: &str) -> Result<Vec<u8>>
         .with_context(|| format!("connect {addr}"))?;
     let (reader, mut writer) = sock.into_split();
     let me = NodeId::new();
-    let want = Envelope::new(me.clone(), Message::BlobWant { sha256: hash.clone() });
+    let want = Envelope::new(
+        me.clone(),
+        Message::BlobWant {
+            sha256: hash.clone(),
+        },
+    );
     writer.write_all(&encode_line(&want)?).await?;
 
     let mut lines = BufReader::new(reader).lines();
@@ -340,9 +340,7 @@ pub async fn fetch_blob_direct(multiaddr: &str, sha256: &str) -> Result<Vec<u8>>
                 if offset != next {
                     bail!("out of order chunk");
                 }
-                let piece = B64
-                    .decode(data_b64.as_bytes())
-                    .context("chunk base64")?;
+                let piece = B64.decode(data_b64.as_bytes()).context("chunk base64")?;
                 buf.extend_from_slice(&piece);
                 next += piece.len() as u64;
                 if done {
@@ -555,7 +553,11 @@ mod tests {
             10,
         );
         let donors = m.plan_donors();
-        assert_eq!(donors.len(), 2, "both healthy dialable peers participate equally");
+        assert_eq!(
+            donors.len(),
+            2,
+            "both healthy dialable peers participate equally"
+        );
         for (_, w) in &donors {
             assert_eq!(
                 *w,
@@ -605,18 +607,14 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
 
-        let got = fetch_blob_direct(&multi, &hash).await.expect("direct fetch");
+        let got = fetch_blob_direct(&multi, &hash)
+            .await
+            .expect("direct fetch");
         assert_eq!(got, payload);
 
-        let got2 = fetch_blob_from_addrs(
-            &[
-                "tcp://127.0.0.1:1".into(),
-                multi.clone(),
-            ],
-            &hash,
-        )
-        .await
-        .expect("fallback multiaddr");
+        let got2 = fetch_blob_from_addrs(&["tcp://127.0.0.1:1".into(), multi.clone()], &hash)
+            .await
+            .expect("fallback multiaddr");
         assert_eq!(got2, payload);
 
         // Phase C: PeerAlive + BlobsHave over peer port fills local DHT.

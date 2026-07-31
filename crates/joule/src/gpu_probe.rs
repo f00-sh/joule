@@ -88,10 +88,7 @@ pub fn effective_device(requested: &str, claim_mib: u32) -> &'static str {
 
 fn probe_nvidia_smi() -> Option<GpuProbe> {
     let out = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.total",
-            "--format=csv,noheader,nounits",
-        ])
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
     if !out.status.success() {

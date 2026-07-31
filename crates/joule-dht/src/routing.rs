@@ -331,8 +331,7 @@ impl InProcessNetwork {
                     FindValueResult::Value(v) => {
                         // cache on origin
                         if let Some(n) = self.nodes.get_mut(origin) {
-                            n.store
-                                .put_raw(v.key.clone(), v.value_json.clone(), v.seq);
+                            n.store.put_raw(v.key.clone(), v.value_json.clone(), v.seq);
                             n.table.observe(c);
                         }
                         return Some(v);
@@ -406,13 +405,26 @@ mod tests {
             .get_mut("node-a")
             .unwrap()
             .handle_store(peer_val.clone()));
-        assert!(net.get("node-a").unwrap().store.get_raw(&peer_key_s).is_some());
+        assert!(net
+            .get("node-a")
+            .unwrap()
+            .store
+            .get_raw(&peer_key_s)
+            .is_some());
         assert!(
-            net.get("node-b").unwrap().store.get_raw(&peer_key_s).is_none(),
+            net.get("node-b")
+                .unwrap()
+                .store
+                .get_raw(&peer_key_s)
+                .is_none(),
             "B must not hold key before multi-hop find"
         );
         assert!(
-            net.get("node-c").unwrap().store.get_raw(&peer_key_s).is_none(),
+            net.get("node-c")
+                .unwrap()
+                .store
+                .get_raw(&peer_key_s)
+                .is_none(),
             "C must not hold key before multi-hop find"
         );
 
@@ -423,7 +435,12 @@ mod tests {
         assert_eq!(got.key, peer_key_s);
         assert!(got.value_json.contains("203.0.113.9"));
         // After find, origin caches locally
-        assert!(net.get("node-c").unwrap().store.get_raw(&peer_key_s).is_some());
+        assert!(net
+            .get("node-c")
+            .unwrap()
+            .store
+            .get_raw(&peer_key_s)
+            .is_some());
 
         // Blob key: again store only on A
         let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

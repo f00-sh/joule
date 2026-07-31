@@ -682,15 +682,27 @@ pub async fn dispatch_mesh_infer(
     match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
         Ok(Ok(Ok(()))) => {}
         Ok(Ok(Err(e))) => {
-            app.state.write().await.pending_plan_accepts.remove(&request_id);
+            app.state
+                .write()
+                .await
+                .pending_plan_accepts
+                .remove(&request_id);
             return Err(e);
         }
         Ok(Err(_)) => {
-            app.state.write().await.pending_plan_accepts.remove(&request_id);
+            app.state
+                .write()
+                .await
+                .pending_plan_accepts
+                .remove(&request_id);
             return Err("PlanAccept channel closed".into());
         }
         Err(_) => {
-            app.state.write().await.pending_plan_accepts.remove(&request_id);
+            app.state
+                .write()
+                .await
+                .pending_plan_accepts
+                .remove(&request_id);
             return Err("timed out waiting for PlanAccept from mesh shards".into());
         }
     }
@@ -936,9 +948,7 @@ pub async fn challenge_loop(app: App) {
 
         // Peak model: issue up to CHALLENGE_CREDIT_MIB (single-challenge working set).
         // Prefer challenging nodes still below claim so they can raise peak.
-        let credit_mib = joule_cluster::CHALLENGE_CREDIT_MIB
-            .min(claim.max(1))
-            .max(1);
+        let credit_mib = joule_cluster::CHALLENGE_CREDIT_MIB.min(claim.max(1)).max(1);
         let _ = verified; // reserved for future progressive target = min(claim, verified+step) with full peak work
 
         let challenge_id = Uuid::new_v4();

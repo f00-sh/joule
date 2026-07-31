@@ -182,8 +182,7 @@ mod tests {
         assert!(
             p.multi_hundred_gb_class,
             "total_gib={} bytes={}",
-            p.total_gib,
-            p.total_bytes
+            p.total_gib, p.total_bytes
         );
         assert!(p.shards.len() >= 8);
         validate_k3_scale(&p).unwrap();

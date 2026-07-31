@@ -274,7 +274,10 @@ pub fn score_mint(event: EconomyEvent, fair: FairnessSnapshot) -> MintBreakdown 
 
 /// Deterministic equal split of `amount` across sorted `recipients` (empty → empty vec).
 /// Remainder mJ go to the first recipients (1 mJ each) so sum(splits) == amount.
-pub fn split_donate_equitable(amount: Millijoule, recipients: &[String]) -> Vec<(String, Millijoule)> {
+pub fn split_donate_equitable(
+    amount: Millijoule,
+    recipients: &[String],
+) -> Vec<(String, Millijoule)> {
     if amount <= 0 || recipients.is_empty() {
         return Vec::new();
     }

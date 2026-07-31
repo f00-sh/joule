@@ -334,7 +334,10 @@ impl ControlState {
                 Some((p.node, joule_cluster::economic_mem_mib(verified)))
             })
             .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
+        v.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+        });
         v
     }
 
@@ -1073,7 +1076,10 @@ mod challenge_integrity_tests {
             "expired challenge removed"
         );
         let after = state.cluster.verified_mem_mib(&id);
-        assert!(after < before, "expiry fail must decay verified {before}->{after}");
+        assert!(
+            after < before,
+            "expiry fail must decay verified {before}->{after}"
+        );
         assert_eq!(
             state.account_economy.get(&account).unwrap().best_mem_mib,
             after
@@ -1086,7 +1092,10 @@ mod challenge_integrity_tests {
         let (id, account) = register_claimed(&mut state, 65_536);
         assert_eq!(state.cluster.verified_mem_mib(&id), 0);
         let fair = state.fairness_for(&account);
-        assert_eq!(fair.mem_mib, 256, "unverified join must floor mem for economy");
+        assert_eq!(
+            fair.mem_mib, 256,
+            "unverified join must floor mem for economy"
+        );
         assert!(mem_factor_bp(fair.mem_mib) < mem_factor_bp(65_536));
         let mint = score_mint(EconomyEvent::Heartbeat, fair);
         let mint_fake = score_mint(
@@ -1106,10 +1115,7 @@ mod challenge_integrity_tests {
         let seed = [0xABu8; 32];
         // 2 MiB proven work → +2 verified (1:1), not free CHALLENGE_CREDIT or claim.
         let credit = 2u32;
-        assert_eq!(
-            joule_cluster::capacity_work_bytes(credit),
-            2 * 1024 * 1024
-        );
+        assert_eq!(joule_cluster::capacity_work_bytes(credit), 2 * 1024 * 1024);
         let (challenge_id, expected) =
             insert_capacity_challenge(&mut state, &id, seed, credit, Instant::now());
         let ok = state
@@ -1134,10 +1140,8 @@ mod challenge_integrity_tests {
         let credit = 1u32;
         let (challenge_id, real_expected) =
             insert_capacity_challenge(&mut state, &id, seed, credit, Instant::now());
-        let forge = StubEngine::expected_text(
-            CLUSTER_MODEL,
-            &format!("joule-challenge:{challenge_id}"),
-        );
+        let forge =
+            StubEngine::expected_text(CLUSTER_MODEL, &format!("joule-challenge:{challenge_id}"));
         assert_ne!(
             forge, real_expected,
             "stub format must not equal capacity proof"
@@ -1296,12 +1300,12 @@ mod challenge_integrity_tests {
         let bigger = 4u32;
         let (cid, expected) =
             insert_capacity_challenge(&mut state, &id, [0xDDu8; 32], bigger, Instant::now());
-        assert!(state
-            .settle_challenge_result(cid, expected, &id)
-            .unwrap());
+        assert!(state.settle_challenge_result(cid, expected, &id).unwrap());
         assert_eq!(state.cluster.verified_mem_mib(&id), bigger);
         // Mesh placement uses cluster peak, not claim.
-        state.mesh.upsert(id.clone(), vec![], 0.0, true, 0, claim, 0, 0);
+        state
+            .mesh
+            .upsert(id.clone(), vec![], 0.0, true, 0, claim, 0, 0);
         let donors = state.mesh_plan_donors();
         assert_eq!(donors.len(), 1);
         assert_eq!(donors[0].1, joule_cluster::economic_mem_mib(bigger));

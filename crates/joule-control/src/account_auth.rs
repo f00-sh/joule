@@ -143,7 +143,14 @@ mod tests {
         let ts = now_unix_ms();
         let account = account_id_from_verifying_key(&sk.verifying_key());
         let (pk, sig) = sign_hello(&sk, &account, &from, ts);
-        let bad = verify_hello("j1ffffffffffffffffffffffffffffffff", &from, &pk, &sig, ts, ts);
+        let bad = verify_hello(
+            "j1ffffffffffffffffffffffffffffffff",
+            &from,
+            &pk,
+            &sig,
+            ts,
+            ts,
+        );
         assert!(bad.is_err());
     }
 

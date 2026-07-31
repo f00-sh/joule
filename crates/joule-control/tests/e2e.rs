@@ -497,10 +497,10 @@ async fn peer_blob_chunk_transfer() {
                 Message::Hello {
                     account: "seeder".into(),
                     caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40),
-            pubkey_hex: String::new(),
-            sig_hex: String::new(),
-            signed_at_unix_ms: 0,
-        },
+                    pubkey_hex: String::new(),
+                    sig_hex: String::new(),
+                    signed_at_unix_ms: 0,
+                },
             ))
             .unwrap(),
         )
@@ -576,10 +576,10 @@ async fn peer_blob_chunk_transfer() {
                 Message::Hello {
                     account: "leech".into(),
                     caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40),
-            pubkey_hex: String::new(),
-            sig_hex: String::new(),
-            signed_at_unix_ms: 0,
-        },
+                    pubkey_hex: String::new(),
+                    sig_hex: String::new(),
+                    signed_at_unix_ms: 0,
+                },
             ))
             .unwrap(),
         )
@@ -684,10 +684,10 @@ async fn mesh_peer_alive_and_blob_locate_multiaddrs() {
                 Message::Hello {
                     account: "mesh-seed".into(),
                     caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40),
-            pubkey_hex: String::new(),
-            sig_hex: String::new(),
-            signed_at_unix_ms: 0,
-        },
+                    pubkey_hex: String::new(),
+                    sig_hex: String::new(),
+                    signed_at_unix_ms: 0,
+                },
             ))
             .unwrap(),
         )
@@ -758,10 +758,10 @@ async fn mesh_peer_alive_and_blob_locate_multiaddrs() {
                 Message::Hello {
                     account: "mesh-peer".into(),
                     caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40),
-            pubkey_hex: String::new(),
-            sig_hex: String::new(),
-            signed_at_unix_ms: 0,
-        },
+                    pubkey_hex: String::new(),
+                    sig_hex: String::new(),
+                    signed_at_unix_ms: 0,
+                },
             ))
             .unwrap(),
         )
@@ -843,7 +843,9 @@ async fn mesh_peer_alive_and_blob_locate_multiaddrs() {
 
     let multi = locate_multi.expect("BlobLocate with multiaddrs");
     assert!(
-        multi.iter().any(|addrs| addrs.iter().any(|a| a == &seeder_multi)),
+        multi
+            .iter()
+            .any(|addrs| addrs.iter().any(|a| a == &seeder_multi)),
         "BlobLocate should carry seeder multiaddr, got {multi:?}"
     );
 
@@ -911,10 +913,10 @@ async fn operator_policy_and_software_fanout() {
                 Message::Hello {
                     account: "ops".into(),
                     caps: NodeCaps::for_cluster(DeviceClass::Gpu, 8192, 40),
-            pubkey_hex: String::new(),
-            sig_hex: String::new(),
-            signed_at_unix_ms: 0,
-        },
+                    pubkey_hex: String::new(),
+                    sig_hex: String::new(),
+                    signed_at_unix_ms: 0,
+                },
             ))
             .unwrap(),
         )
@@ -1054,10 +1056,10 @@ async fn model_update_assigns_digests() {
                 Message::Hello {
                     account: "chunker".into(),
                     caps: NodeCaps::for_cluster(DeviceClass::Gpu, 16384, 40),
-            pubkey_hex: String::new(),
-            sig_hex: String::new(),
-            signed_at_unix_ms: 0,
-        },
+                    pubkey_hex: String::new(),
+                    sig_hex: String::new(),
+                    signed_at_unix_ms: 0,
+                },
             ))
             .unwrap(),
         )
@@ -1211,17 +1213,17 @@ async fn late_joiner_gets_model_digests() {
                 Message::Hello {
                     account: "late".into(),
                     caps: NodeCaps::for_cluster(DeviceClass::Gpu, 16384, 40),
-            pubkey_hex: String::new(),
-            sig_hex: String::new(),
-            signed_at_unix_ms: 0,
-        },
+                    pubkey_hex: String::new(),
+                    sig_hex: String::new(),
+                    signed_at_unix_ms: 0,
+                },
             ))
             .unwrap(),
         )
         .await
         .unwrap();
     let _ = lines.next_line().await.unwrap(); // welcome
-    // Late joiner must have verified capacity before chunk placement includes them.
+                                              // Late joiner must have verified capacity before chunk placement includes them.
     {
         let mut g = app.state.write().await;
         g.cluster.trust_all_claims_for_tests();

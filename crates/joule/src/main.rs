@@ -466,61 +466,63 @@ async fn main() -> Result<()> {
             println!("  (auto joule code · other PCs: joule identity use <code>)");
             joule_control::serve(app, agent_listen, http_listen).await?;
         }
-        Commands::Identity { cmd } => match cmd {
-            IdentityCmd::Show { path, copy } => {
-                let p = identity_path_arg(&path);
-                let (id, fresh) = identity::load_or_init(&p)?;
-                identity::print_code_banner(&id, &p, fresh);
-                if copy {
-                    match tray_app::copy_to_clipboard(id.code()) {
-                        Ok(()) => println!("CODE copied to clipboard."),
-                        Err(e) => eprintln!("clipboard: {e} (code still printed above)"),
+        Commands::Identity { cmd } => {
+            match cmd {
+                IdentityCmd::Show { path, copy } => {
+                    let p = identity_path_arg(&path);
+                    let (id, fresh) = identity::load_or_init(&p)?;
+                    identity::print_code_banner(&id, &p, fresh);
+                    if copy {
+                        match tray_app::copy_to_clipboard(id.code()) {
+                            Ok(()) => println!("CODE copied to clipboard."),
+                            Err(e) => eprintln!("clipboard: {e} (code still printed above)"),
+                        }
                     }
                 }
-            }
-            IdentityCmd::Use { code, path } | IdentityCmd::Enter { code, path } => {
-                let p = identity_path_arg(&path);
-                let id = identity::use_code(&p, &code)?;
-                println!("this machine is now linked to your joule code.");
-                identity::print_code_banner(&id, &p, false);
-            }
-            IdentityCmd::OpenRecovery { path } => {
-                let p = identity_path_arg(&path);
-                let (id, _) = identity::load_or_init(&p)?;
-                let note = identity::write_recovery_note(&p, &id)?;
-                tray_app::open_path(&note)?;
-                println!("opened {}", note.display());
-            }
-            IdentityCmd::New { path, force } => {
-                let p = identity_path_arg(&path);
-                if p.is_file() && !force {
-                    let id = identity::load(&p)?;
-                    println!("already have a code — showing it (use --force for a NEW empty account):");
+                IdentityCmd::Use { code, path } | IdentityCmd::Enter { code, path } => {
+                    let p = identity_path_arg(&path);
+                    let id = identity::use_code(&p, &code)?;
+                    println!("this machine is now linked to your joule code.");
                     identity::print_code_banner(&id, &p, false);
-                } else {
-                    let id = identity::Identity::generate();
-                    identity::save(&p, &id)?;
-                    identity::print_code_banner(&id, &p, true);
+                }
+                IdentityCmd::OpenRecovery { path } => {
+                    let p = identity_path_arg(&path);
+                    let (id, _) = identity::load_or_init(&p)?;
+                    let note = identity::write_recovery_note(&p, &id)?;
+                    tray_app::open_path(&note)?;
+                    println!("opened {}", note.display());
+                }
+                IdentityCmd::New { path, force } => {
+                    let p = identity_path_arg(&path);
+                    if p.is_file() && !force {
+                        let id = identity::load(&p)?;
+                        println!("already have a code — showing it (use --force for a NEW empty account):");
+                        identity::print_code_banner(&id, &p, false);
+                    } else {
+                        let id = identity::Identity::generate();
+                        identity::save(&p, &id)?;
+                        identity::print_code_banner(&id, &p, true);
+                    }
+                }
+                IdentityCmd::Export { path, out } => {
+                    let p = identity_path_arg(&path);
+                    let id = identity::load(&p)?;
+                    let raw = serde_json::to_string_pretty(&id)?;
+                    if let Some(dest) = out {
+                        std::fs::write(&dest, format!("{raw}\n"))?;
+                        println!("exported {}", dest.display());
+                    } else {
+                        println!("{raw}");
+                    }
+                }
+                IdentityCmd::Import { from, path } => {
+                    let dest = identity_path_arg(&path);
+                    let id = identity::load(&from)?;
+                    identity::save(&dest, &id)?;
+                    identity::print_code_banner(&id, &dest, false);
                 }
             }
-            IdentityCmd::Export { path, out } => {
-                let p = identity_path_arg(&path);
-                let id = identity::load(&p)?;
-                let raw = serde_json::to_string_pretty(&id)?;
-                if let Some(dest) = out {
-                    std::fs::write(&dest, format!("{raw}\n"))?;
-                    println!("exported {}", dest.display());
-                } else {
-                    println!("{raw}");
-                }
-            }
-            IdentityCmd::Import { from, path } => {
-                let dest = identity_path_arg(&path);
-                let id = identity::load(&from)?;
-                identity::save(&dest, &id)?;
-                identity::print_code_banner(&id, &dest, false);
-            }
-        },
+        }
         Commands::Onboard { identity: id_flag } => {
             let p = identity_path_arg(&id_flag);
             let (id, fresh) = identity::load_or_init(&p)?;
@@ -982,7 +984,7 @@ async fn run_agent(
     let node_id = NodeId::new();
     let account = ident.account_id.clone();
     let _ = model; // single-model cluster; agents always donate to CLUSTER_MODEL
-    // Startup GPU probe: clamp advertised claim (mint/placement still use verified only).
+                   // Startup GPU probe: clamp advertised claim (mint/placement still use verified only).
     let probe = gpu_probe::probe_vram();
     let claim_mib = gpu_probe::clamp_claim(mem_mib, &probe);
     let device_s = gpu_probe::effective_device(&device, claim_mib);

@@ -666,7 +666,11 @@ mod tests {
         // Three serial oks of same peak C → still C (peak, not sum).
         c.on_challenge_result(&id, true, proven);
         c.on_challenge_result(&id, true, proven);
-        assert_eq!(c.verified_mem_mib(&id), proven, "serial same peak must not sum");
+        assert_eq!(
+            c.verified_mem_mib(&id),
+            proven,
+            "serial same peak must not sum"
+        );
         // Larger single proof raises peak.
         c.on_challenge_result(&id, true, 128);
         assert_eq!(c.verified_mem_mib(&id), 128);
@@ -761,6 +765,9 @@ mod tests {
         c.set_verified_mem_mib(&low_claim_high_v, 4096);
         c.set_verified_mem_mib(&high_claim_low_v, 1024);
         let ranked = c.rank_schedulable();
-        assert_eq!(ranked[0], low_claim_high_v, "verified 4G must beat claim 64G/verified 1G");
+        assert_eq!(
+            ranked[0], low_claim_high_v,
+            "verified 4G must beat claim 64G/verified 1G"
+        );
     }
 }

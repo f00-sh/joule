@@ -79,7 +79,10 @@ impl MeshDirectory {
                 )
             })
             .collect();
-        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
+        v.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.to_string().cmp(&b.0.to_string()))
+        });
         v
     }
 
@@ -145,7 +148,10 @@ mod tests {
             40,
         );
         assert_eq!(m.healthy_count(), 1);
-        assert_eq!(m.multiaddrs_for(&id), vec!["tcp://127.0.0.1:7702".to_string()]);
+        assert_eq!(
+            m.multiaddrs_for(&id),
+            vec!["tcp://127.0.0.1:7702".to_string()]
+        );
         // Claim alone does not enter plan_donors
         assert!(m.plan_donors().is_empty());
         m.upsert(

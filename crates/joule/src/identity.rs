@@ -96,7 +96,10 @@ impl Identity {
 
 /// Normalize recovery code (UUID) from user paste.
 pub fn normalize_code(input: &str) -> Result<String> {
-    let s = input.trim().to_ascii_lowercase().replace([' ', '\t', '\n', '\r'], "");
+    let s = input
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '\t', '\n', '\r'], "");
     if s.is_empty() {
         bail!("empty joule code");
     }
@@ -138,8 +141,8 @@ pub fn default_path() -> PathBuf {
 }
 
 pub fn load(path: &Path) -> Result<Identity> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("read identity {}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("read identity {}", path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&raw).context("parse identity JSON")?;
     // v2: recovery_code + account_id + pubkey
     if v.get("recovery_code").is_some() {
@@ -165,8 +168,7 @@ pub fn load(path: &Path) -> Result<Identity> {
 
 pub fn save(path: &Path, id: &Identity) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     let raw = serde_json::to_string_pretty(id).context("serialize identity")?;
     fs::write(path, format!("{raw}\n")).with_context(|| format!("write {}", path.display()))?;

@@ -34,10 +34,15 @@ pub struct MultiAddr {
 impl MultiAddr {
     pub fn parse(s: &str) -> Result<Self> {
         let t = s.trim();
-        let (kind, rest) = if let Some(r) = t.strip_prefix("quic://").or_else(|| t.strip_prefix("QUIC://"))
+        let (kind, rest) = if let Some(r) = t
+            .strip_prefix("quic://")
+            .or_else(|| t.strip_prefix("QUIC://"))
         {
             (TransportKind::Quic, r)
-        } else if let Some(r) = t.strip_prefix("tcp://").or_else(|| t.strip_prefix("TCP://")) {
+        } else if let Some(r) = t
+            .strip_prefix("tcp://")
+            .or_else(|| t.strip_prefix("TCP://"))
+        {
             (TransportKind::Tcp, r)
         } else {
             // bare host:port → tcp
@@ -268,7 +273,8 @@ pub async fn dial_multiaddr(s: &str) -> Result<Dialed> {
             Ok(Dialed::Tcp(stream))
         }
         TransportKind::Quic => {
-            let sess = QuicSession::dial(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), ma.addr).await?;
+            let sess =
+                QuicSession::dial(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)), ma.addr).await?;
             Ok(Dialed::Quic(sess))
         }
     }
@@ -312,15 +318,21 @@ mod tests {
         assert_eq!(q.kind, TransportKind::Quic);
         assert!(q.is_public_style());
         assert_eq!(q.to_string_multiaddr(), "quic://203.0.113.50:7702");
-        assert!(!MultiAddr::parse("tcp://10.0.0.1:1").unwrap().is_public_style());
+        assert!(!MultiAddr::parse("tcp://10.0.0.1:1")
+            .unwrap()
+            .is_public_style());
     }
 
     #[test]
     fn public_advertise_and_nat_map() {
         let local: SocketAddr = "0.0.0.0:7702".parse().unwrap();
         let addrs = advertise_public_multiaddrs(local, Some("198.51.100.20"), true);
-        assert!(addrs.iter().any(|a| a.starts_with("tcp://198.51.100.20:7702")));
-        assert!(addrs.iter().any(|a| a.starts_with("quic://198.51.100.20:7702")));
+        assert!(addrs
+            .iter()
+            .any(|a| a.starts_with("tcp://198.51.100.20:7702")));
+        assert!(addrs
+            .iter()
+            .any(|a| a.starts_with("quic://198.51.100.20:7702")));
         let m = nat_map_local(local, Some("198.51.100.20"));
         assert!(m.public.contains("198.51.100.20"));
         assert_eq!(m.method, "explicit_hint");

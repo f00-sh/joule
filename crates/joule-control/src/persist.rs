@@ -217,8 +217,14 @@ mod tests {
     fn control_donate_does_not_wash_leecher_window() {
         let mut state = ControlState::new();
         // Seed accounts on sealed ledger
-        state.ledger.mint_contribution("rich", 1000, "seed").unwrap();
-        state.ledger.mint_contribution("leecher", 10, "seed").unwrap();
+        state
+            .ledger
+            .mint_contribution("rich", 1000, "seed")
+            .unwrap();
+        state
+            .ledger
+            .mint_contribution("leecher", 10, "seed")
+            .unwrap();
         state.ensure_account("rich");
         state.ensure_account("leecher");
         // Leecher has consume ≫ contribute in fairness window

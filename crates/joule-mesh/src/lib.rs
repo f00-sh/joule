@@ -137,18 +137,18 @@ impl PeerBus {
         }
     }
 
-    pub async fn register_peer(
-        &self,
-        donor: MeshDonor,
-        tx: mpsc::UnboundedSender<Envelope>,
-    ) {
+    pub async fn register_peer(&self, donor: MeshDonor, tx: mpsc::UnboundedSender<Envelope>) {
         let mut g = self.inner.lock().await;
         g.mailboxes.insert(donor.node.clone(), tx);
         g.donors.insert(donor.node.clone(), donor);
     }
 
     pub async fn upsert_donor(&self, donor: MeshDonor) {
-        self.inner.lock().await.donors.insert(donor.node.clone(), donor);
+        self.inner
+            .lock()
+            .await
+            .donors
+            .insert(donor.node.clone(), donor);
     }
 
     async fn send_to(&self, to: &NodeId, env: Envelope) -> Result<()> {
@@ -228,7 +228,12 @@ impl PeerBus {
     }
 
     /// Process one inbound envelope on `local` peer (run by each peer's loop).
-    pub async fn handle_envelope(&self, local: &NodeId, env: Envelope, engine: &impl Engine) -> Result<()> {
+    pub async fn handle_envelope(
+        &self,
+        local: &NodeId,
+        env: Envelope,
+        engine: &impl Engine,
+    ) -> Result<()> {
         match env.msg.clone() {
             Message::RequestInfer {
                 request_id,
@@ -288,10 +293,7 @@ impl PeerBus {
                     let _ = self.send_to(&s.node, offer.clone()).await;
                 }
             }
-            Message::PlanOffer {
-                plan,
-                request_id,
-            } => {
+            Message::PlanOffer { plan, request_id } => {
                 let accepted = plan.shards.iter().any(|s| &s.node == local);
                 let acc = Envelope::new(
                     local.clone(),
@@ -312,7 +314,9 @@ impl PeerBus {
                     g.inflight
                         .get(&request_id)
                         .map(|i| i.coordinator.clone())
-                        .or_else(|| elect_coordinator(&g.donors.values().cloned().collect::<Vec<_>>()))
+                        .or_else(|| {
+                            elect_coordinator(&g.donors.values().cloned().collect::<Vec<_>>())
+                        })
                 };
                 if let Some(c) = coord {
                     let _ = self.send_to(&c, acc).await;
@@ -411,23 +415,13 @@ impl PeerBus {
                 // Deliver completion to all (client listens on any)
                 self.broadcast(done, None).await;
                 if is_tail && !text.is_empty() {
-                    self.inner
-                        .lock()
-                        .await
-                        .completions
-                        .insert(request_id, text);
+                    self.inner.lock().await.completions.insert(request_id, text);
                 }
             }
             Message::InferDone {
-                request_id,
-                text,
-                ..
+                request_id, text, ..
             } if !text.is_empty() => {
-                self.inner
-                    .lock()
-                    .await
-                    .completions
-                    .insert(request_id, text);
+                self.inner.lock().await.completions.insert(request_id, text);
             }
             Message::InferDone { .. } => {}
             _ => {}
@@ -444,7 +438,14 @@ impl PeerBus {
         let start = tokio::time::Instant::now();
         let mut replan_budget = 2u32;
         loop {
-            if let Some(t) = self.inner.lock().await.completions.get(&request_id).cloned() {
+            if let Some(t) = self
+                .inner
+                .lock()
+                .await
+                .completions
+                .get(&request_id)
+                .cloned()
+            {
                 return Ok(t);
             }
             if start.elapsed() > overall_timeout {
@@ -497,13 +498,10 @@ impl PeerBus {
         }
         let donors: Vec<MeshDonor> = {
             let g = self.inner.lock().await;
-            g.donors
-                .values()
-                .filter(|d| d.healthy)
-                .cloned()
-                .collect()
+            g.donors.values().filter(|d| d.healthy).cloned().collect()
         };
-        let new_coord = elect_coordinator(&donors).context("no remaining donors for re-election")?;
+        let new_coord =
+            elect_coordinator(&donors).context("no remaining donors for re-election")?;
         info!(%request_id, old = %old_coord, new = %new_coord, "coordinator re-elected; re-plan");
         {
             let mut g = self.inner.lock().await;
@@ -533,7 +531,12 @@ impl PeerBus {
     }
 
     pub async fn take_completion(&self, request_id: Uuid) -> Option<String> {
-        self.inner.lock().await.completions.get(&request_id).cloned()
+        self.inner
+            .lock()
+            .await
+            .completions
+            .get(&request_id)
+            .cloned()
     }
 }
 

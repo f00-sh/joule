@@ -282,12 +282,14 @@ mod tests {
         led.ensure_account("bob");
         led.ensure_account("carol");
         let recips = vec!["carol".into(), "alice".into(), "bob".into()];
-        let r1 = led
-            .donate_to_pool("rich", 300, &recips)
-            .expect("donate");
+        let r1 = led.donate_to_pool("rich", 300, &recips).expect("donate");
         assert_eq!(r1.amount, 300);
         assert_eq!(led.balance("rich"), 700);
-        let sum_credits: i64 = r1.recipient_credits.iter().map(|c| c.delta_millijoules).sum();
+        let sum_credits: i64 = r1
+            .recipient_credits
+            .iter()
+            .map(|c| c.delta_millijoules)
+            .sum();
         assert_eq!(sum_credits, 300);
         assert_eq!(
             led.balance("alice") + led.balance("bob") + led.balance("carol"),

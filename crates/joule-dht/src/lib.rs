@@ -13,8 +13,8 @@
 
 mod routing;
 pub use routing::{
-    Contact, DhtNode, DhtRpc, FindValueResult, InProcessNetwork, KBucket, RoutingTable,
-    ALPHA, K_BUCKET, MAX_FIND_ITERS,
+    Contact, DhtNode, DhtRpc, FindValueResult, InProcessNetwork, KBucket, RoutingTable, ALPHA,
+    K_BUCKET, MAX_FIND_ITERS,
 };
 
 use serde::{Deserialize, Serialize};
@@ -179,13 +179,8 @@ impl DhtStore {
                 seeders: HashMap::new(),
                 updated_unix_ms: now_unix_ms(),
             });
-        rec.seeders.insert(
-            node_id.to_string(),
-            SeederHint {
-                size,
-                multiaddrs,
-            },
-        );
+        rec.seeders
+            .insert(node_id.to_string(), SeederHint { size, multiaddrs });
         rec.updated_unix_ms = now_unix_ms();
         let seq = rec.updated_unix_ms;
         let value_json = serde_json::to_string(&rec).unwrap_or_else(|_| "{}".into());
@@ -259,10 +254,7 @@ impl BootstrapList {
             out.push(std::path::PathBuf::from(p));
         }
         if let Ok(home) = std::env::var("HOME") {
-            out.push(
-                std::path::PathBuf::from(home)
-                    .join(".local/share/joule/bootstrap.json"),
-            );
+            out.push(std::path::PathBuf::from(home).join(".local/share/joule/bootstrap.json"));
         }
         out.push(std::path::PathBuf::from("bootstrap.json"));
         out

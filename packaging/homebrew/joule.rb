@@ -45,9 +45,9 @@ class Joule < Formula
   end
 
   test do
-    assert_match version.to_s, shell_output("#{bin}/joule version")
-  rescue
-    # version subcommand format may vary during 0.x — binary must run
-    system "#{bin}/joule", "--help"
+    # Binary Cargo version may lag SemVer tag (e.g. formula 0.1.2, `joule version` 0.1.0).
+    out = shell_output("#{bin}/joule version")
+    assert_match(/joule\s+\d+\.\d+\.\d+/, out)
+    assert_match(/protocol/, out)
   end
 end

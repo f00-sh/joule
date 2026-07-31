@@ -134,7 +134,10 @@ mod tests {
             CHALLENGE_CREDIT_MIB as usize * BYTES_PER_CREDIT_MIB
         );
         assert_eq!(work_bytes(CHALLENGE_CREDIT_MIB + 999), max_work_bytes());
-        assert_eq!(max_work_bytes(), CHALLENGE_CREDIT_MIB as usize * BYTES_PER_CREDIT_MIB);
+        assert_eq!(
+            max_work_bytes(),
+            CHALLENGE_CREDIT_MIB as usize * BYTES_PER_CREDIT_MIB
+        );
         // Zero credit still runs 1 MiB of work (clamp) — unlock path should pass real credit.
         assert_eq!(work_bytes(0), BYTES_PER_CREDIT_MIB);
     }
@@ -153,7 +156,10 @@ mod tests {
         // Different credit → different work set → different proof (cannot reuse 1 MiB solve for 2 MiB).
         assert_ne!(proof_hex(&seed, 2), a);
         assert!(verify(&seed, 1, &a));
-        assert!(!verify(&seed, 2, &a), "1 MiB proof must not satisfy 2 MiB credit");
+        assert!(
+            !verify(&seed, 2, &a),
+            "1 MiB proof must not satisfy 2 MiB credit"
+        );
     }
 
     #[test]
