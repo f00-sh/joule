@@ -64,7 +64,13 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
         };
 
         match env.msg {
-            Message::Hello { account, caps } => {
+            Message::Hello {
+                account,
+                caps,
+                pubkey_hex,
+                sig_hex,
+                signed_at_unix_ms,
+            } => {
                 if account.trim().is_empty() {
                     let err = Envelope::new(
                         env.from.clone(),
@@ -76,6 +82,49 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     continue;
                 }
                 let id = env.from.clone();
+                // Cryptographic acceptance: j1… accounts must present a valid ed25519 Hello.
+                if crate::account_auth::requires_signature(&account) {
+                    let now = crate::account_auth::now_unix_ms();
+                    match crate::account_auth::verify_hello(
+                        &account,
+                        &id,
+                        &pubkey_hex,
+                        &sig_hex,
+                        signed_at_unix_ms,
+                        now,
+                    ) {
+                        Ok(pk) => {
+                            let mut g = app.state.write().await;
+                            if let Some(bound) = g.account_pubkeys.get(&account) {
+                                if bound != &pk {
+                                    let err = Envelope::new(
+                                        id.clone(),
+                                        Message::Error {
+                                            error: "account already bound to a different key"
+                                                .into(),
+                                        },
+                                    );
+                                    let _ = tx.send(err);
+                                    continue;
+                                }
+                            } else {
+                                g.account_pubkeys.insert(account.clone(), pk);
+                                g.mark_dirty();
+                            }
+                        }
+                        Err(e) => {
+                            warn!(%account, error = %e, "signed Hello rejected");
+                            let err = Envelope::new(
+                                id.clone(),
+                                Message::Error {
+                                    error: format!("hello auth failed: {e}"),
+                                },
+                            );
+                            let _ = tx.send(err);
+                            continue;
+                        }
+                    }
+                }
                 let api_key = {
                     let mut g = app.state.write().await;
                     let key = g.register_node(id.clone(), &account, caps);

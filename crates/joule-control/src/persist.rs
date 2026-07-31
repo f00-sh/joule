@@ -22,6 +22,9 @@ pub struct EconomySnap {
 pub struct Snapshot {
     pub version: u32,
     pub account_keys: HashMap<String, String>,
+    /// account_id → ed25519 pubkey hex (signed identity bind).
+    #[serde(default)]
+    pub account_pubkeys: HashMap<String, String>,
     /// Legacy field — ignored on load (balances only from chain).
     #[serde(default)]
     pub balances: HashMap<String, i64>,
@@ -99,6 +102,7 @@ pub fn save(dir: &Path, state: &ControlState) -> Result<()> {
     let snap = Snapshot {
         version: Snapshot::VERSION,
         account_keys: state.account_keys.clone(),
+        account_pubkeys: state.account_pubkeys.clone(),
         balances: HashMap::new(), // not authoritative
         economy,
         chain: state.ledger.sealed().entries().to_vec(),
@@ -118,6 +122,7 @@ pub fn save(dir: &Path, state: &ControlState) -> Result<()> {
 
 pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
     state.account_keys = snap.account_keys;
+    state.account_pubkeys = snap.account_pubkeys;
     state.keys.clear();
     for (account, key) in &state.account_keys {
         state.keys.insert(key.clone(), account.clone());

@@ -166,6 +166,8 @@ pub struct ControlState {
     pub ledger: Ledger,
     pub keys: HashMap<String, String>,
     pub account_keys: HashMap<String, String>,
+    /// account_id → ed25519 pubkey hex (bound at first signed Hello).
+    pub account_pubkeys: HashMap<String, String>,
     pub node_account: HashMap<NodeId, String>,
     pub pending: HashMap<Uuid, PendingInfer>,
     /// request_id → PlanAccept collector (mesh Phase D).
@@ -219,6 +221,7 @@ impl ControlState {
             ledger: Ledger::new(),
             keys: HashMap::new(),
             account_keys: HashMap::new(),
+            account_pubkeys: HashMap::new(),
             node_account: HashMap::new(),
             pending: HashMap::new(),
             pending_plan_accepts: HashMap::new(),

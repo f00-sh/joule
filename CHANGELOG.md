@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Joule code (dummy easy multi-device)**: auto UUID on first agent run; `joule identity use <code>` / `--code` to link machines; no username/email; same code → same mJ ([docs/design/identity-v0.md](docs/design/identity-v0.md))
+- **Signed joule identity**: recovery UUID → ed25519 key → `j1` account fingerprint; Hello must be signed so the pool accepts only key holders; multi-device via same code ([docs/design/identity-v0.md](docs/design/identity-v0.md))
 - **Multi-platform release CI**: `.github/workflows/release.yml` builds linux/darwin/windows artifacts on `v*` tags (and manual dispatch)
 - **Dummy-easy install**: `scripts/install.sh` (Unix) + `scripts/install.ps1` (Windows) from GitHub Releases
 - **Download page**: [docs/download.html](docs/download.html) OS autodetect + all-platform links ([joule.f00.sh/download.html](https://joule.f00.sh/download.html))

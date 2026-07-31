@@ -437,24 +437,24 @@ async fn main() -> Result<()> {
             IdentityCmd::Show { path } => {
                 let p = identity_path_arg(&path);
                 let (id, fresh) = identity::load_or_init(&p)?;
-                identity::print_code_banner(id.code(), &p, fresh);
+                identity::print_code_banner(&id, &p, fresh);
             }
             IdentityCmd::Use { code, path } => {
                 let p = identity_path_arg(&path);
                 let id = identity::use_code(&p, &code)?;
                 println!("this machine is now linked to your joule code.");
-                identity::print_code_banner(id.code(), &p, false);
+                identity::print_code_banner(&id, &p, false);
             }
             IdentityCmd::New { path, force } => {
                 let p = identity_path_arg(&path);
                 if p.is_file() && !force {
                     let id = identity::load(&p)?;
                     println!("already have a code — showing it (use --force for a NEW empty account):");
-                    identity::print_code_banner(id.code(), &p, false);
+                    identity::print_code_banner(&id, &p, false);
                 } else {
                     let id = identity::Identity::generate();
                     identity::save(&p, &id)?;
-                    identity::print_code_banner(id.code(), &p, true);
+                    identity::print_code_banner(&id, &p, true);
                 }
             }
             IdentityCmd::Export { path, out } => {
@@ -472,7 +472,7 @@ async fn main() -> Result<()> {
                 let dest = identity_path_arg(&path);
                 let id = identity::load(&from)?;
                 identity::save(&dest, &id)?;
-                identity::print_code_banner(id.code(), &dest, false);
+                identity::print_code_banner(&id, &dest, false);
             }
         },
         Commands::Agent {
@@ -499,16 +499,15 @@ async fn main() -> Result<()> {
             } else {
                 Some(account.as_str())
             };
-            let (account, id_path, fresh) =
-                identity::resolve_account(code_opt, explicit, &id_path)?;
-            // Always show code so users know how to link other machines.
-            identity::print_code_banner(&account, &id_path, fresh);
-            if !identity::Identity::is_anonymous_id(&account) {
-                warn!(%account, "lab account nickname (not a UUID code)");
+            let (ident, fresh) = identity::resolve_account(code_opt, explicit, &id_path)?;
+            if !ident.recovery_code.is_empty() {
+                identity::print_code_banner(&ident, &id_path, fresh);
+            } else {
+                println!("lab account nickname: {}", ident.account_id);
             }
             run_agent(
                 control,
-                account,
+                ident,
                 model,
                 mem_mib,
                 device,
@@ -872,7 +871,7 @@ fn identity_path_arg(flag: &str) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     control: String,
-    account: String,
+    ident: identity::Identity,
     model: String,
     mem_mib: u32,
     device: String,
@@ -882,6 +881,7 @@ async fn run_agent(
 ) -> Result<()> {
     let device = parse_device(&device)?;
     let node_id = NodeId::new();
+    let account = ident.account_id.clone();
     let _ = model; // single-model cluster; agents always donate to CLUSTER_MODEL
     let throughput_class = match device {
         DeviceClass::Gpu => 40,
@@ -958,13 +958,19 @@ async fn run_agent(
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
 
-    let hello = Envelope::new(
-        node_id.clone(),
+    // Signed Hello for j1… accounts so the whole pool accepts only key holders.
+    let hello_msg = if ident.recovery_code.is_empty() {
         Message::Hello {
             account: account.clone(),
             caps,
-        },
-    );
+            pubkey_hex: String::new(),
+            sig_hex: String::new(),
+            signed_at_unix_ms: 0,
+        }
+    } else {
+        ident.signed_hello(&node_id, caps)?
+    };
+    let hello = Envelope::new(node_id.clone(), hello_msg);
     writer.write_all(&encode_line(&hello)?).await?;
 
     // Tensor-backed when weights load; stub-style text until then.

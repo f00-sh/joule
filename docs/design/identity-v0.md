@@ -1,50 +1,68 @@
-# joule — anonymous multi-device identity v0
+# joule — signed anonymous identity v0
 
-**Goal:** install app → **done**. One millijoule account, many machines, **no PII**.
+**Goal:** install → run → **done**. One millijoule account on many machines. **No PII.**  
+**Group acceptance:** the pool only accepts **cryptographically signed** Hellos for real accounts.
 
-## User story (dummy easy)
+## Two strings (don’t confuse them)
 
-1. Install joule.  
-2. Run agent (or open tray). A **joule code** (UUID) is created **automatically** — you never pick it.  
-3. On another computer: type/paste  
-   `joule identity use 550e8400-e29b-41d4-a716-446655440000`  
-   (or `joule agent --code …`). Same code ⇒ same millijoules.
+| Name | What | Share? |
+|------|------|--------|
+| **CODE** (recovery) | UUID, e.g. `550e8400-e29b-41d4-a716-446655440000` | **Secret** — type this on other PCs |
+| **ACCT** (account id) | `j1` + 32 hex = fingerprint of ed25519 pubkey | Public — ledger key, not enough to steal funds |
 
-## Laws
-
-1. **No names, emails, phones, or government IDs.**  
-2. **Code is a random UUID** (auto-generated). Not hardware serials.  
-3. **One code ⇒ one sealed-ledger balance** on a pool.  
-4. **Multi-machine = same code** (type it or paste it).  
-5. **The code is the secret** — anyone with it is “you” on that pool.  
-6. **API key** (`joule_…`) is for HTTP chat; same account always gets the same key from control.
-
-## CLI
+## How crypto works
 
 ```text
-joule agent --control HOST:7701     # auto code on first run; prints banner
-joule identity show                 # print your code again
-joule identity use <UUID>           # link this machine to an existing code
-
-# also fine:
-joule agent --code 550e8400-e29b-41d4-a716-446655440000 --control HOST:7701
+CODE (16 random bytes as UUID)
+   │
+   ▼  SHA-256("joule-identity-v1" || code_bytes)
+ed25519 signing key
+   │
+   ▼
+public key ──► ACCT = "j1" || hex(sha256(pubkey)[0..16])
+   │
+   ▼
+Hello { account: ACCT, pubkey, sig(preimage), … }
+   │
+   ▼
+Control verifies sig + fingerprint ──► whole pool accepts account
 ```
 
-Env: `JOULE_IDENTITY=/path/to/identity.json` (stores the code locally).
+Preimage (stable, versioned):
+
+```text
+joule-hello-v1|{account}|{node_id}|{pubkey_hex}|{signed_at_ms}|{protocol}
+```
+
+- Wrong code ⇒ wrong key ⇒ signature fails ⇒ **rejected**.  
+- Lab nicknames (`mesh-alice`) may still join **unsigned** (tests / local).  
+- First signed Hello **binds** pubkey to ACCT; a different key for the same ACCT is rejected.
+
+## User story
+
+```text
+# machine 1
+joule agent --control HOST:7701
+# shows CODE + ACCT automatically
+
+# machine 2
+joule identity use 550e8400-e29b-41d4-a716-446655440000
+joule agent --control HOST:7701
+```
+
+Same CODE ⇒ same key ⇒ same ACCT ⇒ **same millijoules**.
 
 ## What we never collect
 
-| Field | Stored? |
-|-------|---------|
-| Email / phone / real name | **No** |
-| IP in ledger | **No** (may appear in operator logs of control host — ops hygiene) |
-| Hardware serial / MAC as account | **No** |
-| Account id | Yes (opaque) |
-| API key | Optional cache on identity file after first join |
+No email, phone, real name, government ID, or hardware serial as identity.
 
-## Trust notes
+## Threat notes
 
-- This is **pseudonymous**, not mathematically unlinkable traffic analysis.  
-- Same account on many GPUs is intentional (your home + laptop share mJ).  
-- Sybil farms can still make many identity files — economy uses verified capacity + leecher rules, not KYC.  
-- Fully decentralized multi-pool federation of balances is **out of scope** for v0 (each control has its own sealed ledger).
+| Attack | Mitigation |
+|--------|------------|
+| Type someone else’s **ACCT** without CODE | Signature fails |
+| Steal CODE | Full account control (like a seed phrase) — protect it |
+| Replay old Hello | Timestamp skew window (15 min) |
+| Sybil many CODEs | Economy (verified capacity, leecher rules), not KYC |
+
+Fully trustless multi-pool federation of balances remains out of scope for v0 (per-pool sealed ledger).

@@ -1,26 +1,30 @@
-//! Anonymous multi-device **joule code** (no PII).
+//! Anonymous multi-device **joule code** with pool-accepted signatures (no PII).
 //!
-//! User story (dummy easy):
-//! 1. Install app → first run **auto-creates** a random code (UUID). You never pick it.
-//! 2. All machines that enter the **same code** share one millijoule balance.
-//! 3. No names, emails, or phones.
+//! - **Recovery code** (UUID): secret you type on each machine — expands to an ed25519 key.
+//! - **Account id** (`j1…`): public fingerprint of the pubkey — ledger account.
+//! - **Hello** is signed so the whole pool accepts only the real key holder.
 //!
-//! Canonical account id is a lowercase UUID string, e.g.
-//! `550e8400-e29b-41d4-a716-446655440000`.
-//! Legacy `j_`+32-hex ids still accepted and normalized.
+//! Install → run agent → code created automatically. Same code on N machines = one balance.
 
 use anyhow::{bail, Context, Result};
+use joule_control::{
+    account_id_from_verifying_key, sign_hello, signing_key_from_recovery, ACCOUNT_PREFIX,
+};
+use joule_proto::{Message, NodeId};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-/// On-disk identity. Treat the **code** as a secret (like a password).
+/// On-disk identity. The recovery code is the multi-machine secret.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Identity {
-    /// Anonymous ledger account id (= joule code). UUID form preferred.
+    /// User-facing recovery code (UUID). Same on every machine you own.
+    pub recovery_code: String,
+    /// Public ledger account = fingerprint of derived pubkey (`j1…`).
     pub account_id: String,
-    /// Cached API key after first Welcome (optional).
+    /// Ed25519 public key hex (64 chars).
+    pub pubkey_hex: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default)]
@@ -30,56 +34,76 @@ pub struct Identity {
 }
 
 fn default_version() -> u32 {
-    1
+    2
 }
 
 impl Identity {
-    /// Fresh random code — user never chooses it.
+    /// Fresh random recovery code → keypair → account fingerprint.
     pub fn generate() -> Self {
-        let account_id = Uuid::new_v4().to_string();
+        let recovery = Uuid::new_v4();
+        Self::from_recovery_uuid(recovery)
+    }
+
+    pub fn from_recovery_uuid(recovery: Uuid) -> Self {
+        let bytes = *recovery.as_bytes();
+        let sk = signing_key_from_recovery(&bytes);
+        let vk = sk.verifying_key();
+        let account_id = account_id_from_verifying_key(&vk);
+        let pubkey_hex = hex::encode(vk.as_bytes());
         let created_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         Self {
+            recovery_code: recovery.to_string(),
             account_id,
+            pubkey_hex,
             api_key: None,
             created_unix_ms,
-            version: 1,
+            version: 2,
         }
     }
 
-    /// Human-facing code (same as account_id; always normalized).
+    /// User-facing multi-machine code (secret).
     pub fn code(&self) -> &str {
-        &self.account_id
+        &self.recovery_code
     }
 
-    pub fn is_anonymous_id(s: &str) -> bool {
-        normalize_code(s).is_ok()
+    pub fn signing_key(&self) -> Result<ed25519_dalek::SigningKey> {
+        let u = Uuid::parse_str(&self.recovery_code).context("recovery_code uuid")?;
+        Ok(signing_key_from_recovery(u.as_bytes()))
+    }
+
+    /// Build a signed Hello message for the pool.
+    pub fn signed_hello(&self, from: &NodeId, caps: joule_proto::NodeCaps) -> Result<Message> {
+        let sk = self.signing_key()?;
+        let ts = joule_control::account_auth_now_ms();
+        let (pubkey_hex, sig_hex) = sign_hello(&sk, &self.account_id, from, ts);
+        Ok(Message::Hello {
+            account: self.account_id.clone(),
+            caps,
+            pubkey_hex,
+            sig_hex,
+            signed_at_unix_ms: ts,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn is_signed_account(s: &str) -> bool {
+        s.trim().starts_with(ACCOUNT_PREFIX)
     }
 }
 
-/// Normalize a pasted/typed code into canonical UUID account_id.
-///
-/// Accepts:
-/// - `550e8400-e29b-41d4-a716-446655440000`
-/// - `550e8400e29b41d4a716446655440000` (no dashes)
-/// - `j_` + 32 hex (legacy)
+/// Normalize recovery code (UUID) from user paste.
 pub fn normalize_code(input: &str) -> Result<String> {
-    let s = input.trim().to_ascii_lowercase();
-    let s = s.replace([' ', '\t', '\n', '\r'], "");
+    let s = input.trim().to_ascii_lowercase().replace([' ', '\t', '\n', '\r'], "");
     if s.is_empty() {
         bail!("empty joule code");
     }
-
-    // UUID with dashes
     if let Ok(u) = Uuid::parse_str(&s) {
         return Ok(u.to_string());
     }
-
-    // j_ + 32 hex → UUID bytes
-    let hex_part = s.strip_prefix("j_").unwrap_or(s.as_str());
-    let hex_part = hex_part.replace('-', "");
+    let hex_part = s.replace('-', "");
     if hex_part.len() == 32 && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
         let bytes = hex::decode(&hex_part).context("decode code hex")?;
         let arr: [u8; 16] = bytes
@@ -87,10 +111,11 @@ pub fn normalize_code(input: &str) -> Result<String> {
             .map_err(|_| anyhow::anyhow!("code must be 16 bytes"))?;
         return Ok(Uuid::from_bytes(arr).to_string());
     }
-
-    bail!(
-        "invalid joule code (need a UUID like 550e8400-e29b-41d4-a716-446655440000)"
-    );
+    // legacy j_ + 32 hex was account id, not recovery — cannot re-derive key
+    if s.starts_with("j_") || s.starts_with(ACCOUNT_PREFIX) {
+        bail!("that looks like a public account id, not a recovery code — use the UUID code from your first machine");
+    }
+    bail!("invalid joule code (need UUID like 550e8400-e29b-41d4-a716-446655440000)");
 }
 
 pub fn default_path() -> PathBuf {
@@ -115,17 +140,27 @@ pub fn default_path() -> PathBuf {
 pub fn load(path: &Path) -> Result<Identity> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("read identity {}", path.display()))?;
-    let mut id: Identity = serde_json::from_str(&raw).context("parse identity JSON")?;
-    if id.account_id.trim().is_empty() {
-        bail!("identity has empty account_id");
+    let v: serde_json::Value = serde_json::from_str(&raw).context("parse identity JSON")?;
+    // v2: recovery_code + account_id + pubkey
+    if v.get("recovery_code").is_some() {
+        let id: Identity = serde_json::from_value(v).context("parse identity v2")?;
+        if id.recovery_code.is_empty() || id.account_id.is_empty() {
+            bail!("identity missing recovery_code or account_id");
+        }
+        return Ok(id);
     }
-    // Migrate legacy j_ ids to UUID form on load (same bytes → same account).
-    if let Ok(canon) = normalize_code(&id.account_id) {
-        if canon != id.account_id {
-            id.account_id = canon;
+    // v1 migrate: account_id was UUID code — treat as recovery
+    if let Some(aid) = v.get("account_id").and_then(|x| x.as_str()) {
+        if let Ok(code) = normalize_code(aid) {
+            let mut id = Identity::from_recovery_uuid(Uuid::parse_str(&code)?);
+            if let Some(k) = v.get("api_key").and_then(|x| x.as_str()) {
+                id.api_key = Some(k.to_string());
+            }
+            save(path, &id)?;
+            return Ok(id);
         }
     }
-    Ok(id)
+    bail!("unrecognized identity file (run joule identity new --force)");
 }
 
 pub fn save(path: &Path, id: &Identity) -> Result<()> {
@@ -143,7 +178,6 @@ pub fn save(path: &Path, id: &Identity) -> Result<()> {
     Ok(())
 }
 
-/// Load or auto-create (user never picks the code).
 pub fn load_or_init(path: &Path) -> Result<(Identity, bool)> {
     if path.is_file() {
         return Ok((load(path)?, false));
@@ -153,52 +187,43 @@ pub fn load_or_init(path: &Path) -> Result<(Identity, bool)> {
     Ok((id, true))
 }
 
-/// Set this machine to an existing code (multi-device link).
 pub fn use_code(path: &Path, code: &str) -> Result<Identity> {
-    let account_id = normalize_code(code)?;
-    let mut id = if path.is_file() {
-        load(path).unwrap_or_else(|_| Identity::generate())
-    } else {
-        Identity {
-            account_id: account_id.clone(),
-            api_key: None,
-            created_unix_ms: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
-            version: 1,
-        }
-    };
-    id.account_id = account_id;
-    // New code ⇒ old cached api_key is wrong account.
-    id.api_key = None;
+    let code = normalize_code(code)?;
+    let u = Uuid::parse_str(&code)?;
+    let id = Identity::from_recovery_uuid(u);
     save(path, &id)?;
     Ok(id)
 }
 
-/// Resolve ledger account for agent:
-/// 1. `--code` → use_code (link)
-/// 2. `--account` non-empty lab string (advanced)
-/// 3. else load_or_init identity file
 pub fn resolve_account(
     code: Option<&str>,
     explicit_account: Option<&str>,
     identity_path: &Path,
-) -> Result<(String, PathBuf, bool /* newly_created */)> {
+) -> Result<(Identity, bool)> {
     if let Some(c) = code.map(str::trim).filter(|s| !s.is_empty()) {
         let id = use_code(identity_path, c)?;
-        return Ok((id.account_id, identity_path.to_path_buf(), false));
+        return Ok((id, false));
     }
     if let Some(a) = explicit_account.map(str::trim).filter(|s| !s.is_empty()) {
-        // If it looks like a code, normalize; else lab nickname.
-        if let Ok(canon) = normalize_code(a) {
-            let id = use_code(identity_path, &canon)?;
-            return Ok((id.account_id, identity_path.to_path_buf(), false));
+        // Lab nickname: synthetic identity without real key (unsigned hello).
+        if normalize_code(a).is_err() && !a.starts_with(ACCOUNT_PREFIX) {
+            let id = Identity {
+                recovery_code: String::new(),
+                account_id: a.to_string(),
+                pubkey_hex: String::new(),
+                api_key: None,
+                created_unix_ms: 0,
+                version: 2,
+            };
+            return Ok((id, false));
         }
-        return Ok((a.to_string(), identity_path.to_path_buf(), false));
+        // Treat as recovery code if it parses.
+        if normalize_code(a).is_ok() {
+            let id = use_code(identity_path, a)?;
+            return Ok((id, false));
+        }
     }
-    let (id, fresh) = load_or_init(identity_path)?;
-    Ok((id.account_id, identity_path.to_path_buf(), fresh))
+    load_or_init(identity_path)
 }
 
 pub fn remember_api_key(path: &Path, api_key: &str) -> Result<()> {
@@ -214,23 +239,39 @@ pub fn remember_api_key(path: &Path, api_key: &str) -> Result<()> {
     save(path, &id)
 }
 
-/// Banner lines for CLI (first run / show).
-pub fn print_code_banner(code: &str, path: &Path, fresh: bool) {
+pub fn print_code_banner(id: &Identity, path: &Path, fresh: bool) {
     println!();
     println!("╔══════════════════════════════════════════════════════════════╗");
     if fresh {
-        println!("║  Your joule code was created automatically (no name/email).  ║");
+        println!("║  Your joule code was created automatically.                  ║");
     } else {
-        println!("║  Your joule code (same code = same millijoules).             ║");
+        println!("║  Your joule code (secret — same on every machine).           ║");
     }
     println!("║                                                              ║");
-    println!("║  {code:<60}  ║", code = code);
+    println!("║  CODE  {}  ║", pad60(id.code()));
+    println!("║  ACCT  {}  ║", pad60(&id.account_id));
     println!("║                                                              ║");
-    println!("║  Other computer? paste it:                                   ║");
-    println!("║    joule identity use {code}");
-    println!("║  Saved: {path:<52} ║", path = path.display());
+    println!("║  Other PC:  joule identity use <CODE>                        ║");
+    println!("║  Pool accepts only signed Hellos for ACCT (ed25519).         ║");
+    println!("║  Saved: {} ║", pad52(&path.display().to_string()));
     println!("╚══════════════════════════════════════════════════════════════╝");
     println!();
+}
+
+fn pad60(s: &str) -> String {
+    let mut t = s.chars().take(60).collect::<String>();
+    while t.chars().count() < 60 {
+        t.push(' ');
+    }
+    t
+}
+
+fn pad52(s: &str) -> String {
+    let mut t = s.chars().take(52).collect::<String>();
+    while t.chars().count() < 52 {
+        t.push(' ');
+    }
+    t
 }
 
 #[cfg(test)]
@@ -239,79 +280,67 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn generate_is_uuid() {
+    fn generate_has_j1_account_and_uuid_code() {
         let id = Identity::generate();
-        assert!(Uuid::parse_str(&id.account_id).is_ok(), "{}", id.account_id);
-        assert!(Identity::is_anonymous_id(&id.account_id));
+        assert!(Uuid::parse_str(id.code()).is_ok());
+        assert!(id.account_id.starts_with("j1"));
+        assert_eq!(id.pubkey_hex.len(), 64);
+        // Same recovery → same account
+        let u = Uuid::parse_str(id.code()).unwrap();
+        let id2 = Identity::from_recovery_uuid(u);
+        assert_eq!(id.account_id, id2.account_id);
+        assert_eq!(id.pubkey_hex, id2.pubkey_hex);
     }
 
     #[test]
-    fn normalize_accepts_uuid_and_hex_and_legacy_j() {
-        let u = "550e8400-e29b-41d4-a716-446655440000";
-        assert_eq!(normalize_code(u).unwrap(), u);
-        assert_eq!(
-            normalize_code("550e8400e29b41d4a716446655440000").unwrap(),
-            u
-        );
-        assert_eq!(
-            normalize_code("  550E8400-E29B-41D4-A716-446655440000  ").unwrap(),
-            u
-        );
-        // legacy j_ + same 16 bytes
-        let j = format!("j_{}", "550e8400e29b41d4a716446655440000");
-        assert_eq!(normalize_code(&j).unwrap(), u);
-    }
-
-    #[test]
-    fn use_code_links_machine() {
-        let dir = std::env::temp_dir().join(format!(
-            "joule-code-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("identity.json");
-        let code = "550e8400-e29b-41d4-a716-446655440000";
-        let id = use_code(&path, code).unwrap();
-        assert_eq!(id.account_id, code);
-        let (acct, _, fresh) = resolve_account(None, None, &path).unwrap();
-        assert!(!fresh);
-        assert_eq!(acct, code);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn auto_init_stable() {
-        let dir = std::env::temp_dir().join(format!(
-            "joule-auto-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("identity.json");
-        let (a, _, f1) = resolve_account(None, None, &path).unwrap();
-        assert!(f1);
-        let (b, _, f2) = resolve_account(None, None, &path).unwrap();
-        assert!(!f2);
-        assert_eq!(a, b);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn resolve_code_flag() {
-        let dir = std::env::temp_dir().join(format!("joule-rc-{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("identity.json");
-        let (acct, _, _) =
-            resolve_account(Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"), None, &path)
+    fn signed_hello_verifies() {
+        let id = Identity::generate();
+        let from = NodeId::new();
+        let msg = id
+            .signed_hello(
+                &from,
+                joule_proto::NodeCaps::for_cluster(joule_proto::DeviceClass::Gpu, 8192, 10),
+            )
+            .unwrap();
+        match msg {
+            Message::Hello {
+                account,
+                pubkey_hex,
+                sig_hex,
+                signed_at_unix_ms,
+                ..
+            } => {
+                assert_eq!(account, id.account_id);
+                let now = joule_control::account_auth_now_ms();
+                joule_control::verify_hello(
+                    &account,
+                    &from,
+                    &pubkey_hex,
+                    &sig_hex,
+                    signed_at_unix_ms,
+                    now,
+                )
                 .unwrap();
-        assert_eq!(acct, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+            }
+            _ => panic!("hello"),
+        }
+    }
+
+    #[test]
+    fn use_code_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "joule-sig-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("identity.json");
+        let a = Identity::generate();
+        let b = use_code(&path, a.code()).unwrap();
+        assert_eq!(a.account_id, b.account_id);
         let _ = fs::remove_dir_all(&dir);
     }
 }

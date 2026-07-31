@@ -244,10 +244,23 @@ impl Envelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
     /// Donor registers (or re-registers) with the control plane.
+    ///
+    /// **Signed accounts** (anonymous joule codes): set `pubkey_hex` + `sig_hex` over
+    /// [`hello_sign_preimage`]. The pool rejects forged account strings without the key.
+    /// Lab nicknames may omit signatures (empty pubkey/sig).
     Hello {
-        /// Account that earns millijoules from this node's contribution.
+        /// Account that earns millijoules (`j1…` fingerprint or lab nickname).
         account: String,
         caps: NodeCaps,
+        /// Ed25519 public key (64 hex chars). Empty = unsigned lab hello.
+        #[serde(default)]
+        pubkey_hex: String,
+        /// Ed25519 signature (128 hex chars) of [`hello_sign_preimage`].
+        #[serde(default)]
+        sig_hex: String,
+        /// Unix ms when signature was made (replay window checked by control).
+        #[serde(default)]
+        signed_at_unix_ms: u64,
     },
     /// Control acknowledges join and returns (or reissues) the API key.
     Welcome {
@@ -507,6 +520,25 @@ pub fn decode_line(line: &[u8]) -> Result<Envelope, serde_json::Error> {
     serde_json::from_slice(line)
 }
 
+/// Canonical preimage for a signed Hello (UTF-8 string, then sign the bytes).
+///
+/// The whole pool verifies the same formula — account must match the pubkey fingerprint.
+pub fn hello_sign_preimage(
+    account: &str,
+    from: &NodeId,
+    pubkey_hex: &str,
+    signed_at_unix_ms: u64,
+) -> String {
+    format!(
+        "joule-hello-v1|{account}|{from}|{pubkey}|{ts}|{proto}",
+        account = account.trim(),
+        from = from,
+        pubkey = pubkey_hex.trim().to_ascii_lowercase(),
+        ts = signed_at_unix_ms,
+        proto = PROTOCOL_VERSION,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,18 +550,23 @@ mod tests {
             Message::Hello {
                 account: "alice".into(),
                 caps: NodeCaps::for_cluster(DeviceClass::Gpu, 24576, 40),
+                pubkey_hex: String::new(),
+                sig_hex: String::new(),
+                signed_at_unix_ms: 0,
             },
         );
         let line = encode_line(&env).unwrap();
         let back = decode_line(&line[..line.len() - 1]).unwrap();
         match back.msg {
-            Message::Hello { account, caps } => {
+            Message::Hello { account, caps, .. } => {
                 assert_eq!(account, "alice");
                 assert_eq!(caps.mem_mib, 24576);
                 assert_eq!(caps.models, vec![CLUSTER_MODEL.to_string()]);
             }
             _ => panic!("expected hello"),
         }
+        let pre = hello_sign_preimage("alice", &NodeId::new(), "ab", 1);
+        assert!(pre.starts_with("joule-hello-v1|alice|"));
     }
 
     #[test]

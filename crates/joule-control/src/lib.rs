@@ -3,6 +3,7 @@
 //! - TCP agent port: hello / heartbeat / infer dispatch / challenges
 //! - HTTP API: live dashboard + capacity + OpenAI-shaped chat (contribute-to-consume)
 
+mod account_auth;
 mod app;
 mod blobs;
 mod broadcast;
@@ -17,6 +18,11 @@ mod persist;
 mod pins;
 mod state;
 mod tcp;
+
+pub use account_auth::{
+    account_id_from_pubkey, account_id_from_verifying_key, now_unix_ms as account_auth_now_ms,
+    requires_signature, sign_hello, signing_key_from_recovery, verify_hello, ACCOUNT_PREFIX,
+};
 
 pub use app::App;
 pub use broadcast::{
