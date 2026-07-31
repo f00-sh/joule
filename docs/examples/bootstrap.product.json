@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "comment": "Product-style multi-region bootstrap example for f00-sh/joule. Replace multiaddrs with your public control/peer-listen endpoints. list_urls may point at HTTPS JSON mirrors of this schema (not weight CDN). f00 never hosts model weights.",
+  "multiaddrs": [
+    "tcp://bootstrap-na.example.joule.invalid:7702",
+    "tcp://bootstrap-eu.example.joule.invalid:7702",
+    "quic://bootstrap-na.example.joule.invalid:7703",
+    "quic://bootstrap-eu.example.joule.invalid:7703"
+  ],
+  "list_urls": [
+    "https://joule.f00.sh/examples/bootstrap.product.json"
+  ]
+}

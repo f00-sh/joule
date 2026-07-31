@@ -1,6 +1,7 @@
 //! joule — distributed compute cluster CLI.
 
 mod client_status;
+mod gpu_probe;
 mod identity;
 mod peer_net;
 mod tray_app;
@@ -173,6 +174,7 @@ enum Commands {
         interval_secs: u64,
     },
     /// Systray / tray-mode status surface (polls control; headless-safe monitor).
+    /// Also the product surface for identity: CODE, enter CODE, open recovery.
     Tray {
         #[arg(long, default_value = "http://127.0.0.1:7700")]
         api: String,
@@ -180,6 +182,23 @@ enum Commands {
         key: String,
         #[arg(long, default_value_t = 5)]
         interval_secs: u64,
+        /// Show identity CODE / recovery once then exit (onboard).
+        #[arg(long, default_value_t = false)]
+        onboard: bool,
+        /// Copy CODE to clipboard (platform tools) then exit.
+        #[arg(long, default_value_t = false)]
+        copy_code: bool,
+        /// Enter CODE to link this machine (same as `identity use`).
+        #[arg(long, default_value = "")]
+        enter_code: String,
+        /// Open JOULE-RECOVERY.txt with the OS default opener.
+        #[arg(long, default_value_t = false)]
+        open_recovery: bool,
+    },
+    /// First-run onboard: create CODE, write recovery file, show instructions once.
+    Onboard {
+        #[arg(long, default_value = "")]
+        identity: String,
     },
     /// Generate OS service install artifacts (systemd / launchd / Windows task).
     Service {
@@ -263,11 +282,25 @@ enum IdentityCmd {
     Show {
         #[arg(long, default_value = "")]
         path: String,
+        /// Also copy CODE to the system clipboard when possible.
+        #[arg(long, default_value_t = false)]
+        copy: bool,
     },
     /// Link this machine to an existing code (other PC already has millijoules).
     Use {
         /// UUID joule code, e.g. 550e8400-e29b-41d4-a716-446655440000
         code: String,
+        #[arg(long, default_value = "")]
+        path: String,
+    },
+    /// Alias for `use` (product wording: enter your code).
+    Enter {
+        code: String,
+        #[arg(long, default_value = "")]
+        path: String,
+    },
+    /// Open JOULE-RECOVERY.txt (OS default app / $EDITOR).
+    OpenRecovery {
         #[arg(long, default_value = "")]
         path: String,
     },
@@ -434,16 +467,29 @@ async fn main() -> Result<()> {
             joule_control::serve(app, agent_listen, http_listen).await?;
         }
         Commands::Identity { cmd } => match cmd {
-            IdentityCmd::Show { path } => {
+            IdentityCmd::Show { path, copy } => {
                 let p = identity_path_arg(&path);
                 let (id, fresh) = identity::load_or_init(&p)?;
                 identity::print_code_banner(&id, &p, fresh);
+                if copy {
+                    match tray_app::copy_to_clipboard(id.code()) {
+                        Ok(()) => println!("CODE copied to clipboard."),
+                        Err(e) => eprintln!("clipboard: {e} (code still printed above)"),
+                    }
+                }
             }
-            IdentityCmd::Use { code, path } => {
+            IdentityCmd::Use { code, path } | IdentityCmd::Enter { code, path } => {
                 let p = identity_path_arg(&path);
                 let id = identity::use_code(&p, &code)?;
                 println!("this machine is now linked to your joule code.");
                 identity::print_code_banner(&id, &p, false);
+            }
+            IdentityCmd::OpenRecovery { path } => {
+                let p = identity_path_arg(&path);
+                let (id, _) = identity::load_or_init(&p)?;
+                let note = identity::write_recovery_note(&p, &id)?;
+                tray_app::open_path(&note)?;
+                println!("opened {}", note.display());
             }
             IdentityCmd::New { path, force } => {
                 let p = identity_path_arg(&path);
@@ -475,6 +521,18 @@ async fn main() -> Result<()> {
                 identity::print_code_banner(&id, &dest, false);
             }
         },
+        Commands::Onboard { identity: id_flag } => {
+            let p = identity_path_arg(&id_flag);
+            let (id, fresh) = identity::load_or_init(&p)?;
+            // Product onboard: always show recovery once via banner + recovery file.
+            identity::print_code_banner(&id, &p, fresh || true);
+            let marker = p
+                .parent()
+                .map(|d| d.join("onboarded"))
+                .unwrap_or_else(|| PathBuf::from("onboarded"));
+            let _ = std::fs::write(&marker, format!("{}\n", id.code()));
+            println!("onboard complete — keep JOULE-RECOVERY.txt safe.");
+        }
         Commands::Agent {
             control,
             code,
@@ -552,7 +610,46 @@ async fn main() -> Result<()> {
             api,
             key,
             interval_secs,
+            onboard,
+            copy_code,
+            enter_code,
+            open_recovery,
         } => {
+            let id_path = identity::default_path();
+            if onboard {
+                let (id, fresh) = identity::load_or_init(&id_path)?;
+                identity::print_code_banner(&id, &id_path, fresh || true);
+                return Ok(());
+            }
+            if copy_code {
+                let (id, _) = identity::load_or_init(&id_path)?;
+                tray_app::copy_to_clipboard(id.code())?;
+                println!("CODE copied: {}", id.code());
+                return Ok(());
+            }
+            if !enter_code.trim().is_empty() {
+                let id = identity::use_code(&id_path, &enter_code)?;
+                identity::print_code_banner(&id, &id_path, false);
+                return Ok(());
+            }
+            if open_recovery {
+                let (id, _) = identity::load_or_init(&id_path)?;
+                let note = identity::write_recovery_note(&id_path, &id)?;
+                tray_app::open_path(&note)?;
+                println!("opened {}", note.display());
+                return Ok(());
+            }
+            // Product tray: show identity once at start, then status monitor.
+            if let Ok((id, fresh)) = identity::load_or_init(&id_path) {
+                if fresh {
+                    identity::print_code_banner(&id, &id_path, true);
+                } else {
+                    println!(
+                        "joule CODE {}  ·  joule tray --copy-code | --enter-code | --open-recovery",
+                        id.code()
+                    );
+                }
+            }
             let k = if key.is_empty() { None } else { Some(key) };
             tray_app::run_tray(api, k, interval_secs).await?;
         }
@@ -879,16 +976,32 @@ async fn run_agent(
     peer_listen: String,
     identity_path: Option<PathBuf>,
 ) -> Result<()> {
-    let device = parse_device(&device)?;
     let node_id = NodeId::new();
     let account = ident.account_id.clone();
     let _ = model; // single-model cluster; agents always donate to CLUSTER_MODEL
+    // Startup GPU probe: clamp advertised claim (mint/placement still use verified only).
+    let probe = gpu_probe::probe_vram();
+    let claim_mib = gpu_probe::clamp_claim(mem_mib, &probe);
+    let device_s = gpu_probe::effective_device(&device, claim_mib);
+    if claim_mib != mem_mib {
+        println!(
+            "gpu probe: requested claim {mem_mib} MiB → clamped to {claim_mib} MiB ({})",
+            probe.detail
+        );
+    } else {
+        println!(
+            "gpu probe: {} · claim {claim_mib} MiB ({})",
+            probe.backend, probe.detail
+        );
+    }
+    let device = parse_device(device_s)?;
     let throughput_class = match device {
         DeviceClass::Gpu => 40,
         DeviceClass::Metal => 30,
         DeviceClass::Cpu => 5,
     };
-    let caps = NodeCaps::for_cluster(device, mem_mib, throughput_class);
+    let caps = NodeCaps::for_cluster(device, claim_mib, throughput_class);
+    let mem_mib = claim_mib;
 
     // Peer listen for direct mesh dial (decentral Phase A/C).
     let local_mesh: peer_net::SharedMesh =

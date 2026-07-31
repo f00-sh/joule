@@ -7,13 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-07-31
+
+First public multi-platform release under **f00-sh/joule**.
+
 ### Added
 
+- **Signed joule identity** + recovery file + tray product surface (`--copy-code` / `--enter-code` / `--open-recovery` / `--onboard`)
+- **Startup GPU probe** clamps advertised claim; mint/placement remain verified-only
+- **Product bootstrap** multi-region example + merge/list_urls helpers
+- **Multi-platform release CI**, `install.sh` / `install.ps1`, download page, packaging under f00-sh
 - **Signed joule identity**: recovery UUID → ed25519 key → `j1` account fingerprint; Hello must be signed so the pool accepts only key holders; multi-device via same code ([docs/design/identity-v0.md](docs/design/identity-v0.md))
 - **Multi-platform release CI**: `.github/workflows/release.yml` builds linux/darwin/windows artifacts on `v*` tags (and manual dispatch)
 - **Dummy-easy install**: `scripts/install.sh` (Unix) + `scripts/install.ps1` (Windows) from GitHub Releases
 - **Download page**: [docs/download.html](docs/download.html) OS autodetect + all-platform links ([joule.f00.sh/download.html](https://joule.f00.sh/download.html))
-- **Packaging templates**: AUR `packaging/aur/PKGBUILD`, Homebrew `packaging/homebrew/joule.rb`, Windows zip notes
+- **Packaging**: AUR + Homebrew under f00-sh (live digests from Releases)
 
 ### Changed
 
@@ -24,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Peer gossip anti-farm**: LocalMesh equal-unit placement; agents never self-attest verified on PeerAlive; `MeshDonor::from_untrusted_presence`
 - **E2E mesh geometry**: tests assert `mesh_plan_donors()` (cluster verified), not PeerAlive claim
 
-### Added
+### Added (pre-0.1.0 stack)
 
 - **Fair economy + anti-gaming**: churn mint penalty; sealed **donate-to-pool** with equitable redistribute (`POST /v1/account/donate`); ledger kinds `donate_pool` / `donate_receive`; relational pay-table tests
 - **GPU claim integrity**: `capacity_matrix` + farm-claim tests; progressive challenge credit / fail halve; expired challenges → fail

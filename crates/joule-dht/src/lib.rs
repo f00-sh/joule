@@ -278,6 +278,46 @@ impl BootstrapList {
         }
         None
     }
+
+    /// Merge multiaddrs from another list (dedupe, preserve order). Used for
+    /// product multi-region bootstrap: local file + optional remote list_urls JSON.
+    pub fn merge_multiaddrs(&mut self, other: &BootstrapList) {
+        for a in &other.multiaddrs {
+            let t = a.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if !self.multiaddrs.iter().any(|x| x == t) {
+                self.multiaddrs.push(t.to_string());
+            }
+        }
+        for u in &other.list_urls {
+            let t = u.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if !self.list_urls.iter().any(|x| x == t) {
+                self.list_urls.push(t.to_string());
+            }
+        }
+    }
+
+    /// Parse a remote bootstrap JSON body (same schema) — pure, no network.
+    pub fn from_remote_json_body(body: &str) -> Result<Self, String> {
+        Self::from_json(body)
+    }
+
+    /// True if this list is usable outside pure localhost lab (has a non-loopback
+    /// multiaddr or at least one list_url for refresh).
+    pub fn is_product_style(&self) -> bool {
+        if !self.list_urls.is_empty() {
+            return true;
+        }
+        self.multiaddrs.iter().any(|a| {
+            let s = a.to_ascii_lowercase();
+            !s.contains("127.0.0.1") && !s.contains("[::1]") && !s.contains("localhost")
+        })
+    }
 }
 
 #[cfg(test)]
@@ -329,6 +369,28 @@ mod tests {
         let b = key_id("b");
         let _ = closer(&t, &a, &b);
         assert_ne!(xor_distance(&a, &b), [0u8; 32]);
+    }
+
+    #[test]
+    fn merge_and_product_style_bootstrap() {
+        let mut local = BootstrapList::from_json(
+            r#"{"version":1,"multiaddrs":["tcp://127.0.0.1:7701"],"list_urls":[]}"#,
+        )
+        .unwrap();
+        assert!(!local.is_product_style());
+        let remote = BootstrapList::from_remote_json_body(
+            r#"{"version":1,"comment":"region-eu","multiaddrs":["tcp://203.0.113.10:7702","quic://198.51.100.8:7703"],"list_urls":["https://example.com/bootstrap.json"]}"#,
+        )
+        .unwrap();
+        assert!(remote.is_product_style());
+        local.merge_multiaddrs(&remote);
+        assert!(local.is_product_style());
+        assert!(local.multiaddrs.iter().any(|a| a.contains("203.0.113.10")));
+        assert!(local.list_urls.iter().any(|u| u.contains("example.com")));
+        // dedupe
+        let n = local.multiaddrs.len();
+        local.merge_multiaddrs(&remote);
+        assert_eq!(local.multiaddrs.len(), n);
     }
 
     #[test]
