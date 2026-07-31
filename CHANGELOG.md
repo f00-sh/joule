@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Decentral Phase C**: `joule-dht` (peer/blob keys, XOR distance, bootstrap.json); control DHT mirror; agent **LocalMesh** + P2P PeerAlive/BlobsHave on peer port; bootstrap dial announce; FetchDigests uses local DHT before control; `GET /v1/dht/keys`, `/v1/dht/get/{*key}`, `/v1/bootstrap`; example [docs/examples/bootstrap.json](docs/examples/bootstrap.json)
 - **Decentral Phase D start**: `RequestInfer` / `PlanAccept`; PeerAlive `mem_mib`/`throughput_class`; `plan_from_mesh_donors`; agent mesh PlanOffer; `GET /v1/mesh/plan`
 - **Decentral Phase D chat path**: `dispatch_mesh_infer` (RequestInfer→PlanOffer→PlanAccept→Infer) when mesh donors advertise mem; control stream fallback; chat returns `joule_coordination`; e2e `mesh_request_infer_chat_multi_donor`
+- **Multi-hop DHT**: k-buckets + iterative find/store (`joule-dht` routing); multi-node chain put/get tests
+- **Peer-only chat bus**: `joule-mesh` PeerBus (no control relay); coordinator election + re-plan on death
+- **Phase E**: `joule-net` quic:// multiaddr + QUIC session, NAT/public advertise; erasure encode/reconstruct + durable placement
+- **Product scale**: `kimi-k3-shards` multi-hundred-GB class MANIFEST pins; `k3_pipeline` APIs; public multiaddr announce on agent
 - **Cross-platform client status**: `joule status` / `monitor` / `tray` (Linux, macOS, Windows CLI) — connection, API/account, millijoule balance, tokens used, pool dash (`joule-client` shared snapshot)
 - **Service install helpers**: `joule service generate|install-help` for systemd (Linux), launchd (macOS), Task Scheduler XML (Windows); user-session preferred for tray+GPU
 - Account API fields `prompt_tokens_used` / `completion_tokens_used` (lifetime chat usage)

@@ -4,12 +4,18 @@
 //! - `peer/<node_id>` → multiaddrs + caps summary + seq
 //! - `blob/<sha256>` → seeder node ids + sizes + multiaddrs
 //!
-//! This is an **in-process** store with XOR distance helpers for future k-bucket
-//! routing. Production will gossip/replicate records; v0 keeps a local view that
-//! control and agents can share. Bootstrap lists are **replaceable** — never a
+//! Local store + **k-bucket routing** + multi-hop iterative find/store (`routing` module).
+//! Peers do **not** share one HashMap: each node has its own table and store;
+//! `InProcessNetwork` proves multi-hop put/get for tests and lab sim. Bootstrap lists are **replaceable** — never a
 //! single f00 hostname as the only root.
 //!
 //! See docs/design/decentral-discovery-v0.md.
+
+mod routing;
+pub use routing::{
+    Contact, DhtNode, DhtRpc, FindValueResult, InProcessNetwork, KBucket, RoutingTable,
+    ALPHA, K_BUCKET, MAX_FIND_ITERS,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

@@ -9,6 +9,8 @@ members = [
     "crates/joule-control",
     "crates/joule-client",
     "crates/joule-dht",
+    "crates/joule-mesh",
+    "crates/joule-net",
 ]
 default-members = ["crates/joule"]
 
@@ -29,6 +31,8 @@ joule-ledger = { path = "crates/joule-ledger" }
 joule-control = { path = "crates/joule-control" }
 joule-client = { path = "crates/joule-client" }
 joule-dht = { path = "crates/joule-dht" }
+joule-mesh = { path = "crates/joule-mesh" }
+joule-net = { path = "crates/joule-net" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

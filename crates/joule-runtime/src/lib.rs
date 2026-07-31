@@ -5,12 +5,17 @@
 //! RAM. Service-live is a separate control flag after the mesh has loaded.
 
 mod decode;
+mod k3_pipeline;
 mod load;
 mod manifest;
 mod software;
 mod weights;
 
 pub use decode::generate as generate_from_loaded;
+pub use k3_pipeline::{
+    pipeline_from_quant, pipelines_for_model, shard_cache_path, synthetic_k3_shard_template,
+    validate_k3_scale, PipelineShard, WeightPipeline,
+};
 pub use load::{load_model, LoadError, LoadReport, LoadedModel, TensorInfo};
 pub use manifest::{
     InferenceMode, ManifestFile, MilestoneStatus, ModelReadiness, ModelSpec, QuantSpec,

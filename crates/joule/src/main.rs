@@ -780,7 +780,20 @@ async fn run_agent(
             .with_context(|| format!("bind peer listen {bind}"))?;
         let local = listener.local_addr()?;
         multiaddrs.push(peer_net::format_tcp_multiaddr(local));
+        // Production internet donors: JOULE_PUBLIC_ADDR or quic dual-stack multiaddrs.
+        for a in joule_net::advertise_public_multiaddrs(
+            local,
+            std::env::var("JOULE_PUBLIC_HOST").ok().as_deref(),
+            true,
+        ) {
+            if !multiaddrs.contains(&a) {
+                multiaddrs.push(a);
+            }
+        }
         println!("peer listen: {}", multiaddrs[0]);
+        if multiaddrs.len() > 1 {
+            println!("public multiaddrs: {}", multiaddrs[1..].join(", "));
+        }
         let nid = node_id.clone();
         let mesh = local_mesh.clone();
         tokio::spawn(async move {

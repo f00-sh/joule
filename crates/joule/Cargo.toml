@@ -21,6 +21,8 @@ joule-ledger = { workspace = true }
 joule-control = { workspace = true }
 joule-client = { workspace = true }
 joule-dht = { workspace = true }
+joule-mesh = { workspace = true }
+joule-net = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

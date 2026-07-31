@@ -98,21 +98,124 @@
             ]
           },
           {
+            "id": "kimi-k3-shards",
+            "min_node_vram_mib": 65536,
+            "approx_file_mib": 327680,
+            "files": [
+              {
+                "path": "model-00001-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000001",
+                "url": "peer://kimi-open/k3/model-00001-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00002-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000002",
+                "url": "peer://kimi-open/k3/model-00002-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00003-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000003",
+                "url": "peer://kimi-open/k3/model-00003-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00004-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000004",
+                "url": "peer://kimi-open/k3/model-00004-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00005-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000005",
+                "url": "peer://kimi-open/k3/model-00005-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00006-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000006",
+                "url": "peer://kimi-open/k3/model-00006-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00007-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000007",
+                "url": "peer://kimi-open/k3/model-00007-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00008-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000008",
+                "url": "peer://kimi-open/k3/model-00008-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00009-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000009",
+                "url": "peer://kimi-open/k3/model-00009-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00010-of-00016.safetensors",
+                "sha256": "a10000000000000000000000000000000000000000000000000000000000000a",
+                "url": "peer://kimi-open/k3/model-00010-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00011-of-00016.safetensors",
+                "sha256": "a10000000000000000000000000000000000000000000000000000000000000b",
+                "url": "peer://kimi-open/k3/model-00011-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00012-of-00016.safetensors",
+                "sha256": "a10000000000000000000000000000000000000000000000000000000000000c",
+                "url": "peer://kimi-open/k3/model-00012-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00013-of-00016.safetensors",
+                "sha256": "a10000000000000000000000000000000000000000000000000000000000000d",
+                "url": "peer://kimi-open/k3/model-00013-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00014-of-00016.safetensors",
+                "sha256": "a10000000000000000000000000000000000000000000000000000000000000e",
+                "url": "peer://kimi-open/k3/model-00014-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00015-of-00016.safetensors",
+                "sha256": "a10000000000000000000000000000000000000000000000000000000000000f",
+                "url": "peer://kimi-open/k3/model-00015-of-00016.safetensors",
+                "size_bytes": 21474836480
+              },
+              {
+                "path": "model-00016-of-00016.safetensors",
+                "sha256": "a100000000000000000000000000000000000000000000000000000000000010",
+                "url": "peer://kimi-open/k3/model-00016-of-00016.safetensors",
+                "size_bytes": 21474836480
+              }
+            ]
+          },
+          {
             "id": "q4_k_m",
             "min_node_vram_mib": 8192,
-            "approx_file_mib": 22000,
+            "approx_file_mib": 220000,
             "files": []
           },
           {
             "id": "q5_k_m",
             "min_node_vram_mib": 12288,
-            "approx_file_mib": 28000,
+            "approx_file_mib": 280000,
             "files": []
           },
           {
             "id": "q8_0",
             "min_node_vram_mib": 24576,
-            "approx_file_mib": 40000,
+            "approx_file_mib": 400000,
             "files": []
           }
         ]

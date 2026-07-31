@@ -224,17 +224,24 @@ website may **mirror signed** bootstrap/stats; never required as payload or as t
 
 | Phase | Status | Code |
 |-------|--------|------|
-| **A** | **Landed** | Agent `--peer-listen` (default `127.0.0.1:0`); `PeerAlive` gossip via control flood hub; `GET /v1/mesh/peers`; status `mesh_peers` |
-| **B** | **Landed** | `BlobMeta.multiaddrs`; `BlobLocate.multiaddrs`; agent prefers direct `peer_net` BlobWant/BlobChunk; control relay remains fallback |
-| **C** | **In progress** | `joule-dht` crate; control + **agent LocalMesh** DHT; peer port accepts PeerAlive/BlobsHave; bootstrap.json dial announce; FetchDigests prefers local mesh before control BlobWant; HTTP `/v1/dht/*`, `/v1/bootstrap` |
-| **D** | **Landed (lab)** | Chat prefers mesh: RequestInfer → `plan_from_mesh_donors` → PlanOffer → PlanAccept → InferRequest → InferDone; `dispatch_mesh_infer`; fallback `control_dispatch` via try_acquire_stream; `joule_coordination` on chat response; e2e multi-donor |
-| **E** | Not yet | Erasure, QUIC, full NAT traversal |
+| **A** | **Landed** | Agent `--peer-listen`; PeerAlive gossip; `/v1/mesh/peers`; status `mesh_peers` |
+| **B** | **Landed** | Direct peer blobs via multiaddrs; control relay fallback |
+| **C** | **Landed** | Multi-hop DHT: k-buckets, iterative find/store, `InProcessNetwork` multi-node put/get (`joule-dht::routing`); LocalMesh + control mirror remain |
+| **D** | **Landed** | Control mesh chat path + **peer-only bus** (`joule-mesh::PeerBus` / `peer_only_chat`) without control relay; coordinator election + re-plan on death |
+| **E** | **Landed (lab)** | `joule-net`: `quic://` multiaddr + QUIC session path, NAT map / public advertise (`JOULE_PUBLIC_ADDR` / `JOULE_PUBLIC_HOST`); `joule-cluster` erasure encode/reconstruct + durable placement |
 
-### Remaining for production mesh
+### Product scale
 
-1. Full DHT k-bucket routing + multi-hop get/put (beyond local view + control mirror).  
-2. Optional pure peer-only chat transport (no control as message bus; control may stay glass).  
-3. Coordinator election + timeout re-plan when coordinator dies.  
-4. QUIC + NAT (Phase E).
+| Item | Status |
+|------|--------|
+| Multi-hundred-GB kimi-open/K3 pipeline | **Landed** — `kimi-k3-shards` in MANIFEST (16×20 GiB peer:// pins); `joule_runtime::k3_pipeline` validates multi-hundred-GB class; lab-tiny regression kept |
+| Public multiaddrs | **Landed** — `advertise_public_multiaddrs`, non-loopback public-style checks, agent dual tcp/quic announce |
+| Swarm durability at multi-chunk scale | **Landed** — redundant `plan_redundant_chunks` + erasure placement/reconstruct under multi-node loss |
 
-**Honesty:** lab still uses control as rendezvous; production target remains full mesh.
+### Remaining (ops / live fleet — not code gates)
+
+1. Live multi-continent public donor fleet.  
+2. Full multi-hundred-GB K3 download on a host with that disk.  
+3. Carrier-grade NAT hole-punch against real middleboxes (APIs shipped; live demo optional).
+
+**Honesty:** code gates for production mesh 1–4 + product-scale pipeline/placement are implemented and tested; a global fleet is not claimed.

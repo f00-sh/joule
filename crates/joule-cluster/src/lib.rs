@@ -4,11 +4,16 @@
 //! Scheduling of free/loaded compute lives in [`scheduler`].
 
 mod chunks;
+mod erasure;
 mod scheduler;
 
 pub use chunks::{
     live_replica_counts, plan_redundant_chunks, plan_survives, required_digests_for_node,
     ChunkHold, ChunkRole, ModelChunk, NodeChunkPlan, RedundantChunkPlan, DEFAULT_REPLICA_FACTOR,
+};
+pub use erasure::{
+    content_sha256, encode as erasure_encode, place_erasure_shards, placement_survives,
+    reconstruct as erasure_reconstruct, DurablePlacement, ErasureSet,
 };
 pub use scheduler::{
     compute_state, free_slots, free_stream_slots, max_slots, max_streams, pool_max_streams,

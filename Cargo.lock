@@ -807,6 +807,8 @@ dependencies = [
  "joule-control",
  "joule-dht",
  "joule-ledger",
+ "joule-mesh",
+ "joule-net",
  "joule-proto",
  "joule-runtime",
  "rand 0.8.7",
@@ -832,9 +834,11 @@ dependencies = [
 name = "joule-cluster"
 version = "0.0.0"
 dependencies = [
+ "hex",
  "joule-proto",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tracing",
  "uuid",
@@ -888,6 +892,32 @@ dependencies = [
  "sha2",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "joule-mesh"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "joule-cluster",
+ "joule-proto",
+ "joule-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "joule-net"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

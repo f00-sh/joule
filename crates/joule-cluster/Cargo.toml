@@ -14,3 +14,5 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
