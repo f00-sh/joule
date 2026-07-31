@@ -141,6 +141,7 @@ pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
                 online_since: None,
                 continuous_online_secs: e.continuous_online_secs,
                 best_mem_mib: e.best_mem_mib,
+                disconnects_window: 0,
                 prompt_tokens_used: 0,
                 completion_tokens_used: 0,
             },

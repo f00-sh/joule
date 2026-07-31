@@ -1,13 +1,15 @@
-//! Fair millijoule economy — pure, integer-auditable scoring (v0).
+//! Fair millijoule economy — pure, integer-auditable scoring (v0 + churn).
 //!
 //! Goals:
 //! - **Free** access paid only in donated compute (no cash path).
 //! - **Small donors matter** — mint scales with √VRAM, not linear VRAM or GPU aristocracy.
 //! - **Tenure boost** — continuous healthy time in the cluster earns more.
+//! - **Churn penalty** — frequent disconnect/reconnect earns less than stable presence.
 //! - **Leecher penalty** — consume ≫ contribute → earn less, pay more (auditable).
 //! - **Deterministic** — same inputs ⇒ same outputs; every mint/burn reason embeds a breakdown.
 //!
 //! All multipliers use **basis points** (10_000 = 1.0×). No floats in the public API totals.
+//! **Verified mem only** for `mem_mib` in FairnessSnapshot (callers must not pass raw claims).
 
 use serde::{Deserialize, Serialize};
 
@@ -49,6 +51,12 @@ pub const LEECHER_MINT_FLOOR_BP: u32 = 2_500;
 /// Hard ceiling on usage mult under heavy leeching (4.0×).
 pub const LEECHER_USAGE_CEIL_BP: u32 = 40_000;
 
+/// Churn mint floor (0.40×) under extreme disconnect spam.
+pub const CHURN_MINT_FLOOR_BP: u32 = 4_000;
+
+/// Disconnects in the fairness window before churn penalty begins.
+pub const CHURN_FREE_DISCONNECTS: u32 = 2;
+
 /// Kind of economic event being scored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,7 +72,7 @@ pub enum EconomyEvent {
 /// Snapshot of account fairness state at score time (rolling window).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct FairnessSnapshot {
-    /// Advertised donor memory for this node (MiB). Use account max healthy if multi-node.
+    /// **Verified** donor memory for this account (MiB). Never raw GPU claims.
     pub mem_mib: u32,
     /// Continuous healthy online seconds for this account (tenure).
     pub continuous_online_secs: u64,
@@ -72,6 +80,9 @@ pub struct FairnessSnapshot {
     pub contributed_mj_window: Millijoule,
     /// Millijoules burned in the fairness window (usage).
     pub consumed_mj_window: Millijoule,
+    /// Disconnects in the fairness window (churn). Stable presence → 0.
+    #[serde(default)]
+    pub disconnects_window: u32,
 }
 
 /// Auditable mint calculation.
@@ -86,6 +97,8 @@ pub struct MintBreakdown {
     pub tenure_bp: u32,
     /// Leecher mint penalty (≤ 10_000 when leeching).
     pub leecher_mint_bp: u32,
+    /// Churn / stability mint penalty (≤ 10_000 when disconnecting often).
+    pub churn_bp: u32,
     pub total_mj: Millijoule,
 }
 
@@ -93,7 +106,7 @@ impl MintBreakdown {
     /// Compact reason token for the ledger (machine + human readable).
     pub fn reason_tag(&self, detail: &str) -> String {
         format!(
-            "{event}|{detail}|eco={eco}|base={base}|mem_bp={mem}|ten_bp={ten}|lee_bp={lee}|total={total}",
+            "{event}|{detail}|eco={eco}|base={base}|mem_bp={mem}|ten_bp={ten}|lee_bp={lee}|churn_bp={churn}|total={total}",
             event = self.event,
             detail = detail,
             eco = self.economy,
@@ -101,6 +114,7 @@ impl MintBreakdown {
             mem = self.mem_factor_bp,
             ten = self.tenure_bp,
             lee = self.leecher_mint_bp,
+            churn = self.churn_bp,
             total = self.total_mj,
         )
     }
@@ -212,6 +226,22 @@ pub fn leecher_factors_bp(contributed: Millijoule, consumed: Millijoule) -> (u32
     )
 }
 
+/// Churn mint multiplier: stable presence keeps 1.0×; frequent dropouts pull toward 0.40×.
+///
+/// | disconnects_window | ≈ mult |
+/// |--------------------|--------|
+/// | 0–2 (free band) | 1.00× |
+/// | 5 | ~0.85× |
+/// | 10 | ~0.65× |
+/// | ≥20 | 0.40× floor |
+///
+/// Each disconnect beyond [`CHURN_FREE_DISCONNECTS`] costs 500 bp of mint factor.
+pub fn churn_bp(disconnects_window: u32) -> u32 {
+    let excess = disconnects_window.saturating_sub(CHURN_FREE_DISCONNECTS);
+    let penalty = excess.saturating_mul(500);
+    BP_ONE.saturating_sub(penalty).max(CHURN_MINT_FLOOR_BP)
+}
+
 /// Score a mint event.
 pub fn score_mint(event: EconomyEvent, fair: FairnessSnapshot) -> MintBreakdown {
     let base = match event {
@@ -224,7 +254,8 @@ pub fn score_mint(event: EconomyEvent, fair: FairnessSnapshot) -> MintBreakdown 
     let mem = mem_factor_bp(fair.mem_mib);
     let ten = tenure_bp(fair.continuous_online_secs);
     let (lee_mint, _) = leecher_factors_bp(fair.contributed_mj_window, fair.consumed_mj_window);
-    let total = apply_factors(base, &[mem, ten, lee_mint]);
+    let churn = churn_bp(fair.disconnects_window);
+    let total = apply_factors(base, &[mem, ten, lee_mint, churn]);
     MintBreakdown {
         economy: ECONOMY_VERSION,
         event: match event {
@@ -236,8 +267,38 @@ pub fn score_mint(event: EconomyEvent, fair: FairnessSnapshot) -> MintBreakdown 
         mem_factor_bp: mem,
         tenure_bp: ten,
         leecher_mint_bp: lee_mint,
+        churn_bp: churn,
         total_mj: total.max(1),
     }
+}
+
+/// Deterministic equal split of `amount` across sorted `recipients` (empty → empty vec).
+/// Remainder mJ go to the first recipients (1 mJ each) so sum(splits) == amount.
+pub fn split_donate_equitable(amount: Millijoule, recipients: &[String]) -> Vec<(String, Millijoule)> {
+    if amount <= 0 || recipients.is_empty() {
+        return Vec::new();
+    }
+    let mut ids = recipients.to_vec();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let n = ids.len() as i64;
+    let each = amount / n;
+    let mut rem = amount % n;
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        let mut share = each;
+        if rem > 0 {
+            share += 1;
+            rem -= 1;
+        }
+        if share > 0 {
+            out.push((id, share));
+        }
+    }
+    out
 }
 
 /// Score a usage burn (prompt + completion tokens).
@@ -311,6 +372,7 @@ pub fn estimate_contribution_millijoules(
             continuous_online_secs: 0,
             contributed_mj_window: 0,
             consumed_mj_window: 0,
+            disconnects_window: 0,
         },
     )
     .total_mj
@@ -388,6 +450,7 @@ mod tests {
                 continuous_online_secs: 86_400 * 3,
                 contributed_mj_window: 500,
                 consumed_mj_window: 100,
+                disconnects_window: 0,
             },
         );
         let tag = b.reason_tag("node-1");
@@ -403,10 +466,12 @@ mod tests {
                     continuous_online_secs: 86_400 * 3,
                     contributed_mj_window: 500,
                     consumed_mj_window: 100,
+                    disconnects_window: 0,
                 },
             )
             .total_mj
         );
+        assert!(tag.contains("churn_bp="));
     }
 
     #[test]
@@ -430,5 +495,117 @@ mod tests {
             },
         );
         assert!(leech.total_mj > fair.total_mj);
+    }
+
+    #[test]
+    fn larger_verified_mem_mints_at_least_as_much() {
+        let small = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 1024,
+                continuous_online_secs: 86_400,
+                contributed_mj_window: 100,
+                consumed_mj_window: 10,
+                disconnects_window: 0,
+            },
+        );
+        let big = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 16_384,
+                continuous_online_secs: 86_400,
+                contributed_mj_window: 100,
+                consumed_mj_window: 10,
+                disconnects_window: 0,
+            },
+        );
+        assert!(big.total_mj >= small.total_mj);
+        assert!(big.mem_factor_bp > small.mem_factor_bp);
+    }
+
+    #[test]
+    fn longer_tenure_mints_more() {
+        let fresh = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 8192,
+                continuous_online_secs: 0,
+                ..Default::default()
+            },
+        );
+        let loyal = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 8192,
+                continuous_online_secs: 86_400 * 10,
+                ..Default::default()
+            },
+        );
+        assert!(loyal.total_mj > fresh.total_mj);
+        assert!(loyal.tenure_bp > fresh.tenure_bp);
+    }
+
+    #[test]
+    fn churn_penalizes_frequent_dropout() {
+        assert_eq!(churn_bp(0), BP_ONE);
+        assert_eq!(churn_bp(2), BP_ONE);
+        assert!(churn_bp(5) < BP_ONE);
+        assert_eq!(churn_bp(100), CHURN_MINT_FLOOR_BP);
+        let stable = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 8192,
+                continuous_online_secs: 86_400,
+                disconnects_window: 0,
+                ..Default::default()
+            },
+        );
+        let flaky = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 8192,
+                continuous_online_secs: 86_400,
+                disconnects_window: 12,
+                ..Default::default()
+            },
+        );
+        assert!(
+            flaky.total_mj < stable.total_mj,
+            "flaky={} stable={}",
+            flaky.total_mj,
+            stable.total_mj
+        );
+        assert!(flaky.churn_bp < stable.churn_bp);
+    }
+
+    #[test]
+    fn split_donate_equitable_conserves_and_is_deterministic() {
+        let rec = vec!["carol".into(), "alice".into(), "bob".into()];
+        let a = split_donate_equitable(100, &rec);
+        let b = split_donate_equitable(100, &rec);
+        assert_eq!(a, b);
+        assert_eq!(a.iter().map(|(_, s)| s).sum::<i64>(), 100);
+        // sorted order
+        assert_eq!(a[0].0, "alice");
+        // remainder distributed
+        let odd = split_donate_equitable(10, &["x".into(), "y".into(), "z".into()]);
+        assert_eq!(odd.iter().map(|(_, s)| s).sum::<i64>(), 10);
+    }
+
+    #[test]
+    fn zero_verified_mem_still_mints_floor_not_claim() {
+        // Callers must pass verified mem; 0 is floored to 256 in mem_factor via max(256).
+        let m = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 0,
+                ..Default::default()
+            },
+        );
+        assert!(m.total_mj >= 1);
+        // A fake 64 GiB claim would use mem_mib=65536; protocol must pass verified only.
+        let fake = mem_factor_bp(65_536);
+        let real0 = mem_factor_bp(0);
+        assert!(fake > real0);
     }
 }

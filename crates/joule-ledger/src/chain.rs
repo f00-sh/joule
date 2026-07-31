@@ -19,6 +19,10 @@ pub const CHECKPOINT_EVERY: u64 = 32;
 pub enum EntryKind {
     MintContribute,
     BurnUsage,
+    /// Donor burns mJ into the community pool (voluntary).
+    DonatePool,
+    /// Redistribution credit from a pool donation (sealed share).
+    DonateReceive,
     Checkpoint,
 }
 
@@ -27,6 +31,8 @@ impl EntryKind {
         match self {
             EntryKind::MintContribute => "mint_contribute",
             EntryKind::BurnUsage => "burn_usage",
+            EntryKind::DonatePool => "donate_pool",
+            EntryKind::DonateReceive => "donate_receive",
             EntryKind::Checkpoint => "checkpoint",
         }
     }
@@ -260,6 +266,42 @@ impl SealedLedger {
             -millijoules,
             format!("usage:{}", detail.into()),
             EntryKind::BurnUsage,
+            None,
+            vec![],
+        )
+    }
+
+    /// Burn donated mJ from donor (sealed). Pair with [`donate_receive`] shares.
+    pub fn donate_pool(
+        &mut self,
+        account: impl Into<String>,
+        millijoules: Millijoule,
+        detail: impl Into<String>,
+    ) -> Result<SealedEntry, LedgerError> {
+        assert!(millijoules >= 0, "donate must be non-negative");
+        self.append_raw(
+            account.into(),
+            -millijoules,
+            format!("donate_pool:{}", detail.into()),
+            EntryKind::DonatePool,
+            None,
+            vec![],
+        )
+    }
+
+    /// Credit a recipient share of a pool donation (sealed; never free mint without donor burn).
+    pub fn donate_receive(
+        &mut self,
+        account: impl Into<String>,
+        millijoules: Millijoule,
+        detail: impl Into<String>,
+    ) -> Result<SealedEntry, LedgerError> {
+        assert!(millijoules >= 0, "receive must be non-negative");
+        self.append_raw(
+            account.into(),
+            millijoules,
+            format!("donate_receive:{}", detail.into()),
+            EntryKind::DonateReceive,
             None,
             vec![],
         )

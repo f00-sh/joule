@@ -1,8 +1,8 @@
 # joule — millijoule economy v0
 
-**Status:** active (v0 code: √VRAM mint, tenure, leecher mults, dual_verify)  
+**Status:** active (v0 code: √VRAM mint, tenure, **churn**, leecher mults, **donate-to-pool**, dual_verify)  
 **Algorithm id:** `eco=v0` (embedded in every ledger reason string)  
-**Code:** `crates/joule-ledger/src/economy.rs`  
+**Code:** `crates/joule-ledger/src/economy.rs`, sealed kinds `donate_pool` / `donate_receive`  
 **Product:** free public pool — pay only in donated compute
 
 ---
@@ -24,7 +24,10 @@ There is **no cash path** on the public pool. You mint mJ by donating healthy co
 2. **Work over theater.** Heartbeats mint a little; verified shards and challenges mint more.
 3. **Tenure boost.** Continuous healthy time in the cluster multiplies earnings (cap 1.5×).
 4. **Leecher penalty.** If you **consume more than you contribute** in the rolling window, you **earn less and pay more**. Extreme leechers hit 0.25× mint / 4× usage.
-5. **Auditable.** Every mint/burn reason string embeds `eco=v0` and all basis-point factors. Same inputs ⇒ same outputs (pure functions, integer math).
+5. **Churn penalty.** Frequent disconnect/reconnect lowers mint (toward 0.40×). Stable presence keeps 1.0×. First two disconnects in the window are free.
+6. **Verified VRAM only.** Economic `mem_mib` is **protocol-verified** capacity (challenges), never a raw GPU claim — fake “5070 farms” do not mint as if verified.
+7. **Donate.** Optional sealed donation: burn mJ from a rich account; redistribute **equally** among eligible pool participants (deterministic, conserved).
+8. **Auditable.** Every mint/burn/donate reason string embeds `eco=v0` and all basis-point factors. Same inputs ⇒ same outputs (pure functions, integer math).
 
 ---
 
@@ -80,9 +83,27 @@ base =
   work       → 2 mJ × max(1, completion_tokens)
   challenge  → 5 mJ
 
-total = base × mem_bp/10000 × tenure_bp/10000 × leecher_mint_bp/10000
+total = base × mem_bp/10000 × tenure_bp/10000 × leecher_mint_bp/10000 × churn_bp/10000
 total = max(1, floor(total))
 ```
+
+### Churn
+
+```
+excess = max(0, disconnects_window - 2)
+churn_bp = max(4000, 10000 - excess * 500)
+```
+
+### Donate-to-pool
+
+```
+donor burns D mJ (kind=donate_pool)
+recipients R = eligible online/verified pool accounts excluding donor (sorted)
+each gets floor(D/|R|); remainder 1 mJ to first recipients
+recipient credits sealed as donate_receive (sum credits = D)
+```
+
+API: `POST /v1/account/donate` with Bearer key and `{ "amount": <mJ> }`.
 
 ### Burn (API usage)
 

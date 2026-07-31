@@ -56,6 +56,7 @@ pub fn router(app: App) -> Router {
         .route("/v1/bootstrap", get(bootstrap_info))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/account", get(account))
+        .route("/v1/account/donate", post(account_donate))
         .with_state(app)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
@@ -537,6 +538,61 @@ async fn account(
         )
     })?;
     Ok(Json(info))
+}
+
+#[derive(Debug, Deserialize)]
+struct DonateRequest {
+    /// Millijoules to donate into the pool (voluntary).
+    amount: i64,
+}
+
+/// POST /v1/account/donate — burn unused mJ from the caller and spread equitably.
+async fn account_donate(
+    State(app): State<App>,
+    headers: HeaderMap,
+    Json(body): Json<DonateRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let key = bearer_key(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "missing Bearer API key"})),
+        )
+    })?;
+    let account = {
+        let g = app.state.read().await;
+        g.account_for_key(&key)
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "invalid API key"})),
+                )
+            })?
+    };
+    let mut g = app.state.write().await;
+    match g.donate_to_pool(&account, body.amount) {
+        Ok(r) => Ok(Json(json!({
+            "ok": true,
+            "law": "voluntary donate; sealed burn + equitable redistribute (eco=v0)",
+            "amount": r.amount,
+            "donor": account,
+            "donor_balance": g.ledger.balance(&account),
+            "recipients": r.recipient_credits.iter().map(|c| json!({
+                "account": c.account,
+                "delta_millijoules": c.delta_millijoules,
+                "reason": c.reason,
+            })).collect::<Vec<_>>(),
+            "ledger_head": g.ledger.head(),
+        }))),
+        Err(e) => {
+            let status = if e.contains("insufficient") {
+                StatusCode::PAYMENT_REQUIRED
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            Err((status, Json(json!({ "ok": false, "error": e }))))
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

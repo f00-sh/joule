@@ -55,6 +55,9 @@ pub struct AccountEconomy {
     pub continuous_online_secs: u64,
     /// Best *verified* mem across this account's nodes (MiB) — claims ignored.
     pub best_mem_mib: u32,
+    /// Disconnect events in the fairness window (churn penalty).
+    #[serde(default)]
+    pub disconnects_window: u32,
     /// Lifetime prompt tokens billed via chat (not persisted until snapshot v6).
     #[serde(default)]
     pub prompt_tokens_used: u64,
@@ -253,10 +256,12 @@ impl ControlState {
             None => eco.continuous_online_secs,
         };
         FairnessSnapshot {
+            // CRITICAL: best_mem_mib is verified-only (never raw GPU claim).
             mem_mib: eco.best_mem_mib.max(256),
             continuous_online_secs: continuous,
             contributed_mj_window: eco.contributed_mj_window,
             consumed_mj_window: eco.consumed_mj_window,
+            disconnects_window: eco.disconnects_window,
         }
     }
 
@@ -295,7 +300,63 @@ impl ControlState {
                 .saturating_add(since.elapsed().as_secs());
             // Offline resets continuous streak (loyalty is continuous presence).
             eco.continuous_online_secs = 0;
+            // Churn: count disconnect for fairness window (soft decay when huge).
+            eco.disconnects_window = eco.disconnects_window.saturating_add(1);
+            if eco.disconnects_window > 10_000 {
+                eco.disconnects_window /= 2;
+            }
         }
+    }
+
+    /// Eligible accounts for pool donation redistrib (currently online with verified mem).
+    pub fn donation_recipients(&self, exclude: &str) -> Vec<String> {
+        let mut set = std::collections::BTreeSet::new();
+        for n in self.cluster.nodes() {
+            if n.account == exclude {
+                continue;
+            }
+            if n.healthy && n.verified_mem_mib > 0 {
+                set.insert(n.account.clone());
+            }
+        }
+        // Also include any account with a positive sealed balance that is donating
+        // (even if currently offline) — equitable share among pool participants.
+        for (acct, eco) in &self.account_economy {
+            if acct == exclude {
+                continue;
+            }
+            if eco.best_mem_mib > 0 || eco.contributed_mj_window > 0 {
+                set.insert(acct.clone());
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// Voluntary donate unused millijoules into the pool (sealed burn + equitable credits).
+    pub fn donate_to_pool(
+        &mut self,
+        donor: &str,
+        amount: Millijoule,
+    ) -> Result<joule_ledger::DonateResult, String> {
+        if amount <= 0 {
+            return Err("amount must be positive".into());
+        }
+        let recipients = self.donation_recipients(donor);
+        if recipients.is_empty() {
+            return Err("no eligible recipients in the pool".into());
+        }
+        let result = self
+            .ledger
+            .donate_to_pool(donor, amount, &recipients)
+            .map_err(|e| e.to_string())?;
+        // Recipients record contribute window for fairness (donation is pool share, not work).
+        for c in &result.recipient_credits {
+            self.record_contribute(&c.account, c.delta_millijoules);
+        }
+        self.seal_and_checkpoint();
+        self.mark_dirty();
+        self.save_if_dirty();
+        Ok(result)
     }
 
     pub fn record_vram_sample(&mut self, healthy_vram_mib: u64) {

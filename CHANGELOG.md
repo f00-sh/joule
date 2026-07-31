@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Fair economy + anti-gaming**: churn mint penalty; sealed **donate-to-pool** with equitable redistribute (`POST /v1/account/donate`); ledger kinds `donate_pool` / `donate_receive`; relational pay-table tests
+- **GPU claim integrity**: cluster tests that unverified claims do not inflate placement/mint capacity; progressive challenge unlock / fail halve
 - **Decentral discovery Phase A/B**: agent peer listen + `PeerAlive` gossip; `BlobLocate.multiaddrs`; direct peer BlobWant/BlobChunk (`peer_net`); `GET /v1/mesh/peers`; status `mesh_peers` — [docs/design/decentral-discovery-v0.md](docs/design/decentral-discovery-v0.md)
 - **Decentral Phase C**: `joule-dht` (peer/blob keys, XOR distance, bootstrap.json); control DHT mirror; agent **LocalMesh** + P2P PeerAlive/BlobsHave on peer port; bootstrap dial announce; FetchDigests uses local DHT before control; `GET /v1/dht/keys`, `/v1/dht/get/{*key}`, `/v1/bootstrap`; example [docs/examples/bootstrap.json](docs/examples/bootstrap.json)
 - **Decentral Phase D start**: `RequestInfer` / `PlanAccept`; PeerAlive `mem_mib`/`throughput_class`; `plan_from_mesh_donors`; agent mesh PlanOffer; `GET /v1/mesh/plan`

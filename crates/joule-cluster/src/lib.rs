@@ -587,4 +587,43 @@ mod tests {
         assert_eq!(plan.shards.len(), 3);
         assert_eq!(plan.pool_mem_mib, 8192 * 3);
     }
+
+    /// CRITICAL: fake high-end claim (e.g. "5070 farm") must not inflate verified capacity.
+    #[test]
+    fn high_claim_without_challenge_is_not_verified() {
+        let mut c = Cluster::default();
+        let (id, caps) = node(24_576, DeviceClass::Gpu); // claim ~24 GiB
+        c.upsert_node(id.clone(), "faker", caps);
+        assert_eq!(c.verified_mem_mib(&id), 0, "join must start unverified");
+        assert_eq!(c.verified_pool_vram_mib(), 0);
+        // Placement uses verified floor (256) not claim — never 24 GiB until challenges pass.
+        let plan = c.plan_full_pool().unwrap();
+        assert_eq!(plan.pool_mem_mib, 256, "unverified plan must not use claim");
+        assert!(plan.pool_mem_mib < 24_576);
+        // After one ok challenge, partial unlock — still not full claim until streak.
+        c.on_challenge_result(&id, true);
+        let v1 = c.verified_mem_mib(&id);
+        assert!(v1 > 0 && v1 < 24_576, "progressive unlock v1={v1}");
+        let plan2 = c.plan_full_pool().unwrap();
+        assert_eq!(plan2.pool_mem_mib, u64::from(v1.max(256)));
+        // Fail halves trust.
+        c.on_challenge_result(&id, false);
+        let v_fail = c.verified_mem_mib(&id);
+        assert!(v_fail < v1, "fail must reduce verified");
+    }
+
+    #[test]
+    fn join_starts_with_zero_verified_regardless_of_claim() {
+        let mut c = Cluster::default();
+        let claim = 65_536u32; // pretend full farm
+        let (id, caps) = node(claim, DeviceClass::Gpu);
+        c.upsert_node(id.clone(), "a", caps);
+        assert_eq!(c.verified_mem_mib(&id), 0);
+        assert_eq!(c.get(&id).unwrap().claimed_mem_mib, claim);
+        // Three successful challenges unlock full claim.
+        for _ in 0..3 {
+            c.on_challenge_result(&id, true);
+        }
+        assert_eq!(c.verified_mem_mib(&id), claim);
+    }
 }
