@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **Structural capacity invariant**: single verified-only API for anything affecting mJ or placement — `placement_mem_mib` (0 if unverified) vs `economic_mem_mib` (mint floor only); stream slots / plan_sharded_pool / mesh_plan_donors / rank exclude claim-only peers
-- **Capacity challenges (1:1 memory-hard)**: `work_bytes(credit) = credit × 1 MiB`; unlock credits **proven credit only**; stub / undersized work cannot unlock
-- **Challenge unlock**: `on_challenge_result(ok, proven_credit_mib)` — never more MiB trusted than MiB of work buffer
+- **Capacity challenges (1:1 memory-hard + peak)**: `work_bytes(credit) = credit × 1 MiB`; `verified = max(verified, proven)` so serial N×C cannot mint N×C farm; stub / undersized work fail
+- **challenge_loop**: capacity oracle on `spawn_blocking` outside control write lock
 - **Mesh verified-only (control)**: `mesh_plan_donors` + model_update use cluster verified; exclude unverified
 - **Peer gossip anti-farm**: LocalMesh equal-unit placement; agents never self-attest verified on PeerAlive; `MeshDonor::from_untrusted_presence`
 - **E2E mesh geometry**: tests assert `mesh_plan_donors()` (cluster verified), not PeerAlive claim

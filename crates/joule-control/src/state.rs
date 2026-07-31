@@ -1240,33 +1240,68 @@ mod challenge_integrity_tests {
         assert!(m_half.total_mj < m_claim.total_mj);
     }
 
+    /// CRITICAL: N serial settle of credit-C cannot raise verified above peak C.
+    /// Uses real settle_challenge_result + capacity proofs (not accounting-only).
     #[test]
-    fn progressive_capacity_credits_cap_below_farm_claim() {
+    fn serial_settles_cannot_sum_past_peak_work_farm() {
         let mut state = ControlState::new();
         let claim = 65_536u32;
-        let (id, _account) = register_claimed(&mut state, claim);
-        // N oks unlock at most N × proven credit (accounting path; not free farm).
-        let proven = 128u32;
-        for _ in 0..10 {
-            state.cluster.record_challenge_ok(&id, proven);
-        }
-        let v = state.cluster.verified_mem_mib(&id);
-        assert!(v < claim);
-        assert_eq!(v, proven * 10);
-        assert!(v << 1 < claim, "10×128 MiB still ≪ 64 GiB farm claim");
-        state.mesh.upsert(
-            id.clone(),
-            vec![],
-            0.0,
-            true,
-            0,
-            claim,
-            0,
-            0,
+        let (id, account) = register_claimed(&mut state, claim);
+        let peak_c = 2u32; // 2 MiB working set per challenge (lab scale)
+        assert_eq!(
+            joule_cluster::capacity_work_bytes(peak_c),
+            peak_c as usize * 1024 * 1024
         );
+        // Many serial honest settles of the same peak C.
+        for i in 0..32u8 {
+            let mut seed = [0xCCu8; 32];
+            seed[0] = i;
+            let (cid, expected) =
+                insert_capacity_challenge(&mut state, &id, seed, peak_c, Instant::now());
+            let ok = state
+                .settle_challenge_result(cid, expected, &id)
+                .expect("settle");
+            assert!(ok, "serial settle {i} must accept valid peak proof");
+            assert_eq!(
+                state.cluster.verified_mem_mib(&id),
+                peak_c,
+                "after settle {i}: verified must stay peak={peak_c}, not sum"
+            );
+        }
+        assert!(
+            state.cluster.verified_mem_mib(&id) < claim,
+            "peak {peak_c} must not unlock farm claim {claim}"
+        );
+        state.sync_best_mem_for_account(&account);
+        assert_eq!(
+            state.account_economy.get(&account).unwrap().best_mem_mib,
+            peak_c
+        );
+        // Mint factor tracks peak verified, not claim.
+        let fair = state.fairness_for(&account);
+        assert_eq!(fair.mem_mib, joule_cluster::economic_mem_mib(peak_c));
+        let mint_peak = score_mint(EconomyEvent::Heartbeat, fair);
+        let mint_farm = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: claim,
+                ..Default::default()
+            },
+        );
+        assert!(mint_peak.total_mj < mint_farm.total_mj);
+        // Raising peak once (larger single proof) updates verified to new peak only.
+        let bigger = 4u32;
+        let (cid, expected) =
+            insert_capacity_challenge(&mut state, &id, [0xDDu8; 32], bigger, Instant::now());
+        assert!(state
+            .settle_challenge_result(cid, expected, &id)
+            .unwrap());
+        assert_eq!(state.cluster.verified_mem_mib(&id), bigger);
+        // Mesh placement uses cluster peak, not claim.
+        state.mesh.upsert(id.clone(), vec![], 0.0, true, 0, claim, 0, 0);
         let donors = state.mesh_plan_donors();
         assert_eq!(donors.len(), 1);
-        assert_eq!(donors[0].1, joule_cluster::economic_mem_mib(v));
+        assert_eq!(donors[0].1, joule_cluster::economic_mem_mib(bigger));
     }
 
     /// Agent returns capacity proof; matches control oracle; stub text is not used.

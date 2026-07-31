@@ -864,45 +864,74 @@ async fn acquire_stream_with_wait(
 }
 
 /// Background: send spot challenges to donors.
+///
+/// Memory-hard oracle is computed on `spawn_blocking` **outside** the control
+/// write lock so heartbeats/HTTP/settles stay responsive.
 pub async fn challenge_loop(app: App) {
     let mut tick = tokio::time::interval(Duration::from_secs(12));
     loop {
         tick.tick().await;
-        let challenge = {
+        // 1) Brief write: prune + pick target only (no multi-GiB work under lock).
+        let picked = {
             let mut g = app.state.write().await;
             g.prune();
-            let target = g.cluster.pick_challenge_target().map(|n| n.id.clone());
-            if let Some(id) = target {
-                let challenge_id = Uuid::new_v4();
-                let model = CLUSTER_MODEL.to_string();
-                let prompt = format!("joule-challenge:{challenge_id}");
-                // Non-public capacity oracle: random seed → mem-bound proof (not stub format).
-                let mut seed = [0u8; 32];
-                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
-                let credit_mib = joule_cluster::CHALLENGE_CREDIT_MIB;
-                let capacity_seed_hex = hex::encode(seed);
-                let expected = joule_cluster::capacity_proof_hex(&seed, credit_mib);
-                g.pending_challenges.insert(
-                    challenge_id,
-                    PendingChallenge {
-                        node: id.clone(),
-                        model: model.clone(),
-                        prompt: prompt.clone(),
-                        expected,
-                        capacity_seed_hex: capacity_seed_hex.clone(),
-                        credit_mib,
-                        started: Instant::now(),
-                    },
-                );
-                Some((id, model, prompt, challenge_id, capacity_seed_hex, credit_mib))
-            } else {
-                None
-            }
+            g.cluster.pick_challenge_target().map(|n| {
+                let claim = n.claimed_mem_mib;
+                let verified = n.verified_mem_mib;
+                (n.id.clone(), claim, verified)
+            })
         };
-        let Some((node, model, prompt, challenge_id, capacity_seed_hex, credit_mib)) = challenge
-        else {
+        let Some((node, claim, verified)) = picked else {
             continue;
         };
+
+        // Peak model: issue up to CHALLENGE_CREDIT_MIB (single-challenge working set).
+        // Prefer challenging nodes still below claim so they can raise peak.
+        let credit_mib = joule_cluster::CHALLENGE_CREDIT_MIB
+            .min(claim.max(1))
+            .max(1);
+        let _ = verified; // reserved for future progressive target = min(claim, verified+step) with full peak work
+
+        let challenge_id = Uuid::new_v4();
+        let model = CLUSTER_MODEL.to_string();
+        let prompt = format!("joule-challenge:{challenge_id}");
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+        let capacity_seed_hex = hex::encode(seed);
+
+        // 2) Oracle off the async runtime and off the write lock.
+        let expected = match tokio::task::spawn_blocking(move || {
+            joule_cluster::capacity_proof_hex(&seed, credit_mib)
+        })
+        .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "capacity oracle join failed");
+                continue;
+            }
+        };
+
+        // 3) Short write: register pending + send.
+        {
+            let mut g = app.state.write().await;
+            // Node may have left during oracle work.
+            if g.cluster.get(&node).is_none() {
+                continue;
+            }
+            g.pending_challenges.insert(
+                challenge_id,
+                PendingChallenge {
+                    node: node.clone(),
+                    model: model.clone(),
+                    prompt: prompt.clone(),
+                    expected,
+                    capacity_seed_hex: capacity_seed_hex.clone(),
+                    credit_mib,
+                    started: Instant::now(),
+                },
+            );
+        }
 
         let env = Envelope::new(
             node.clone(),
@@ -920,7 +949,7 @@ pub async fn challenge_loop(app: App) {
             g.cluster.record_challenge_fail(&node);
             warn!(%node, "challenge send failed; recorded fail");
         } else {
-            info!(%node, %challenge_id, "spot challenge sent");
+            info!(%node, %challenge_id, credit_mib, "spot challenge sent");
         }
     }
 }

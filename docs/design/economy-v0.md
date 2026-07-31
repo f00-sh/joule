@@ -39,7 +39,7 @@ There is **no cash path** on the public pool. You mint mJ by donating healthy co
 
 - Join starts `verified_mem_mib = 0` regardless of claim.
 - Capacity challenges use a **true 1:1 memory-hard proof**: working set = `credit_mib × 1 MiB` (`capacity_work_bytes`). Public stub strings **never** unlock.
-- Each successful challenge credits **exactly the proven `credit_mib`** (≤ `CHALLENGE_CREDIT_MIB`) — **trusted MiB ≤ proven working-set MiB**.
+- **Peak model:** `verified = max(verified, proven)` for a **single** challenge working set (≤ `CHALLENGE_CREDIT_MIB`, ≤ claim). **Serial N×C cannot sum to N×C** — trusted MiB ≤ peak proven working-set MiB, not cumulative deltas.
 - Fail **halves** verified. Expired unanswered challenges count as fails.
 - **Control** mesh placement (`mesh_plan_donors`) uses **cluster verified only**.
 - **Peer gossip** path (`LocalMesh::plan_donors`) uses **equal unit weight** only — PeerAlive claim/self-reported verified **never** buy farm geometry.

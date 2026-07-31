@@ -183,21 +183,24 @@ impl Cluster {
 
     /// Record challenge outcome → adjust verified capacity (self-govern).
     ///
-    /// Success credits **exactly** `proven_credit_mib` (clamped to
-    /// [`CHALLENGE_CREDIT_MIB`] and remaining claim room) — never more MiB than
-    /// the capacity proof's working set. Fail halves verified.
+    /// **Peak working-set model (anti serial farm):** success sets
+    /// `verified = max(verified, proven)` where `proven` is the **single-challenge**
+    /// working-set MiB (clamped to [`CHALLENGE_CREDIT_MIB`] and claim).
+    ///
+    /// N serial challenges each proving C MiB cannot sum to N×C — trusted capacity
+    /// never exceeds the **largest single proof** (peak RAM demonstrated), not the
+    /// sum of sequential deltas. Fail halves verified.
     pub fn on_challenge_result(&mut self, id: &NodeId, ok: bool, proven_credit_mib: u32) {
         let Some(n) = self.nodes.get_mut(id) else {
             return;
         };
         if ok {
             n.challenge_streak = n.challenge_streak.saturating_add(1);
-            let room = n.claimed_mem_mib.saturating_sub(n.verified_mem_mib);
-            // Unlock ≤ proven work MiB; never free full-claim or fixed free 1024.
-            let credit = proven_credit_mib
+            let proven = proven_credit_mib
                 .min(CHALLENGE_CREDIT_MIB)
-                .min(room);
-            n.verified_mem_mib = n.verified_mem_mib.saturating_add(credit);
+                .min(n.claimed_mem_mib);
+            // Peak, not sum — serial 64×1 GiB cannot mint a 64 GiB farm.
+            n.verified_mem_mib = n.verified_mem_mib.max(proven);
         } else {
             n.challenge_streak = 0;
             n.verified_mem_mib /= 2;
@@ -654,17 +657,19 @@ mod tests {
         );
         assert_eq!(placement_mem_mib(0), 0);
         assert_eq!(max_streams(c.get(&id).unwrap()), 0);
-        // After one ok with proven credit C, verified += C (not free full claim).
+        // After one ok with proven peak C, verified = C (not free full claim).
         let proven = 64u32;
         c.on_challenge_result(&id, true, proven);
         let v1 = c.verified_mem_mib(&id);
         assert_eq!(v1, proven);
         assert!(v1 < 24_576, "must not unlock full claim on one ok");
-        // Three oks of proven credit still ≪ farm claim.
+        // Three serial oks of same peak C → still C (peak, not sum).
         c.on_challenge_result(&id, true, proven);
         c.on_challenge_result(&id, true, proven);
-        assert_eq!(c.verified_mem_mib(&id), proven * 3);
-        assert!(c.verified_mem_mib(&id) < 24_576);
+        assert_eq!(c.verified_mem_mib(&id), proven, "serial same peak must not sum");
+        // Larger single proof raises peak.
+        c.on_challenge_result(&id, true, 128);
+        assert_eq!(c.verified_mem_mib(&id), 128);
         // Fail halves trust.
         let before_fail = c.verified_mem_mib(&id);
         c.on_challenge_result(&id, false, 0);
@@ -680,7 +685,7 @@ mod tests {
         c.upsert_node(id.clone(), "a", caps);
         assert_eq!(c.verified_mem_mib(&id), 0);
         assert_eq!(c.get(&id).unwrap().claimed_mem_mib, claim);
-        // N proven credits unlock at most N × credit (not free farm).
+        // N serial peak-C proofs cannot sum to N×C (anti farm).
         let proven = 128u32;
         for _ in 0..3 {
             c.on_challenge_result(&id, true, proven);
@@ -689,27 +694,53 @@ mod tests {
             c.verified_mem_mib(&id) < claim,
             "3 challenges must not equal full claim"
         );
-        assert_eq!(c.verified_mem_mib(&id), proven * 3);
+        assert_eq!(c.verified_mem_mib(&id), proven, "peak not sum");
     }
 
     #[test]
-    fn unlock_never_exceeds_proven_credit_mib() {
+    fn unlock_is_peak_not_sum_and_capped_per_challenge() {
         let mut c = Cluster::default();
         let (id, caps) = node(24_576, DeviceClass::Gpu);
         c.upsert_node(id.clone(), "f", caps);
-        // Ok with proven=0 credits nothing (no free unlock).
+        // Ok with proven=0 → clamp to 1? No — proven 0 min with claim: we use
+        // proven_credit_mib.min(CHALLENGE_CREDIT).min(claim); 0 stays 0 with max.
         c.on_challenge_result(&id, true, 0);
         assert_eq!(c.verified_mem_mib(&id), 0);
-        // Ok with proven=16 credits exactly 16.
         c.on_challenge_result(&id, true, 16);
         assert_eq!(c.verified_mem_mib(&id), 16);
-        // Cannot credit more than CHALLENGE_CREDIT_MIB in one ok.
+        // Single challenge cannot exceed CHALLENGE_CREDIT_MIB (peak cap).
         c.on_challenge_result(&id, true, CHALLENGE_CREDIT_MIB * 10);
         assert_eq!(
             c.verified_mem_mib(&id),
-            16 + CHALLENGE_CREDIT_MIB,
-            "single ok capped at CHALLENGE_CREDIT_MIB proven"
+            CHALLENGE_CREDIT_MIB,
+            "peak capped at CHALLENGE_CREDIT_MIB"
         );
+    }
+
+    /// CRITICAL: N serial credit-C unlocks cannot exceed peak work of C.
+    #[test]
+    fn serial_challenges_cannot_sum_past_peak_work() {
+        let mut c = Cluster::default();
+        let claim = 65_536u32;
+        let (id, caps) = node(claim, DeviceClass::Gpu);
+        c.upsert_node(id.clone(), "farm", caps);
+        let peak_c = 64u32; // working-set MiB per challenge
+        for _ in 0..100 {
+            c.on_challenge_result(&id, true, peak_c);
+        }
+        assert_eq!(
+            c.verified_mem_mib(&id),
+            peak_c,
+            "100×serial {peak_c} must stay peak={peak_c}, not 6400"
+        );
+        assert!(c.verified_mem_mib(&id) < claim);
+        // Raising peak once unlocks only that peak.
+        c.on_challenge_result(&id, true, 256);
+        assert_eq!(c.verified_mem_mib(&id), 256);
+        for _ in 0..50 {
+            c.on_challenge_result(&id, true, 256);
+        }
+        assert_eq!(c.verified_mem_mib(&id), 256);
     }
 
     #[test]
