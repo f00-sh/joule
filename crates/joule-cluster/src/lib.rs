@@ -9,8 +9,9 @@ mod erasure;
 mod scheduler;
 
 pub use capacity_challenge::{
-    parse_seed_hex, proof_hex as capacity_proof_hex, solve as capacity_solve,
-    verify as capacity_verify, BYTES_PER_CREDIT_MIB,
+    clamp_credit_mib, max_work_bytes, parse_seed_hex, proof_hex as capacity_proof_hex,
+    solve as capacity_solve, verify as capacity_verify, work_bytes as capacity_work_bytes,
+    BYTES_PER_CREDIT_MIB,
 };
 pub use chunks::{
     live_replica_counts, plan_redundant_chunks, plan_survives, required_digests_for_node,
@@ -182,16 +183,20 @@ impl Cluster {
 
     /// Record challenge outcome → adjust verified capacity (self-govern).
     ///
-    /// Success credits at most [`CHALLENGE_CREDIT_MIB`] toward claim — **never**
-    /// free full-claim unlock after N stub answers. Fail halves verified.
-    pub fn on_challenge_result(&mut self, id: &NodeId, ok: bool) {
+    /// Success credits **exactly** `proven_credit_mib` (clamped to
+    /// [`CHALLENGE_CREDIT_MIB`] and remaining claim room) — never more MiB than
+    /// the capacity proof's working set. Fail halves verified.
+    pub fn on_challenge_result(&mut self, id: &NodeId, ok: bool, proven_credit_mib: u32) {
         let Some(n) = self.nodes.get_mut(id) else {
             return;
         };
         if ok {
             n.challenge_streak = n.challenge_streak.saturating_add(1);
             let room = n.claimed_mem_mib.saturating_sub(n.verified_mem_mib);
-            let credit = CHALLENGE_CREDIT_MIB.min(room);
+            // Unlock ≤ proven work MiB; never free full-claim or fixed free 1024.
+            let credit = proven_credit_mib
+                .min(CHALLENGE_CREDIT_MIB)
+                .min(room);
             n.verified_mem_mib = n.verified_mem_mib.saturating_add(credit);
         } else {
             n.challenge_streak = 0;
@@ -364,18 +369,18 @@ impl Cluster {
         Some(eligible[0])
     }
 
-    pub fn record_challenge_ok(&mut self, id: &NodeId) {
+    pub fn record_challenge_ok(&mut self, id: &NodeId, proven_credit_mib: u32) {
         if let Some(n) = self.nodes.get_mut(id) {
             n.reputation.record_ok();
         }
-        self.on_challenge_result(id, true);
+        self.on_challenge_result(id, true, proven_credit_mib);
     }
 
     pub fn record_challenge_fail(&mut self, id: &NodeId) {
         if let Some(n) = self.nodes.get_mut(id) {
             n.reputation.record_fail(3, Duration::from_secs(120));
         }
-        self.on_challenge_result(id, false);
+        self.on_challenge_result(id, false, 0);
     }
 
     pub fn capacity(&self) -> ClusterCapacity {
@@ -649,19 +654,20 @@ mod tests {
         );
         assert_eq!(placement_mem_mib(0), 0);
         assert_eq!(max_streams(c.get(&id).unwrap()), 0);
-        // After one ok challenge, only CHALLENGE_CREDIT_MIB — never free full claim.
-        c.on_challenge_result(&id, true);
+        // After one ok with proven credit C, verified += C (not free full claim).
+        let proven = 64u32;
+        c.on_challenge_result(&id, true, proven);
         let v1 = c.verified_mem_mib(&id);
-        assert_eq!(v1, CHALLENGE_CREDIT_MIB);
+        assert_eq!(v1, proven);
         assert!(v1 < 24_576, "must not unlock full claim on one ok");
-        // Three oks still not full claim for a 24 GiB card.
-        c.on_challenge_result(&id, true);
-        c.on_challenge_result(&id, true);
+        // Three oks of proven credit still ≪ farm claim.
+        c.on_challenge_result(&id, true, proven);
+        c.on_challenge_result(&id, true, proven);
+        assert_eq!(c.verified_mem_mib(&id), proven * 3);
         assert!(c.verified_mem_mib(&id) < 24_576);
-        assert!(c.verified_mem_mib(&id) <= CHALLENGE_CREDIT_MIB * 3);
         // Fail halves trust.
         let before_fail = c.verified_mem_mib(&id);
-        c.on_challenge_result(&id, false);
+        c.on_challenge_result(&id, false, 0);
         let v_fail = c.verified_mem_mib(&id);
         assert!(v_fail < before_fail, "fail must reduce verified");
     }
@@ -674,15 +680,36 @@ mod tests {
         c.upsert_node(id.clone(), "a", caps);
         assert_eq!(c.verified_mem_mib(&id), 0);
         assert_eq!(c.get(&id).unwrap().claimed_mem_mib, claim);
-        // Many stub challenges cannot freely unlock full farm without real credit path.
+        // N proven credits unlock at most N × credit (not free farm).
+        let proven = 128u32;
         for _ in 0..3 {
-            c.on_challenge_result(&id, true);
+            c.on_challenge_result(&id, true, proven);
         }
         assert!(
             c.verified_mem_mib(&id) < claim,
             "3 challenges must not equal full claim"
         );
-        assert_eq!(c.verified_mem_mib(&id), CHALLENGE_CREDIT_MIB * 3);
+        assert_eq!(c.verified_mem_mib(&id), proven * 3);
+    }
+
+    #[test]
+    fn unlock_never_exceeds_proven_credit_mib() {
+        let mut c = Cluster::default();
+        let (id, caps) = node(24_576, DeviceClass::Gpu);
+        c.upsert_node(id.clone(), "f", caps);
+        // Ok with proven=0 credits nothing (no free unlock).
+        c.on_challenge_result(&id, true, 0);
+        assert_eq!(c.verified_mem_mib(&id), 0);
+        // Ok with proven=16 credits exactly 16.
+        c.on_challenge_result(&id, true, 16);
+        assert_eq!(c.verified_mem_mib(&id), 16);
+        // Cannot credit more than CHALLENGE_CREDIT_MIB in one ok.
+        c.on_challenge_result(&id, true, CHALLENGE_CREDIT_MIB * 10);
+        assert_eq!(
+            c.verified_mem_mib(&id),
+            16 + CHALLENGE_CREDIT_MIB,
+            "single ok capped at CHALLENGE_CREDIT_MIB proven"
+        );
     }
 
     #[test]

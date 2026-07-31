@@ -38,8 +38,8 @@ There is **no cash path** on the public pool. You mint mJ by donating healthy co
 | PeerAlive `mem_mib` | self-report | claim | UI / display only |
 
 - Join starts `verified_mem_mib = 0` regardless of claim.
-- Capacity challenges use a **mem-bound proof** (`joule_cluster::capacity_proof_hex(seed, credit)`). Public stub strings like `[joule-stub:…]` **never** unlock verified.
-- Each successful challenge credits at most **`CHALLENGE_CREDIT_MIB` (1024)** toward claim — **never** free full-claim unlock.
+- Capacity challenges use a **true 1:1 memory-hard proof**: working set = `credit_mib × 1 MiB` (`capacity_work_bytes`). Public stub strings **never** unlock.
+- Each successful challenge credits **exactly the proven `credit_mib`** (≤ `CHALLENGE_CREDIT_MIB`) — **trusted MiB ≤ proven working-set MiB**.
 - Fail **halves** verified. Expired unanswered challenges count as fails.
 - **Control** mesh placement (`mesh_plan_donors`) uses **cluster verified only**.
 - **Peer gossip** path (`LocalMesh::plan_donors`) uses **equal unit weight** only — PeerAlive claim/self-reported verified **never** buy farm geometry.

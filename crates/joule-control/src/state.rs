@@ -921,19 +921,21 @@ impl ControlState {
             self.mark_dirty();
             return Some(false);
         }
-        // Exact match only — self-asserted ModelLoaded + non-empty text must NOT
-        // pass wrong answers (anti fake-GPU / anti free unlock).
+        // Exact match on capacity proof for pending.credit_mib (proven work only).
         let ok = completion.trim() == pending.expected.trim();
+        let proven = pending.credit_mib;
         if ok {
-            self.cluster.record_challenge_ok(from);
+            // Unlock ≤ proven working-set MiB from this challenge (never free farm).
+            self.cluster.record_challenge_ok(from, proven);
             if let Some(account) = self.node_account.get(from).cloned() {
                 let verified = self.cluster.verified_mem_mib(from);
                 self.note_online(&account, verified, true);
                 self.sync_best_mem_for_account(&account);
                 let fair = self.fairness_for(&account);
                 let breakdown = score_mint(EconomyEvent::ChallengeOk, fair);
-                let reason =
-                    breakdown.reason_tag(&format!("challenge:{challenge_id}|vmem={verified}"));
+                let reason = breakdown.reason_tag(&format!(
+                    "challenge:{challenge_id}|vmem={verified}|proven={proven}"
+                ));
                 let _ = self.ledger.mint_contribution_verified(
                     &account,
                     breakdown.total_mj,
@@ -1009,7 +1011,8 @@ mod challenge_integrity_tests {
         state.sync_best_mem_for_account(&account);
 
         let seed = [3u8; 32];
-        let credit = joule_cluster::CHALLENGE_CREDIT_MIB;
+        // Lab credit=1 MiB (true 1:1 work); do not allocate 1 GiB in unit tests.
+        let credit = 1u32;
         let (challenge_id, expected) =
             insert_capacity_challenge(&mut state, &id, seed, credit, Instant::now());
         // Wrong answer + model_loaded must still fail
@@ -1057,7 +1060,7 @@ mod challenge_integrity_tests {
             &mut state,
             &id,
             [9u8; 32],
-            joule_cluster::CHALLENGE_CREDIT_MIB,
+            1, // lab-scale credit (1 MiB work)
             Instant::now() - Duration::from_secs(120),
         );
         let before = state.cluster.verified_mem_mib(&id);
@@ -1094,25 +1097,27 @@ mod challenge_integrity_tests {
     }
 
     #[test]
-    fn capacity_proof_challenge_raises_verified_by_credit_only() {
+    fn capacity_proof_challenge_raises_verified_by_proven_credit_only() {
         let mut state = ControlState::new();
         let (id, account) = register_claimed(&mut state, 8192);
         let seed = [0xABu8; 32];
-        let credit = joule_cluster::CHALLENGE_CREDIT_MIB;
+        // 2 MiB proven work → +2 verified (1:1), not free CHALLENGE_CREDIT or claim.
+        let credit = 2u32;
+        assert_eq!(
+            joule_cluster::capacity_work_bytes(credit),
+            2 * 1024 * 1024
+        );
         let (challenge_id, expected) =
             insert_capacity_challenge(&mut state, &id, seed, credit, Instant::now());
         let ok = state
             .settle_challenge_result(challenge_id, expected, &id)
             .unwrap();
         assert!(ok);
-        assert_eq!(
-            state.cluster.verified_mem_mib(&id),
-            joule_cluster::CHALLENGE_CREDIT_MIB
-        );
+        assert_eq!(state.cluster.verified_mem_mib(&id), credit);
         assert!(state.cluster.verified_mem_mib(&id) < 8192);
         assert_eq!(
             state.account_economy.get(&account).unwrap().best_mem_mib,
-            joule_cluster::CHALLENGE_CREDIT_MIB
+            credit
         );
     }
 
@@ -1123,7 +1128,7 @@ mod challenge_integrity_tests {
         let claim = 24_576u32;
         let (id, _account) = register_claimed(&mut state, claim);
         let seed = [0x11u8; 32];
-        let credit = joule_cluster::CHALLENGE_CREDIT_MIB;
+        let credit = 1u32;
         let (challenge_id, real_expected) =
             insert_capacity_challenge(&mut state, &id, seed, credit, Instant::now());
         let forge = StubEngine::expected_text(
@@ -1143,6 +1148,24 @@ mod challenge_integrity_tests {
             0,
             "forge must leave verified at 0 (or decay from 0)"
         );
+    }
+
+    /// Smaller proof (1 MiB) must not satisfy a 2 MiB pending challenge.
+    #[test]
+    fn undersized_work_proof_does_not_unlock() {
+        let mut state = ControlState::new();
+        let (id, _) = register_claimed(&mut state, 24_576);
+        let seed = [0x22u8; 32];
+        let want_credit = 2u32;
+        let (challenge_id, _expected) =
+            insert_capacity_challenge(&mut state, &id, seed, want_credit, Instant::now());
+        // Attacker solves only 1 MiB of work and submits that proof.
+        let undersized = joule_cluster::capacity_proof_hex(&seed, 1);
+        let ok = state
+            .settle_challenge_result(challenge_id, undersized, &id)
+            .unwrap();
+        assert!(!ok, "1 MiB proof must not unlock 2 MiB credit");
+        assert_eq!(state.cluster.verified_mem_mib(&id), 0);
     }
 
     /// Formula-only / public-stub-echo cannot unlock arbitrary claim.
@@ -1191,7 +1214,7 @@ mod challenge_integrity_tests {
         assert_eq!(donors_mid.len(), 1);
         assert_eq!(donors_mid[0].1, 4096);
 
-        state.cluster.on_challenge_result(&id, false);
+        state.cluster.on_challenge_result(&id, false, 0);
         let half = state.cluster.verified_mem_mib(&id);
         assert_eq!(half, 2048);
         state.mesh.upsert(
@@ -1222,12 +1245,15 @@ mod challenge_integrity_tests {
         let mut state = ControlState::new();
         let claim = 65_536u32;
         let (id, _account) = register_claimed(&mut state, claim);
+        // N oks unlock at most N × proven credit (accounting path; not free farm).
+        let proven = 128u32;
         for _ in 0..10 {
-            state.cluster.record_challenge_ok(&id);
+            state.cluster.record_challenge_ok(&id, proven);
         }
         let v = state.cluster.verified_mem_mib(&id);
         assert!(v < claim);
-        assert_eq!(v, joule_cluster::CHALLENGE_CREDIT_MIB * 10);
+        assert_eq!(v, proven * 10);
+        assert!(v << 1 < claim, "10×128 MiB still ≪ 64 GiB farm claim");
         state.mesh.upsert(
             id.clone(),
             vec![],
@@ -1251,7 +1277,9 @@ mod challenge_integrity_tests {
         let engine = StubEngine::new();
         let id = NodeId::new();
         let seed = [0x5Eu8; 32];
-        let credit = joule_cluster::CHALLENGE_CREDIT_MIB;
+        // 1 MiB lab credit — true 1:1 work without 1 GiB unit-test alloc.
+        let credit = 1u32;
+        assert_eq!(joule_cluster::capacity_work_bytes(credit), 1024 * 1024);
         let seed_hex = hex::encode(seed);
         let want = joule_cluster::capacity_proof_hex(&seed, credit);
         let prompt = "joule-challenge:unique-nonce-9f3a";
