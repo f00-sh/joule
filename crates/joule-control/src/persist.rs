@@ -13,6 +13,9 @@ pub struct EconomySnap {
     pub consumed_mj_window: i64,
     pub continuous_online_secs: u64,
     pub best_mem_mib: u32,
+    /// Churn counter (disconnects in fairness window) — must survive restart.
+    #[serde(default)]
+    pub disconnects_window: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -89,6 +92,7 @@ pub fn save(dir: &Path, state: &ControlState) -> Result<()> {
                 consumed_mj_window: eco.consumed_mj_window,
                 continuous_online_secs: continuous,
                 best_mem_mib: eco.best_mem_mib,
+                disconnects_window: eco.disconnects_window,
             },
         );
     }
@@ -141,7 +145,7 @@ pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
                 online_since: None,
                 continuous_online_secs: e.continuous_online_secs,
                 best_mem_mib: e.best_mem_mib,
-                disconnects_window: 0,
+                disconnects_window: e.disconnects_window,
                 prompt_tokens_used: 0,
                 completion_tokens_used: 0,
             },
@@ -161,5 +165,133 @@ pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
     let now = crate::broadcast::now_ms();
     for env in snap.broadcasts {
         let _ = state.broadcasts.accept(env, now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ControlState;
+    use joule_ledger::leecher_factors_bp;
+    use joule_proto::{DeviceClass, NodeCaps, NodeId};
+    use uuid::Uuid;
+
+    #[test]
+    fn disconnects_window_survives_save_load() {
+        let dir = std::env::temp_dir().join(format!("joule-persist-churn-{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = ControlState::new();
+        state.data_dir = Some(dir.clone());
+        state.ensure_account("alice");
+        {
+            let eco = state.economy_mut("alice");
+            eco.disconnects_window = 17;
+            eco.contributed_mj_window = 100;
+            eco.consumed_mj_window = 50;
+            eco.best_mem_mib = 4096;
+            eco.continuous_online_secs = 3600;
+        }
+        save(&dir, &state).unwrap();
+
+        let mut state2 = ControlState::new();
+        let snap = load(&dir).unwrap().expect("snapshot");
+        apply_snapshot(&mut state2, snap);
+        let eco = state2.account_economy.get("alice").expect("alice eco");
+        assert_eq!(
+            eco.disconnects_window, 17,
+            "churn counter must survive control restart"
+        );
+        assert_eq!(eco.contributed_mj_window, 100);
+        assert_eq!(eco.best_mem_mib, 4096);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn control_donate_does_not_wash_leecher_window() {
+        let mut state = ControlState::new();
+        // Seed accounts on sealed ledger
+        state.ledger.mint_contribution("rich", 1000, "seed").unwrap();
+        state.ledger.mint_contribution("leecher", 10, "seed").unwrap();
+        state.ensure_account("rich");
+        state.ensure_account("leecher");
+        // Leecher has consume ≫ contribute in fairness window
+        {
+            let eco = state.economy_mut("leecher");
+            eco.contributed_mj_window = 10;
+            eco.consumed_mj_window = 1000;
+            eco.best_mem_mib = 4096;
+        }
+        {
+            let eco = state.economy_mut("rich");
+            eco.best_mem_mib = 8192;
+            eco.contributed_mj_window = 500;
+        }
+        let (mint_before, _) = {
+            let eco = state.account_economy.get("leecher").unwrap();
+            leecher_factors_bp(eco.contributed_mj_window, eco.consumed_mj_window)
+        };
+        assert!(mint_before < 10_000, "precondition: leeching");
+
+        let r = state
+            .donate_to_pool("rich", 300)
+            .expect("ControlState.donate_to_pool");
+        assert_eq!(r.amount, 300);
+        assert_eq!(state.ledger.balance("rich"), 700);
+        // Leecher received sealed credit but contribute window unchanged
+        let eco = state.account_economy.get("leecher").unwrap();
+        assert_eq!(
+            eco.contributed_mj_window, 10,
+            "donate_receive must not wash anti-leech contribute window"
+        );
+        assert_eq!(eco.consumed_mj_window, 1000);
+        let (mint_after, _) = leecher_factors_bp(eco.contributed_mj_window, eco.consumed_mj_window);
+        assert_eq!(
+            mint_after, mint_before,
+            "leecher mint factor must be unchanged by pool gift"
+        );
+        // Balance may increase from donate_receive
+        assert!(state.ledger.balance("leecher") > 10);
+    }
+
+    #[test]
+    fn note_online_disconnect_increments_churn_and_persists() {
+        let dir = std::env::temp_dir().join(format!("joule-persist-note-{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = ControlState::new();
+        state.data_dir = Some(dir.clone());
+        let id = NodeId::new();
+        state.register_node(
+            id.clone(),
+            "bob",
+            NodeCaps::for_cluster(DeviceClass::Gpu, 8192, 40),
+        );
+        // Simulate online then offline (churn)
+        state.note_online("bob", 4096, true);
+        state.note_online("bob", 0, false);
+        state.note_online("bob", 4096, true);
+        state.note_online("bob", 0, false);
+        let d = state
+            .account_economy
+            .get("bob")
+            .map(|e| e.disconnects_window)
+            .unwrap_or(0);
+        assert!(d >= 2, "disconnects_window={d}");
+        save(&dir, &state).unwrap();
+
+        let mut state2 = ControlState::new();
+        apply_snapshot(&mut state2, load(&dir).unwrap().unwrap());
+        assert_eq!(
+            state2
+                .account_economy
+                .get("bob")
+                .map(|e| e.disconnects_window)
+                .unwrap_or(0),
+            d
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

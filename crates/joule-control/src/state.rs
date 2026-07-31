@@ -242,7 +242,7 @@ impl ControlState {
         }
     }
 
-    fn economy_mut(&mut self, account: &str) -> &mut AccountEconomy {
+    pub(crate) fn economy_mut(&mut self, account: &str) -> &mut AccountEconomy {
         self.account_economy.entry(account.to_string()).or_default()
     }
 
@@ -284,7 +284,7 @@ impl ControlState {
         }
     }
 
-    fn note_online(&mut self, account: &str, verified_mem_mib: u32, healthy: bool) {
+    pub(crate) fn note_online(&mut self, account: &str, verified_mem_mib: u32, healthy: bool) {
         let eco = self.economy_mut(account);
         // Only verified memory counts toward economic mem factor.
         if verified_mem_mib > eco.best_mem_mib {
@@ -349,10 +349,8 @@ impl ControlState {
             .ledger
             .donate_to_pool(donor, amount, &recipients)
             .map_err(|e| e.to_string())?;
-        // Recipients record contribute window for fairness (donation is pool share, not work).
-        for c in &result.recipient_credits {
-            self.record_contribute(&c.account, c.delta_millijoules);
-        }
+        // Do **not** record_contribute for donate_receive — pool gifts must not wash
+        // anti-leech (consume ≫ contribute) fairness windows.
         self.seal_and_checkpoint();
         self.mark_dirty();
         self.save_if_dirty();
