@@ -51,7 +51,8 @@ jobs:
             asset_arch: aarch64
             ext: tar.gz
             cross: true
-          - os: macos-13
+          # Both Darwin targets on macos-14 (x86_64 cross-compiled; avoids scarce macos-13 runners)
+          - os: macos-14
             target: x86_64-apple-darwin
             asset_os: darwin
             asset_arch: x86_64
