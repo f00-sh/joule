@@ -386,47 +386,66 @@ mod tests {
 
     #[test]
     fn multi_hop_put_get_peer_and_blob() {
-        // A -- B -- C  (chain topology; C never shares LocalMesh with A)
+        // A -- B -- C  (chain topology). Value lives **only on A** until C walks multi-hop.
         let mut net = InProcessNetwork::new();
         net.add_node(DhtNode::new("node-a", vec!["tcp://10.0.0.1:7702".into()]));
         net.add_node(DhtNode::new("node-b", vec!["tcp://10.0.0.2:7702".into()]));
         net.add_node(DhtNode::new("node-c", vec!["tcp://10.0.0.3:7702".into()]));
         net.bootstrap_chain(&["node-a", "node-b", "node-c"]);
 
-        // Put peer record on A
+        let peer_key_s = peer_key("node-z");
         let peer_val = DhtValue {
-            key: peer_key("node-z"),
+            key: peer_key_s.clone(),
             value_json: r#"{"node_id":"node-z","multiaddrs":["quic://203.0.113.9:7702"],"seq":1}"#
                 .into(),
             seq: 1,
             updated_unix_ms: 1,
         };
-        let n = net.put_replicated("node-a", peer_val.clone());
-        assert!(n >= 1, "replicated to at least origin");
+        // Store **only** on A — do not put_replicated (that would seed B/C and short-circuit find).
+        assert!(net
+            .get_mut("node-a")
+            .unwrap()
+            .handle_store(peer_val.clone()));
+        assert!(net.get("node-a").unwrap().store.get_raw(&peer_key_s).is_some());
+        assert!(
+            net.get("node-b").unwrap().store.get_raw(&peer_key_s).is_none(),
+            "B must not hold key before multi-hop find"
+        );
+        assert!(
+            net.get("node-c").unwrap().store.get_raw(&peer_key_s).is_none(),
+            "C must not hold key before multi-hop find"
+        );
 
-        // C must retrieve via multi-hop find (C only knows B initially)
+        // C only knows B; walk B → A to retrieve.
         let got = net
-            .iterative_find_value("node-c", &peer_key("node-z"))
+            .iterative_find_value("node-c", &peer_key_s)
             .expect("C finds peer record via multi-hop");
-        assert_eq!(got.key, peer_key("node-z"));
+        assert_eq!(got.key, peer_key_s);
         assert!(got.value_json.contains("203.0.113.9"));
+        // After find, origin caches locally
+        assert!(net.get("node-c").unwrap().store.get_raw(&peer_key_s).is_some());
 
-        // Blob key path
+        // Blob key: again store only on A
         let hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let bkey = blob_key(hash);
         let blob_val = DhtValue {
-            key: blob_key(hash),
-            value_json: format!(r#"{{"sha256":"{hash}","seeders":{{"node-a":{{"size":99,"multiaddrs":["tcp://10.0.0.1:7702"]}}}}}}"#),
+            key: bkey.clone(),
+            value_json: format!(
+                r#"{{"sha256":"{hash}","seeders":{{"node-a":{{"size":99,"multiaddrs":["tcp://10.0.0.1:7702"]}}}}}}"#
+            ),
             seq: 2,
             updated_unix_ms: 2,
         };
-        net.put_replicated("node-a", blob_val);
+        assert!(net.get_mut("node-a").unwrap().handle_store(blob_val));
+        assert!(net.get("node-b").unwrap().store.get_raw(&bkey).is_none());
+        assert!(net.get("node-c").unwrap().store.get_raw(&bkey).is_none());
+
         let got_blob = net
-            .iterative_find_value("node-c", &blob_key(hash))
+            .iterative_find_value("node-c", &bkey)
             .expect("C finds blob record via multi-hop");
         assert!(got_blob.value_json.contains(hash));
-
-        // Prove C did not start with A's store: A has the key, C only after find
-        assert!(net.get("node-a").unwrap().store.get_raw(&blob_key(hash)).is_some());
+        assert!(net.get("node-a").unwrap().store.get_raw(&bkey).is_some());
+        assert!(net.get("node-c").unwrap().store.get_raw(&bkey).is_some());
     }
 
     #[test]

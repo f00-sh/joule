@@ -610,15 +610,19 @@ mod tests {
         );
     }
 
+    /// Mid-flight death: first coordinator is **alive and elected**, then silenced
+    /// after RequestInfer so the first plan cannot complete. wait_completion must
+    /// re-elect / re-plan (attempt ≥ 2, coordinator ≠ dead id) or the test fails.
     #[tokio::test]
     async fn coordinator_death_triggers_replan() {
         let donors = donors_n(3);
         let client_id = donors[0].0.clone();
-        // Highest mem is last donor → will be elected first
+        // Highest mem is elected first coordinator while still healthy.
         let high = donors.iter().max_by_key(|(_, m)| *m).unwrap().0.clone();
 
         let bus = PeerBus::new(client_id.clone());
-        bus.set_coord_timeout(Duration::from_millis(80)).await;
+        // Short timeout so wait_completion replan fires without long sleep.
+        bus.set_coord_timeout(Duration::from_millis(60)).await;
 
         let mut rxs = Vec::new();
         for (id, mem) in &donors {
@@ -634,40 +638,80 @@ mod tests {
             .await;
             rxs.push((id.clone(), rx));
         }
+
+        // Live actors for everyone except the first coordinator — that peer's
+        // mailbox accepts messages but never handles them (mid-flight silence).
         for (id, rx) in rxs {
-            let b = bus.clone();
-            tokio::spawn(async move {
-                run_peer_actor(b, id, rx).await;
-            });
+            if id == high {
+                // Drain mailbox so send_to does not fail; never handle_envelope.
+                tokio::spawn(async move {
+                    let mut rx = rx;
+                    while rx.recv().await.is_some() {
+                        // intentional no-op: dead coordinator mid-request
+                    }
+                });
+            } else {
+                let b = bus.clone();
+                tokio::spawn(async move {
+                    run_peer_actor(b, id, rx).await;
+                });
+            }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        // Kill highest-mem coordinator before request
-        bus.mark_dead(&high).await;
-        assert_ne!(
-            elect_coordinator(
-                &bus.inner
-                    .lock()
-                    .await
-                    .donors
-                    .values()
-                    .cloned()
-                    .collect::<Vec<_>>()
-            )
-            .unwrap(),
-            high
-        );
+        // Pre-condition: high would be elected and is still healthy.
+        {
+            let g = bus.inner.lock().await;
+            let list: Vec<_> = g.donors.values().cloned().collect();
+            assert_eq!(elect_coordinator(&list).unwrap(), high);
+            assert!(!g.dead_coordinators.contains(&high));
+        }
 
         let rid = bus
             .request_infer("bob", "user: replan-after-death", 16)
             .await
             .expect("request");
-        // Force replan path
-        bus.replan_request(rid).await.ok();
+
+        // Mid-flight: RequestInfer was delivered to `high` (silent). Confirm
+        // inflight still points at high before replan can finish.
+        {
+            let g = bus.inner.lock().await;
+            let inf = g.inflight.get(&rid).expect("inflight");
+            assert_eq!(
+                inf.coordinator, high,
+                "first coordinator must be the live high-mem peer"
+            );
+            assert_eq!(inf.attempt, 0, "no replan yet");
+        }
+
+        // Kill that coordinator mid-request (still no completion possible from high).
+        bus.mark_dead(&high).await;
+
         let text = bus
-            .wait_completion(rid, Duration::from_secs(4))
+            .wait_completion(rid, Duration::from_secs(5))
             .await
-            .expect("completion after replan");
-        assert!(!text.is_empty());
+            .expect("completion after mid-flight replan");
+        assert!(
+            !text.is_empty() && (text.contains("replan-after-death") || text.len() > 4),
+            "text={text}"
+        );
+
+        let g = bus.inner.lock().await;
+        let inf = g.inflight.get(&rid).expect("inflight after replan");
+        assert!(
+            inf.attempt >= 1,
+            "replan must bump attempt (got {})",
+            inf.attempt
+        );
+        assert_ne!(
+            inf.coordinator, high,
+            "new coordinator must not be the dead first coordinator"
+        );
+        assert!(
+            g.dead_coordinators.contains(&high),
+            "dead coordinator recorded"
+        );
+        // Without replan, silent high would never complete — prove completion path ran.
+        assert!(g.completions.contains_key(&rid));
     }
 }
