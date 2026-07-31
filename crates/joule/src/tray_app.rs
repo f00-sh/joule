@@ -19,7 +19,10 @@ pub async fn run_tray(api: String, key: Option<String>, interval_secs: u64) -> R
         "joule tray/monitor — api={api} interval={}s",
         interval.as_secs()
     );
-    println!("identity: joule tray --copy-code | --enter-code UUID | --open-recovery | --onboard");
+    println!(
+        "identity: joule tray --copy-code | --enter-code UUID | --open-recovery | --onboard"
+    );
+    println!("connect:  joule connect | tray --copy-api-key | tray --connect");
     println!("Ctrl-C to stop.\n");
 
     loop {

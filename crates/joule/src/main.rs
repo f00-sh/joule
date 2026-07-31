@@ -133,8 +133,8 @@ enum Commands {
     Chat {
         #[arg(long, default_value = "http://127.0.0.1:7700")]
         api: String,
-        /// API key from agent welcome (joule_...).
-        #[arg(long)]
+        /// API key (default: auto from identity after agent joins).
+        #[arg(long, default_value = "")]
         key: String,
         #[arg(long, default_value = CLUSTER_MODEL)]
         model: String,
@@ -148,14 +148,33 @@ enum Commands {
     Whoami {
         #[arg(long, default_value = "http://127.0.0.1:7700")]
         api: String,
-        #[arg(long)]
+        /// API key (default: auto from identity after agent joins).
+        #[arg(long, default_value = "")]
         key: String,
+    },
+    /// Show Base URL + API key + model for Cursor / Continue / any OpenAI app.
+    /// This is how normal people get the generated key (copy / open file).
+    Connect {
+        /// Control HTTP base (not /v1 — we append it).
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        #[arg(long, default_value = CLUSTER_MODEL)]
+        model: String,
+        /// Copy the full API key to the clipboard.
+        #[arg(long, default_value_t = false)]
+        copy: bool,
+        /// Copy the OpenAI Base URL (…/v1) to the clipboard.
+        #[arg(long, default_value_t = false)]
+        copy_url: bool,
+        /// Open JOULE-CONNECT.txt in the OS default app.
+        #[arg(long, default_value_t = false)]
+        open: bool,
     },
     /// Live client status (connection, API, millijoules, tokens, pool) — all platforms.
     Status {
         #[arg(long, default_value = "http://127.0.0.1:7700")]
         api: String,
-        /// Optional API key for account balance / tokens.
+        /// Optional API key for account balance / tokens (default: identity cache).
         #[arg(long, default_value = "")]
         key: String,
         #[arg(long, default_value_t = false)]
@@ -194,6 +213,12 @@ enum Commands {
         /// Open JOULE-RECOVERY.txt with the OS default opener.
         #[arg(long, default_value_t = false)]
         open_recovery: bool,
+        /// Show CONNECT card (Base URL + API key + model) then exit.
+        #[arg(long, default_value_t = false)]
+        connect: bool,
+        /// Copy pool API key (for Cursor etc.) then exit.
+        #[arg(long, default_value_t = false)]
+        copy_api_key: bool,
     },
     /// First-run onboard: create CODE, write recovery file, show instructions once.
     Onboard {
@@ -587,10 +612,21 @@ async fn main() -> Result<()> {
             prompt,
             stream,
         } => {
+            let key = resolve_api_key(&key)?;
             run_chat(api, key, model, prompt, stream).await?;
         }
         Commands::Whoami { api, key } => {
+            let key = resolve_api_key(&key)?;
             run_whoami(api, key).await?;
+        }
+        Commands::Connect {
+            api,
+            model,
+            copy,
+            copy_url,
+            open,
+        } => {
+            run_connect(&api, &model, copy, copy_url, open)?;
         }
         Commands::Status {
             api,
@@ -598,14 +634,15 @@ async fn main() -> Result<()> {
             json,
             dash,
         } => {
-            run_status(api, key, json, dash).await?;
+            let key = resolve_api_key_optional(&key);
+            run_status(api, key.unwrap_or_default(), json, dash).await?;
         }
         Commands::Monitor {
             api,
             key,
             interval_secs,
         } => {
-            let k = if key.is_empty() { None } else { Some(key) };
+            let k = resolve_api_key_optional(&key);
             tray_app::run_tray(api, k, interval_secs).await?;
         }
         Commands::Tray {
@@ -616,6 +653,8 @@ async fn main() -> Result<()> {
             copy_code,
             enter_code,
             open_recovery,
+            connect,
+            copy_api_key,
         } => {
             let id_path = identity::default_path();
             if onboard {
@@ -644,18 +683,23 @@ async fn main() -> Result<()> {
                 println!("opened {}", note.display());
                 return Ok(());
             }
+            if connect || copy_api_key {
+                // --connect shows card; --copy-api-key copies key (both allowed).
+                run_connect(&api, CLUSTER_MODEL, copy_api_key, false, false)?;
+                return Ok(());
+            }
             // Product tray: show identity once at start, then status monitor.
             if let Ok((id, fresh)) = identity::load_or_init(&id_path) {
                 if fresh {
                     identity::print_code_banner(&id, &id_path, true);
                 } else {
                     println!(
-                        "joule CODE {}  ·  joule tray --copy-code | --enter-code | --open-recovery",
+                        "joule CODE {}  ·  connect: joule connect | tray --copy-api-key",
                         id.code()
                     );
                 }
             }
-            let k = if key.is_empty() { None } else { Some(key) };
+            let k = resolve_api_key_optional(&key);
             tray_app::run_tray(api, k, interval_secs).await?;
         }
         Commands::Service { cmd } => match cmd {
@@ -1145,15 +1189,22 @@ async fn run_agent(
                 let env = decode_line(line.as_bytes()).context("decode control line")?;
                 match env.msg {
                     Message::Welcome { account: acc, api_key: key } => {
-                        println!("joined pool · code {acc}");
-                        println!("API key (for chat): {key}");
+                        println!("joined pool · account {acc}");
                         if let Some(ref ip) = identity_path {
                             if let Err(e) = identity::remember_api_key(ip, &key) {
                                 warn!(error = %e, "could not cache api_key on identity");
                             }
+                            // Idiot path: full CONNECT card + JOULE-CONNECT.txt for Cursor etc.
+                            // HTTP default matches control default; agents join TCP, apps use HTTP.
+                            let http = std::env::var("JOULE_HTTP_API")
+                                .unwrap_or_else(|_| "http://127.0.0.1:7700".into());
+                            identity::print_connect_card(ip, &http, Some(&key), CLUSTER_MODEL);
+                        } else {
+                            println!("API key (for Cursor / chat): {key}");
+                            println!("chat: joule chat --prompt \"hello\"");
                         }
-                        println!("other PC:  joule identity use {acc}");
-                        println!("chat:      joule chat --key {key} --prompt \"hello\"");
+                        println!("other PC:  joule identity use <CODE from recovery file>");
+                        println!("connect:   joule connect          # show/copy Base URL + key");
                         println!("weights:   {}", store.root().display());
                         if !multiaddrs.is_empty() {
                             println!("mesh dial:  {}", multiaddrs.join(", "));
@@ -2058,6 +2109,56 @@ async fn run_capacity(api: String, peers: usize, json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&cap)?);
     } else {
         print_capacity(&cap);
+    }
+    Ok(())
+}
+
+/// Prefer CLI --key; else cached key from identity (issued on Welcome).
+fn resolve_api_key_optional(cli_key: &str) -> Option<String> {
+    let t = cli_key.trim();
+    if !t.is_empty() {
+        return Some(t.to_string());
+    }
+    identity::cached_api_key(&identity::default_path())
+}
+
+fn resolve_api_key(cli_key: &str) -> Result<String> {
+    resolve_api_key_optional(cli_key).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no API key yet. Start the agent once (pool issues a key), then run: joule connect"
+        )
+    })
+}
+
+/// Product path: show/copy Base URL + generated API key for Cursor-class apps.
+fn run_connect(api: &str, model: &str, copy: bool, copy_url: bool, open: bool) -> Result<()> {
+    let id_path = identity::default_path();
+    let key = identity::cached_api_key(&id_path);
+    identity::print_connect_card(&id_path, api, key.as_deref(), model);
+    if copy {
+        let Some(ref k) = key else {
+            bail!("no API key cached — run joule agent, join the pool, then joule connect --copy");
+        };
+        match tray_app::copy_to_clipboard(k) {
+            Ok(()) => println!("API key copied to clipboard. Paste it into Cursor / your app."),
+            Err(e) => eprintln!("clipboard: {e}"),
+        }
+    }
+    if copy_url {
+        let base = identity::openai_base_url(api);
+        match tray_app::copy_to_clipboard(&base) {
+            Ok(()) => println!("Base URL copied to clipboard: {base}"),
+            Err(e) => eprintln!("clipboard: {e}"),
+        }
+    }
+    if open {
+        if let Some(ref k) = key {
+            let note = identity::write_connect_note(&id_path, api, k, model)?;
+            tray_app::open_path(&note)?;
+            println!("opened {}", note.display());
+        } else {
+            bail!("no JOULE-CONNECT.txt yet — run joule agent first so a key exists");
+        }
     }
     Ok(())
 }
