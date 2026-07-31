@@ -99,7 +99,8 @@ install_release() {
   asset="${PROJECT}-${ver}-${os}-${arch}.tar.gz"
   url="https://github.com/${REPO}/releases/download/${tag}/${asset}"
   tmp="$(mktemp -d)"
-  trap 'rm -rf "${tmp}"' EXIT
+  # shellcheck disable=SC2064
+  trap 'rm -rf "${tmp:-/tmp/joule-install-none}"' EXIT
   printf 'downloading %s\n' "${url}"
   if ! curl -fsSL "${url}" -o "${tmp}/${asset}"; then
     die "release asset missing (${url}). Try another platform on https://joule.f00.sh/download.html or build: git clone + cargo build --release -p joule"
@@ -128,8 +129,10 @@ install_release() {
   printf '\ninstalled %s/joule from %s\n' "${INSTALL_BIN_DIR}" "${tag}"
   path_hint
   printf 'run: joule version\n'
-  printf 'then: joule agent --account YOU\n'
+  printf 'then: joule agent   # auto CODE; multi-device: joule identity use <CODE>\n'
   printf 'site: https://joule.f00.sh/download.html\n'
+  trap - EXIT
+  rm -rf "${tmp}"
 }
 
 # curl | sh → no git root → release. Local clone defaults to local build unless forced.

@@ -57,9 +57,9 @@ irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
 
 | Channel | Notes |
 |---------|--------|
-| **GitHub Releases** | Canonical — tag `vX.Y.Z` runs `.github/workflows/release.yml` |
-| **AUR** | Template `packaging/aur/PKGBUILD` → publish as `joule-bin` |
-| **Homebrew** | Formula `packaging/homebrew/joule.rb` → publish to a tap |
+| **GitHub Releases** | Canonical — [f00-sh/joule releases](https://github.com/f00-sh/joule/releases) |
+| **Homebrew** | `brew install f00-sh/tap/joule` ([formula](https://github.com/f00-sh/homebrew-tap/blob/main/Formula/joule.rb)) |
+| **Arch PKGBUILD** | [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin) — `makepkg -si` after clone |
 | **Windows** | ZIP + `install.ps1` (user-local). Signed MSI/EXE when a cert is available |
 
 ### Your joule code (multi-machine, no PII)

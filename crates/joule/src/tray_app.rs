@@ -50,7 +50,13 @@ pub fn copy_to_clipboard(text: &str) -> Result<()> {
         ("pbcopy", &[]),
         ("clip.exe", &[]), // WSL
     ];
+    let has_display = std::env::var_os("DISPLAY").is_some()
+        || std::env::var_os("WAYLAND_DISPLAY").is_some();
     for (bin, args) in candidates {
+        // xclip/xsel block forever with no X/Wayland (headless SSH/CI).
+        if matches!(*bin, "xclip" | "xsel") && !has_display {
+            continue;
+        }
         if which(bin) {
             let mut child = Command::new(bin)
                 .args(*args)

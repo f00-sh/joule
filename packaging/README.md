@@ -1,7 +1,7 @@
-# joule packaging
+# joule packaging (f00-sh)
 
-**Canonical binaries:** [GitHub Releases](https://github.com/f00-sh/joule/releases)  
-**Easy UI:** [https://joule.f00.sh/download.html](https://joule.f00.sh/download.html) (autodetect + all platforms)  
+**Canonical binaries:** [GitHub Releases f00-sh/joule](https://github.com/f00-sh/joule/releases)  
+**Easy UI:** [https://joule.f00.sh/download.html](https://joule.f00.sh/download.html)  
 **Weights:** never on f00 — peers + official sources + sha256 only.
 
 ## Dummy-easy install (users)
@@ -10,18 +10,26 @@
 |----------|---------|
 | Linux / macOS | `curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh \| sh` |
 | Windows | `irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 \| iex` |
-| Arch | `yay -S joule-bin` (after AUR publish) |
-| macOS brew | `brew install f00-sh/tap/joule` (after tap publish) |
+| Arch (f00 PKGBUILD) | `git clone https://github.com/f00-sh/aur-joule-bin.git && cd aur-joule-bin && makepkg -si` |
+| Homebrew | `brew install f00-sh/tap/joule` |
+
+## Live package sources (f00 org)
+
+| Channel | URL |
+|---------|-----|
+| Releases | https://github.com/f00-sh/joule/releases |
+| Homebrew | https://github.com/f00-sh/homebrew-tap/blob/main/Formula/joule.rb |
+| AUR-style PKGBUILD | https://github.com/f00-sh/aur-joule-bin |
+
+Digests are pinned from each release `SHA256SUMS`.
 
 ## Maintainer checklist (each SemVer tag)
 
 1. `git tag vX.Y.Z && git push origin vX.Y.Z`
-2. GitHub Actions **release** workflow builds all targets and uploads assets.
-3. Copy sha256 from `SHA256SUMS` into:
-   - `packaging/aur/PKGBUILD` (`pkgver` + `sha256sums_*`)
-   - `packaging/homebrew/joule.rb` (`version` + `sha256`)
-4. Push AUR / homebrew-tap repos if separate.
-5. Site download page reads **latest** from the GitHub API automatically.
+2. Wait for **release** workflow green
+3. Update `f00-sh/homebrew-tap` Formula/joule.rb version + sha256
+4. Update `f00-sh/aur-joule-bin` PKGBUILD pkgver + sha256sums
+5. Site download page reads **latest** from the GitHub API automatically
 
 ## Asset naming
 
@@ -35,13 +43,3 @@ install.sh
 install.ps1
 SHA256SUMS
 ```
-
-## Windows “installer”
-
-- **Primary:** PowerShell one-liner (`install.ps1`) — no admin required, user-local install.
-- **Portable:** unzip `*-windows-x86_64.zip` and run `joule.exe`.
-- **Future:** signed Inno/MSI when code-signing cert is available; until then PS1 is the supported path.
-
-## AUR / Homebrew
-
-Templates live in this directory. They are not auto-published (AUR/Homebrew need separate repos/maintainers). End users on those ecosystems get one-command install once published.
