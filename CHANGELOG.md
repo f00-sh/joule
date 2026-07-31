@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Structural capacity invariant**: single verified-only API for anything affecting mJ or placement — `placement_mem_mib` (0 if unverified) vs `economic_mem_mib` (mint floor only); stream slots / plan_sharded_pool / mesh_plan_donors / rank exclude claim-only peers
+- **Challenge unlock**: at most `CHALLENGE_CREDIT_MIB` (1024) per success — **no** free full-claim unlock after N stub passes; agent returns engine.infer text only
+- **E2E mesh geometry**: tests assert `mesh_plan_donors()` (cluster verified), not PeerAlive claim
+
 ### Added
 
 - **Fair economy + anti-gaming**: churn mint penalty; sealed **donate-to-pool** with equitable redistribute (`POST /v1/account/donate`); ledger kinds `donate_pool` / `donate_receive`; relational pay-table tests
-- **GPU claim integrity**: cluster tests that unverified claims do not inflate placement/mint capacity; progressive challenge unlock / fail halve
+- **GPU claim integrity**: `capacity_matrix` + farm-claim tests; progressive challenge credit / fail halve; expired challenges → fail
 - **Decentral discovery Phase A/B**: agent peer listen + `PeerAlive` gossip; `BlobLocate.multiaddrs`; direct peer BlobWant/BlobChunk (`peer_net`); `GET /v1/mesh/peers`; status `mesh_peers` — [docs/design/decentral-discovery-v0.md](docs/design/decentral-discovery-v0.md)
 - **Decentral Phase C**: `joule-dht` (peer/blob keys, XOR distance, bootstrap.json); control DHT mirror; agent **LocalMesh** + P2P PeerAlive/BlobsHave on peer port; bootstrap dial announce; FetchDigests uses local DHT before control; `GET /v1/dht/keys`, `/v1/dht/get/{*key}`, `/v1/bootstrap`; example [docs/examples/bootstrap.json](docs/examples/bootstrap.json)
 - **Decentral Phase D start**: `RequestInfer` / `PlanAccept`; PeerAlive `mem_mib`/`throughput_class`; `plan_from_mesh_donors`; agent mesh PlanOffer; `GET /v1/mesh/plan`

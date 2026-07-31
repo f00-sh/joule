@@ -153,6 +153,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 let id = env.from.clone();
                 {
                     let mut g = app.state.write().await;
+                    // Placement uses **cluster verified** only — PeerAlive mem is claim/UI.
+                    let verified = g.cluster.verified_mem_mib(&id);
                     g.mesh.upsert(
                         id.clone(),
                         multiaddrs.clone(),
@@ -160,6 +162,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                         healthy,
                         blob_count,
                         mem_mib,
+                        verified,
                         throughput_class,
                     );
                     // Phase C: mirror into DHT peer/<id> (seq = wall ms for LWW).
@@ -524,7 +527,7 @@ pub async fn dispatch_infer(
 pub async fn mesh_donors_ready(app: &App) -> bool {
     let donors = {
         let g = app.state.read().await;
-        g.mesh.plan_donors()
+        g.mesh_plan_donors()
     };
     if donors.is_empty() {
         return false;
@@ -557,14 +560,13 @@ pub async fn dispatch_mesh_infer(
         app.routes.lock().await.keys().cloned().collect();
     let donors: Vec<(NodeId, u32)> = {
         let g = app.state.read().await;
-        g.mesh
-            .plan_donors()
+        g.mesh_plan_donors()
             .into_iter()
             .filter(|(id, _)| connected.contains(id))
             .collect()
     };
     if donors.is_empty() {
-        return Err("mesh has no connected donors with mem_mib".into());
+        return Err("mesh has no connected donors with verified capacity".into());
     }
 
     let plan = joule_cluster::plan_from_mesh_donors(&donors).map_err(|e| e.to_string())?;
@@ -971,8 +973,9 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
 
 /// Agent-side challenge handler.
 ///
-/// Answers with the **protocol stub expected text** (exact-match anti-cheat), not
-/// free-form tensor decode — so ModelLoaded cannot unlock VRAM with garbage.
+/// Returns **only** `engine.infer(...).text` — never a hardcoded answer key.
+/// Control exact-matches against its oracle; a zero-GPU / formula-only agent
+/// without a real engine that produces the expected output cannot unlock claim.
 pub async fn agent_handle_challenge(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
     match &env.msg {
         Message::Challenge {
@@ -998,22 +1001,21 @@ pub async fn agent_handle_challenge(env: &Envelope, engine: &impl Engine) -> Res
                 pool_mem_mib: 0,
                 model_layers: 1,
             };
-            // Still exercise engine path (liveness) but return protocol expected text.
-            let _ = engine.load_plan(&plan).await;
-            let _ = engine
+            engine.load_plan(&plan).await.context("challenge load_plan")?;
+            let out = engine
                 .infer(InferRequest {
                     model: model.clone(),
                     prompt: prompt.clone(),
                     max_tokens: 64,
                 })
-                .await;
-            let completion = StubEngine::expected_text(model, prompt);
+                .await
+                .context("challenge infer")?;
             let latency_ms = started.elapsed().as_millis() as u32;
             Ok(Envelope::new(
                 env.from.clone(),
                 Message::ChallengeResult {
                     challenge_id: *challenge_id,
-                    completion,
+                    completion: out.text,
                     latency_ms,
                 },
             ))

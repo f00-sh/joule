@@ -312,6 +312,26 @@ impl ControlState {
         }
     }
 
+    /// Mesh PlanOffer donors: healthy mesh peers with **cluster verified** capacity only.
+    /// PeerAlive claim is never used for geometry.
+    pub fn mesh_plan_donors(&self) -> Vec<(NodeId, u32)> {
+        let mut v: Vec<(NodeId, u32)> = self
+            .mesh
+            .list()
+            .into_iter()
+            .filter(|p| p.healthy)
+            .filter_map(|p| {
+                let verified = self.cluster.verified_mem_mib(&p.node);
+                if joule_cluster::placement_mem_mib(verified) == 0 {
+                    return None;
+                }
+                Some((p.node, joule_cluster::economic_mem_mib(verified)))
+            })
+            .collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_string().cmp(&b.0.to_string())));
+        v
+    }
+
     /// Eligible accounts for pool donation redistrib (currently online with verified mem).
     pub fn donation_recipients(&self, exclude: &str) -> Vec<String> {
         let mut set = std::collections::BTreeSet::new();
@@ -956,11 +976,9 @@ mod challenge_integrity_tests {
     fn wrong_completion_fails_even_if_model_loaded() {
         let mut state = ControlState::new();
         let (id, account) = register_claimed(&mut state, 24_576);
-        // Pretend three passes already unlocked full claim
-        for _ in 0..3 {
-            state.cluster.record_challenge_ok(&id);
-        }
-        assert_eq!(state.cluster.verified_mem_mib(&id), 24_576);
+        // Attested mid capacity (not free full claim).
+        state.cluster.set_verified_mem_mib(&id, 4096);
+        assert_eq!(state.cluster.verified_mem_mib(&id), 4096);
         state.nodes_model_loaded.insert(id.clone());
         state.sync_best_mem_for_account(&account);
 
@@ -982,7 +1000,7 @@ mod challenge_integrity_tests {
             .unwrap();
         assert!(!ok);
         let v = state.cluster.verified_mem_mib(&id);
-        assert!(v < 24_576, "fail must reduce verified, got {v}");
+        assert!(v < 4096, "fail must reduce verified, got {v}");
         state.sync_best_mem_for_account(&account);
         assert_eq!(
             state.account_economy.get(&account).unwrap().best_mem_mib,
@@ -990,7 +1008,7 @@ mod challenge_integrity_tests {
             "best_mem must track reduced verified"
         );
         let fair = state.fairness_for(&account);
-        assert_eq!(fair.mem_mib, v.max(256));
+        assert_eq!(fair.mem_mib, joule_cluster::economic_mem_mib(v));
         let mint = score_mint(EconomyEvent::Heartbeat, fair);
         let mint_full = score_mint(
             EconomyEvent::Heartbeat,
@@ -1013,10 +1031,8 @@ mod challenge_integrity_tests {
     fn expired_challenge_records_fail_and_reduces_verified() {
         let mut state = ControlState::new();
         let (id, account) = register_claimed(&mut state, 16_384);
-        for _ in 0..3 {
-            state.cluster.record_challenge_ok(&id);
-        }
-        assert_eq!(state.cluster.verified_mem_mib(&id), 16_384);
+        state.cluster.set_verified_mem_mib(&id, 4096);
+        assert_eq!(state.cluster.verified_mem_mib(&id), 4096);
         state.sync_best_mem_for_account(&account);
 
         let challenge_id = Uuid::new_v4();
@@ -1064,7 +1080,7 @@ mod challenge_integrity_tests {
     }
 
     #[test]
-    fn exact_match_challenge_raises_verified() {
+    fn exact_match_challenge_raises_verified_by_credit_only() {
         let mut state = ControlState::new();
         let (id, account) = register_claimed(&mut state, 8192);
         let challenge_id = Uuid::new_v4();
@@ -1084,7 +1100,180 @@ mod challenge_integrity_tests {
             .settle_challenge_result(challenge_id, expected, &id)
             .unwrap();
         assert!(ok);
-        assert!(state.cluster.verified_mem_mib(&id) > 0);
-        assert!(state.account_economy.get(&account).unwrap().best_mem_mib > 0);
+        // One ok = CHALLENGE_CREDIT_MIB, never full claim
+        assert_eq!(
+            state.cluster.verified_mem_mib(&id),
+            joule_cluster::CHALLENGE_CREDIT_MIB
+        );
+        assert!(state.cluster.verified_mem_mib(&id) < 8192);
+        assert_eq!(
+            state.account_economy.get(&account).unwrap().best_mem_mib,
+            joule_cluster::CHALLENGE_CREDIT_MIB
+        );
+    }
+
+    /// Formula-only / public-stub-echo cannot unlock arbitrary claim: after one
+    /// honest pass only CHALLENGE_CREDIT_MIB is verified; mesh plan_donors uses
+    /// that, not claim; mint factor tracks verified not claim.
+    #[test]
+    fn capacity_matrix_claim_verified_states() {
+        let claim = 24_576u32;
+        let mut state = ControlState::new();
+        let (id, account) = register_claimed(&mut state, claim);
+
+        // --- verified = 0 ---
+        assert_eq!(state.cluster.verified_mem_mib(&id), 0);
+        let fair0 = state.fairness_for(&account);
+        // Mint floor only (economic); never placement weight from claim.
+        assert_eq!(fair0.mem_mib, joule_cluster::economic_mem_mib(0));
+        assert!(
+            state.cluster.plan_full_pool().is_err(),
+            "claim-only must not form placement plan"
+        );
+        // PeerAlive claim without verified → mesh excludes
+        state.mesh.upsert(
+            id.clone(),
+            vec!["tcp://10.0.0.1:1".into()],
+            0.1,
+            true,
+            0,
+            claim,
+            0,
+            40,
+        );
+        assert!(
+            state.mesh.plan_donors().is_empty(),
+            "claim-only must not enter mesh plan_donors"
+        );
+        assert!(
+            state.mesh_plan_donors().is_empty(),
+            "mesh_plan_donors must read cluster verified, not claim"
+        );
+
+        // --- mid verified ---
+        state.cluster.set_verified_mem_mib(&id, 4096);
+        state.mesh.upsert(
+            id.clone(),
+            vec!["tcp://10.0.0.1:1".into()],
+            0.1,
+            true,
+            0,
+            claim,
+            4096,
+            40,
+        );
+        let fair_mid = state.fairness_for(&account);
+        assert_eq!(fair_mid.mem_mib, 4096);
+        let plan_mid = state.cluster.plan_full_pool().unwrap();
+        assert_eq!(plan_mid.pool_mem_mib, 4096);
+        let donors_mid = state.mesh.plan_donors();
+        assert_eq!(donors_mid.len(), 1);
+        assert_eq!(donors_mid[0].1, 4096);
+        let mesh_plan = joule_cluster::plan_from_mesh_donors(&donors_mid).unwrap();
+        assert_eq!(mesh_plan.pool_mem_mib, 4096);
+
+        // --- post-fail half ---
+        state.cluster.on_challenge_result(&id, false);
+        let half = state.cluster.verified_mem_mib(&id);
+        assert_eq!(half, 2048);
+        state.mesh.upsert(
+            id.clone(),
+            vec!["tcp://10.0.0.1:1".into()],
+            0.1,
+            true,
+            0,
+            claim,
+            half,
+            40,
+        );
+        let fair_half = state.fairness_for(&account);
+        assert_eq!(fair_half.mem_mib, half);
+        assert_eq!(
+            state.cluster.plan_full_pool().unwrap().pool_mem_mib,
+            u64::from(half)
+        );
+        assert_eq!(state.mesh_plan_donors()[0].1, half);
+
+        // mint at half < mint at claim
+        let m_half = score_mint(EconomyEvent::Heartbeat, fair_half);
+        let m_claim = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: claim,
+                ..Default::default()
+            },
+        );
+        assert!(m_half.total_mj < m_claim.total_mj);
+    }
+
+    /// Public stub answer-key alone cannot free-unlock a farm: many successes
+    /// still cap at N * CHALLENGE_CREDIT_MIB.
+    #[test]
+    fn stub_echo_cannot_unlock_full_farm_claim() {
+        let mut state = ControlState::new();
+        let claim = 65_536u32;
+        let (id, _account) = register_claimed(&mut state, claim);
+        for _ in 0..10 {
+            state.cluster.record_challenge_ok(&id);
+        }
+        let v = state.cluster.verified_mem_mib(&id);
+        assert!(v < claim);
+        assert_eq!(v, joule_cluster::CHALLENGE_CREDIT_MIB * 10);
+        // Mesh plan uses cluster verified via mesh_plan_donors
+        state.mesh.upsert(
+            id.clone(),
+            vec![],
+            0.0,
+            true,
+            0,
+            claim,
+            0, // stale claim-only mesh entry
+            0,
+        );
+        let donors = state.mesh_plan_donors();
+        assert_eq!(donors.len(), 1);
+        assert_eq!(donors[0].1, joule_cluster::economic_mem_mib(v));
+    }
+
+    #[tokio::test]
+    async fn agent_challenge_returns_engine_infer_not_hardcoded_key() {
+        use crate::agent_handle_challenge;
+        use joule_proto::{Envelope, Message};
+        // Handler must call engine.load_plan + engine.infer and return out.text only.
+        // StubEngine produces a deterministic body; any hardcoded alternate would fail.
+        let engine = StubEngine::new();
+        let id = NodeId::new();
+        let prompt = "joule-challenge:unique-nonce-9f3a";
+        let env = Envelope::new(
+            id.clone(),
+            Message::Challenge {
+                challenge_id: Uuid::new_v4(),
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+            },
+        );
+        let reply = agent_handle_challenge(&env, &engine)
+            .await
+            .expect("challenge");
+        match reply.msg {
+            Message::ChallengeResult { completion, .. } => {
+                assert_eq!(
+                    completion,
+                    StubEngine::expected_text(CLUSTER_MODEL, prompt),
+                    "must be engine.infer text after load_plan"
+                );
+                assert!(
+                    completion.contains(prompt),
+                    "completion must include the challenge prompt"
+                );
+                assert!(
+                    !completion.eq_ignore_ascii_case("ok")
+                        && !completion.contains("5070")
+                        && !completion.contains("farm"),
+                    "must not return a trivial hardcoded unlock phrase"
+                );
+            }
+            other => panic!("expected ChallengeResult, got {other:?}"),
+        }
     }
 }

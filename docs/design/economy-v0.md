@@ -29,6 +29,20 @@ There is **no cash path** on the public pool. You mint mJ by donating healthy co
 7. **Donate.** Optional sealed donation: burn mJ from a rich account; redistribute **equally** among eligible pool participants (deterministic, conserved).
 8. **Auditable.** Every mint/burn/donate reason string embeds `eco=v0` and all basis-point factors. Same inputs ⇒ same outputs (pure functions, integer math).
 
+### Capacity API invariant (CRITICAL)
+
+| Function | Input | Unverified (`verified=0`) | Used for |
+|---|---|---|---|
+| `placement_mem_mib(v)` | verified only | **0** (excluded) | plan geometry, stream slots, mesh plan_donors |
+| `economic_mem_mib(v)` | verified only | floor **256 MiB** crumb | mint factors only (never claim) |
+| PeerAlive `mem_mib` | self-report | claim | UI / display only |
+
+- Join starts `verified_mem_mib = 0` regardless of claim.
+- Each successful challenge credits at most **`CHALLENGE_CREDIT_MIB` (1024)** toward claim — **never** free full-claim unlock after N stub answers.
+- Fail **halves** verified. Expired unanswered challenges count as fails.
+- Agent challenge path returns **only** `engine.infer().text` (no hardcoded answer key).
+- Mesh `mesh_plan_donors()` always re-reads **cluster verified**, not PeerAlive claim.
+
 ---
 
 ## 3. Formulas (basis points: 10 000 = 1.0×)
@@ -154,9 +168,13 @@ Persisted in `state.json` (snapshot v2).
 | Always-on small node vs bursty big node | Tenure boost rewards reliability |
 | API-only freeloaders | Must donate to get a live key; leecher mult if consume ≫ contribute |
 | Gaming uptime without work | Heartbeat base is small; shards/challenges pay more; spot challenges punish liars |
+| Fake 5070 / farm claim | Placement/slots ignore claim; challenge credit capped; exact-match oracle |
 | Hidden admin knobs | Constants + pure functions in-repo; reasons dump every factor |
+| Frequent dropouts | Churn bp; continuous tenure reset on offline |
 
-Not a blockchain. Settlement is the control-plane ledger. Honesty relies on challenges + open source of the scoring code.
+**Honest limit:** without TEE/GPU attestation silicon, “1000% proof of silicon” is impossible. The protocol makes unverified claims **worthless** for economy and placement, and challenges non-forgeable via public answer keys (exact match + engine path only).
+
+Not a blockchain. Settlement is the sealed hash-chained ledger. Honesty relies on challenges + open source of the scoring code + optional operator GPG/ed25519 bus.
 
 ---
 

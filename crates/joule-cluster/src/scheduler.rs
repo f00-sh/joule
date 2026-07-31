@@ -78,8 +78,13 @@ pub fn max_streams(node: &Node) -> u32 {
     if node.load >= 0.95 {
         return 0;
     }
-    // Share of global streams scales with **verified** VRAM (claims cannot inflate slots).
-    let eff = u64::from(node.verified_mem_mib.max(256));
+    // Unverified claim = zero slots (cannot fake a farm into the schedule).
+    let place = crate::placement_mem_mib(node.verified_mem_mib);
+    if place == 0 {
+        return 0;
+    }
+    // Share of global streams scales with **verified** VRAM only.
+    let eff = u64::from(crate::economic_mem_mib(place));
     let by_mem = (eff / (STREAM_BUDGET_MIB / 4).max(1)).max(1) as u32;
     let cap = match node.caps.device {
         joule_proto::DeviceClass::Gpu => by_mem.min(8),
@@ -133,7 +138,12 @@ impl Cluster {
     ///
     /// Example: 8+16+16+16+16 GiB → five shards sized ~8/72, 16/72, … of layers.
     pub fn plan_sharded_pool(&self) -> Result<ClusterPlan, crate::ClusterError> {
-        let mut donors: Vec<&Node> = self.eligible();
+        // Placement requires verified > 0 — claim-only peers never enter the logical GPU.
+        let mut donors: Vec<&Node> = self
+            .eligible()
+            .into_iter()
+            .filter(|n| crate::placement_mem_mib(n.verified_mem_mib) > 0)
+            .collect();
         if donors.is_empty() {
             return Err(crate::ClusterError::NoEligibleNodes(
                 CLUSTER_MODEL.to_string(),
@@ -141,16 +151,15 @@ impl Cluster {
         }
         // Stable order: largest **verified** VRAM first (claims cannot buy priority).
         donors.sort_by(|a, b| {
-            b.verified_mem_mib
-                .max(256)
-                .cmp(&a.verified_mem_mib.max(256))
+            crate::placement_mem_mib(b.verified_mem_mib)
+                .cmp(&crate::placement_mem_mib(a.verified_mem_mib))
                 .then_with(|| a.id.0.cmp(&b.id.0))
         });
 
-        // Self-govern: weight by verified mem (claims cannot inflate the logical GPU).
+        // Self-govern: weight by verified placement only (claims cannot inflate geometry).
         let pool_mem: u64 = donors
             .iter()
-            .map(|n| u64::from(n.verified_mem_mib.max(256)))
+            .map(|n| u64::from(crate::placement_mem_mib(n.verified_mem_mib)))
             .sum();
         if pool_mem == 0 {
             return Err(crate::ClusterError::NoEligibleNodes(
@@ -164,7 +173,7 @@ impl Cluster {
         let mut ppm_acc = 0u32;
 
         for (i, n) in donors.iter().enumerate() {
-            let eff = n.verified_mem_mib.max(256);
+            let eff = crate::placement_mem_mib(n.verified_mem_mib);
             let mem = u64::from(eff);
             let mut ppm = ((mem * 1_000_000) / pool_mem) as u32;
             let is_last = i + 1 == donors.len();
@@ -215,7 +224,7 @@ impl Cluster {
         let pool_mem = plan.as_ref().map(|p| p.pool_mem_mib).unwrap_or_else(|| {
             self.eligible()
                 .iter()
-                .map(|n| u64::from(n.verified_mem_mib.max(256)))
+                .map(|n| u64::from(crate::placement_mem_mib(n.verified_mem_mib)))
                 .sum()
         });
         let stream_total = pool_max_streams(pool_mem);
@@ -385,7 +394,10 @@ impl Cluster {
             free_stream_slots(b)
                 .cmp(&free_stream_slots(a))
                 .then(a.inflight.cmp(&b.inflight))
-                .then(b.caps.mem_mib.cmp(&a.caps.mem_mib))
+                .then(
+                    crate::placement_mem_mib(b.verified_mem_mib)
+                        .cmp(&crate::placement_mem_mib(a.verified_mem_mib)),
+                )
         });
         eligible.into_iter().map(|n| n.id.clone()).collect()
     }
@@ -450,6 +462,7 @@ mod tests {
         add(&mut c, 16384);
         add(&mut c, 16384);
         add(&mut c, 16384);
+        c.trust_all_claims_for_tests();
         let total = 8192 + 16384 * 4;
         let max = pool_max_streams(total);
         assert!(max >= 1);

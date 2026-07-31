@@ -274,18 +274,18 @@ async fn mesh_request_infer_chat_multi_donor() {
         g.cluster.trust_all_claims_for_tests();
     }
 
-    // Mesh plan geometry from PeerAlive mem (not only cluster registry).
+    // Mesh plan geometry from **cluster verified** (PeerAlive claim alone is never enough).
     assert!(
         joule_control::mesh_donors_ready(&app).await,
-        "mesh donors with mem_mib must be ready"
+        "mesh donors with verified capacity must be ready"
     );
     let donors = {
         let g = app.state.read().await;
-        g.mesh.plan_donors()
+        g.mesh_plan_donors()
     };
     assert!(
         donors.len() >= 2,
-        "need ≥2 mesh donors, got {}",
+        "need ≥2 mesh plan donors (verified), got {}",
         donors.len()
     );
     let mesh_plan = joule_cluster::plan_from_mesh_donors(&donors).expect("mesh plan");

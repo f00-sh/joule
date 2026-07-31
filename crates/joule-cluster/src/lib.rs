@@ -20,6 +20,32 @@ pub use scheduler::{
     ComputeState, NodeSchedule, SchedulerSnapshot, DEFAULT_MODEL_LAYERS, STREAM_BUDGET_MIB,
 };
 
+/// Floor used only when a path must assign a nonzero crumb of capacity after
+/// verification has begun. Unverified (0) stays 0 for eligibility gates.
+pub const VERIFIED_MEM_FLOOR_MIB: u32 = 256;
+
+/// MiB credited per successful lab challenge (not a free ramp to full claim).
+pub const CHALLENGE_CREDIT_MIB: u32 = 1024;
+
+/// **Economic** capacity from verified only. Claim is never a parameter.
+/// Used for mint factors, fairness, donate eligibility.
+pub fn economic_mem_mib(verified_mem_mib: u32) -> u32 {
+    if verified_mem_mib == 0 {
+        // Unverified: floor crumb so brand-new honest nodes still mint ≥1 mJ
+        // once they join, without treating claim as real. Protocol still
+        // refuses claim-sized factors until challenges raise verified.
+        VERIFIED_MEM_FLOOR_MIB
+    } else {
+        verified_mem_mib.max(VERIFIED_MEM_FLOOR_MIB)
+    }
+}
+
+/// **Placement** weight from verified only. Claim is never a parameter.
+/// Returns 0 when unverified so claim-only peers are excluded from weighted plans.
+pub fn placement_mem_mib(verified_mem_mib: u32) -> u32 {
+    verified_mem_mib
+}
+
 use joule_proto::{
     ClusterCapacity, ClusterPlan, DeviceClass, LogicalDevice, NodeCaps, NodeId, CLUSTER_MODEL,
     CLUSTER_MODEL_LABEL,
@@ -83,7 +109,7 @@ pub struct Node {
     pub claimed_mem_mib: u32,
     /// Protocol-trusted VRAM after challenges (self-govern). Starts 0.
     pub verified_mem_mib: u32,
-    /// Consecutive challenge passes (unlock full claim).
+    /// Consecutive challenge passes (audit only — never free full-claim unlock).
     pub challenge_streak: u32,
 }
 
@@ -150,25 +176,28 @@ impl Cluster {
     }
 
     /// Record challenge outcome → adjust verified capacity (self-govern).
+    ///
+    /// Success credits at most [`CHALLENGE_CREDIT_MIB`] toward claim — **never**
+    /// free full-claim unlock after N stub answers. Fail halves verified.
     pub fn on_challenge_result(&mut self, id: &NodeId, ok: bool) {
         let Some(n) = self.nodes.get_mut(id) else {
             return;
         };
         if ok {
             n.challenge_streak = n.challenge_streak.saturating_add(1);
-            // Progressive unlock toward claim.
-            let step = (n.claimed_mem_mib / 4).max(1024);
-            let raised = n
-                .verified_mem_mib
-                .saturating_add(step)
-                .min(n.claimed_mem_mib);
-            n.verified_mem_mib = raised;
-            if n.challenge_streak >= 3 {
-                n.verified_mem_mib = n.claimed_mem_mib;
-            }
+            let room = n.claimed_mem_mib.saturating_sub(n.verified_mem_mib);
+            let credit = CHALLENGE_CREDIT_MIB.min(room);
+            n.verified_mem_mib = n.verified_mem_mib.saturating_add(credit);
         } else {
             n.challenge_streak = 0;
             n.verified_mem_mib /= 2;
+        }
+    }
+
+    /// Explicit set of verified capacity (ops / tests after real attestation).
+    pub fn set_verified_mem_mib(&mut self, id: &NodeId, verified: u32) {
+        if let Some(n) = self.nodes.get_mut(id) {
+            n.verified_mem_mib = verified.min(n.claimed_mem_mib);
         }
     }
 
@@ -447,10 +476,21 @@ pub fn plan_from_mesh_donors(donors: &[(NodeId, u32)]) -> Result<ClusterPlan, Cl
     if donors.is_empty() {
         return Err(ClusterError::NoEligibleNodes(CLUSTER_MODEL.to_string()));
     }
+    // Drop zero-placement (unverified) entries; never floor them into the plan.
     let mut donors: Vec<(NodeId, u32)> = donors
         .iter()
-        .map(|(id, m)| (id.clone(), (*m).max(256)))
+        .filter_map(|(id, m)| {
+            let place = placement_mem_mib(*m);
+            if place == 0 {
+                None
+            } else {
+                Some((id.clone(), place))
+            }
+        })
         .collect();
+    if donors.is_empty() {
+        return Err(ClusterError::NoEligibleNodes(CLUSTER_MODEL.to_string()));
+    }
     donors.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0 .0.cmp(&b.0 .0)));
 
     let pool_mem: u64 = donors.iter().map(|(_, m)| u64::from(*m)).sum();
@@ -552,6 +592,7 @@ mod tests {
         let (b, cb) = node(16384, DeviceClass::Gpu);
         c.upsert_node(a.clone(), "alice", ca);
         c.upsert_node(b.clone(), "bob", cb);
+        c.trust_all_claims_for_tests();
         for _ in 0..5 {
             c.record_challenge_fail(&a);
         }
@@ -596,20 +637,28 @@ mod tests {
         c.upsert_node(id.clone(), "faker", caps);
         assert_eq!(c.verified_mem_mib(&id), 0, "join must start unverified");
         assert_eq!(c.verified_pool_vram_mib(), 0);
-        // Placement uses verified floor (256) not claim — never 24 GiB until challenges pass.
-        let plan = c.plan_full_pool().unwrap();
-        assert_eq!(plan.pool_mem_mib, 256, "unverified plan must not use claim");
-        assert!(plan.pool_mem_mib < 24_576);
-        // After one ok challenge, partial unlock — still not full claim until streak.
+        // Placement excludes unverified entirely (claim never enters the logical GPU).
+        assert!(
+            c.plan_full_pool().is_err(),
+            "claim-only node must not form a pool plan"
+        );
+        assert_eq!(placement_mem_mib(0), 0);
+        assert_eq!(max_streams(c.get(&id).unwrap()), 0);
+        // After one ok challenge, only CHALLENGE_CREDIT_MIB — never free full claim.
         c.on_challenge_result(&id, true);
         let v1 = c.verified_mem_mib(&id);
-        assert!(v1 > 0 && v1 < 24_576, "progressive unlock v1={v1}");
-        let plan2 = c.plan_full_pool().unwrap();
-        assert_eq!(plan2.pool_mem_mib, u64::from(v1.max(256)));
+        assert_eq!(v1, CHALLENGE_CREDIT_MIB);
+        assert!(v1 < 24_576, "must not unlock full claim on one ok");
+        // Three oks still not full claim for a 24 GiB card.
+        c.on_challenge_result(&id, true);
+        c.on_challenge_result(&id, true);
+        assert!(c.verified_mem_mib(&id) < 24_576);
+        assert!(c.verified_mem_mib(&id) <= CHALLENGE_CREDIT_MIB * 3);
         // Fail halves trust.
+        let before_fail = c.verified_mem_mib(&id);
         c.on_challenge_result(&id, false);
         let v_fail = c.verified_mem_mib(&id);
-        assert!(v_fail < v1, "fail must reduce verified");
+        assert!(v_fail < before_fail, "fail must reduce verified");
     }
 
     #[test]
@@ -620,10 +669,35 @@ mod tests {
         c.upsert_node(id.clone(), "a", caps);
         assert_eq!(c.verified_mem_mib(&id), 0);
         assert_eq!(c.get(&id).unwrap().claimed_mem_mib, claim);
-        // Three successful challenges unlock full claim.
+        // Many stub challenges cannot freely unlock full farm without real credit path.
         for _ in 0..3 {
             c.on_challenge_result(&id, true);
         }
-        assert_eq!(c.verified_mem_mib(&id), claim);
+        assert!(
+            c.verified_mem_mib(&id) < claim,
+            "3 challenges must not equal full claim"
+        );
+        assert_eq!(c.verified_mem_mib(&id), CHALLENGE_CREDIT_MIB * 3);
+    }
+
+    #[test]
+    fn capacity_api_never_takes_claim() {
+        assert_eq!(placement_mem_mib(0), 0);
+        assert_eq!(economic_mem_mib(0), VERIFIED_MEM_FLOOR_MIB);
+        assert_eq!(placement_mem_mib(8192), 8192);
+        assert_eq!(economic_mem_mib(8192), 8192);
+    }
+
+    #[test]
+    fn rank_schedulable_prefers_verified_not_claim() {
+        let mut c = Cluster::default();
+        let (low_claim_high_v, caps_a) = node(4096, DeviceClass::Gpu);
+        let (high_claim_low_v, caps_b) = node(65_536, DeviceClass::Gpu);
+        c.upsert_node(low_claim_high_v.clone(), "a", caps_a);
+        c.upsert_node(high_claim_low_v.clone(), "b", caps_b);
+        c.set_verified_mem_mib(&low_claim_high_v, 4096);
+        c.set_verified_mem_mib(&high_claim_low_v, 1024);
+        let ranked = c.rank_schedulable();
+        assert_eq!(ranked[0], low_claim_high_v, "verified 4G must beat claim 64G/verified 1G");
     }
 }

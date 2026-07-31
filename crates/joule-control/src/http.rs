@@ -109,16 +109,17 @@ async fn mesh_peers(State(app): State<App>) -> impl IntoResponse {
             "healthy": p.healthy,
             "blob_count": p.blob_count,
             "mem_mib": p.mem_mib,
+            "verified_mem_mib": p.verified_mem_mib,
             "throughput_class": p.throughput_class,
         })).collect::<Vec<_>>(),
     }))
 }
 
-/// Phase D: PlanOffer geometry from mesh PeerAlive mem (not only cluster registry).
+/// Phase D: PlanOffer geometry from mesh **verified** mem (claims excluded).
 async fn mesh_plan(State(app): State<App>) -> impl IntoResponse {
     let g = app.state.read().await;
-    let donors = g.mesh.plan_donors();
-    // Fall back to cluster verified registry when mesh has no mem yet.
+    let donors = g.mesh_plan_donors();
+    // Fall back to cluster verified registry when mesh has no verified donors yet.
     let plan = if !donors.is_empty() {
         joule_cluster::plan_from_mesh_donors(&donors)
     } else {
