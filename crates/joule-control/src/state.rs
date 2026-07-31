@@ -247,7 +247,11 @@ impl ControlState {
     }
 
     /// Build fairness snapshot for scoring (refreshes continuous tenure clock).
+    ///
+    /// `mem_mib` is always the **current** max verified VRAM across this account's
+    /// nodes (synced from cluster) — never a sticky peak after challenge fail.
     pub fn fairness_for(&mut self, account: &str) -> FairnessSnapshot {
+        self.sync_best_mem_for_account(account);
         let eco = self.economy_mut(account);
         let continuous = match eco.online_since {
             Some(since) => eco
@@ -256,7 +260,7 @@ impl ControlState {
             None => eco.continuous_online_secs,
         };
         FairnessSnapshot {
-            // CRITICAL: best_mem_mib is verified-only (never raw GPU claim).
+            // CRITICAL: verified-only (never raw GPU claim).
             mem_mib: eco.best_mem_mib.max(256),
             continuous_online_secs: continuous,
             contributed_mj_window: eco.contributed_mj_window,
@@ -478,15 +482,43 @@ impl ControlState {
         self.nodes_model_loaded.retain(|id| alive.contains(id));
         let vram = self.cluster.capacity().mem_mib_healthy;
         self.record_vram_sample(vram);
-        // Expire old challenges.
+        // Expire old challenges as **fails** (do not silently drop — prevents
+        // fully unlocked claims from never decaying when agents stop answering).
         let now = Instant::now();
-        self.pending_challenges
-            .retain(|_, c| now.duration_since(c.started) < Duration::from_secs(60));
+        let expired: Vec<(Uuid, NodeId)> = self
+            .pending_challenges
+            .iter()
+            .filter(|(_, c)| now.duration_since(c.started) >= Duration::from_secs(60))
+            .map(|(id, c)| (*id, c.node.clone()))
+            .collect();
+        for (cid, node) in expired {
+            self.pending_challenges.remove(&cid);
+            self.cluster.record_challenge_fail(&node);
+            if let Some(account) = self.node_account.get(&node).cloned() {
+                self.sync_best_mem_for_account(&account);
+            }
+            self.mark_dirty();
+            warn!(%node, %cid, "challenge expired → fail (verified decay)");
+        }
         // Drop stuck control-relayed blob transfers (lab path).
         self.pending_blob_xfers
             .retain(|_, (_, _, started)| now.duration_since(*started) < Duration::from_secs(120));
         self.mesh.prune_stale(Duration::from_secs(180));
         self.save_if_dirty();
+    }
+
+    /// Recompute account best_mem from **current** cluster verified max (can decrease).
+    pub(crate) fn sync_best_mem_for_account(&mut self, account: &str) {
+        let best_v = self
+            .cluster
+            .nodes()
+            .filter(|n| n.account == account)
+            .map(|n| n.verified_mem_mib)
+            .max()
+            .unwrap_or(0);
+        if let Some(eco) = self.account_economy.get_mut(account) {
+            eco.best_mem_mib = best_v;
+        }
     }
 
     pub fn ensure_account(&mut self, account: &str) -> String {
@@ -538,17 +570,8 @@ impl ControlState {
             .unwrap_or_else(|| "unknown".into());
         let verified = self.cluster.verified_mem_mib(id);
         self.note_online(&account, verified, healthy);
-        // Refresh best verified across all this account's nodes.
-        let best_v = self
-            .cluster
-            .nodes()
-            .filter(|n| n.account == account)
-            .map(|n| n.verified_mem_mib)
-            .max()
-            .unwrap_or(verified);
-        if let Some(eco) = self.account_economy.get_mut(&account) {
-            eco.best_mem_mib = best_v;
-        }
+        // Refresh best verified from cluster (can decrease after challenge fail).
+        self.sync_best_mem_for_account(&account);
         if !healthy {
             self.mark_dirty();
             self.save_if_dirty();
@@ -682,6 +705,7 @@ impl ControlState {
             .cloned()
             .unwrap_or_else(|| "unknown".into());
         self.note_online(&worker_account, verified, true);
+        self.sync_best_mem_for_account(&worker_account);
         let fair = self.fairness_for(&worker_account);
         let breakdown = score_mint(
             EconomyEvent::Work {
@@ -868,21 +892,21 @@ impl ControlState {
         if pending.node != *from {
             // Wrong node answered.
             self.cluster.record_challenge_fail(&pending.node);
+            if let Some(account) = self.node_account.get(&pending.node).cloned() {
+                self.sync_best_mem_for_account(&account);
+            }
+            self.mark_dirty();
             return Some(false);
         }
-        // Stub-exact match (v0 challenge), or non-empty when this node has
-        // resident tensors (lab-tiny / future Kimi) whose decode is not stub-shaped.
-        let exact = completion.trim() == pending.expected.trim();
-        let tensor_ok = self.nodes_model_loaded.contains(from) && !completion.trim().is_empty();
-        let ok = exact || tensor_ok;
+        // Exact match only — self-asserted ModelLoaded + non-empty text must NOT
+        // pass wrong answers (anti fake-GPU / anti free unlock).
+        let ok = completion.trim() == pending.expected.trim();
         if ok {
             self.cluster.record_challenge_ok(from);
             if let Some(account) = self.node_account.get(from).cloned() {
                 let verified = self.cluster.verified_mem_mib(from);
                 self.note_online(&account, verified, true);
-                if let Some(eco) = self.account_economy.get_mut(&account) {
-                    eco.best_mem_mib = eco.best_mem_mib.max(verified);
-                }
+                self.sync_best_mem_for_account(&account);
                 let fair = self.fairness_for(&account);
                 let breakdown = score_mint(EconomyEvent::ChallengeOk, fair);
                 let reason =
@@ -899,8 +923,168 @@ impl ControlState {
             }
         } else {
             self.cluster.record_challenge_fail(from);
-            warn!(%from, "challenge failed");
+            if let Some(account) = self.node_account.get(from).cloned() {
+                self.sync_best_mem_for_account(&account);
+            }
+            self.mark_dirty();
+            warn!(%from, "challenge failed (exact match required)");
         }
         Some(ok)
+    }
+}
+
+#[cfg(test)]
+mod challenge_integrity_tests {
+    use super::*;
+    use joule_ledger::{mem_factor_bp, score_mint, EconomyEvent};
+    use joule_proto::{DeviceClass, NodeCaps};
+    use joule_runtime::StubEngine;
+    use std::time::Duration;
+
+    fn register_claimed(state: &mut ControlState, claim: u32) -> (NodeId, String) {
+        let id = NodeId::new();
+        let account = format!("acct-{}", &id.to_string()[..8]);
+        state.register_node(
+            id.clone(),
+            &account,
+            NodeCaps::for_cluster(DeviceClass::Gpu, claim, 40),
+        );
+        (id, account)
+    }
+
+    #[test]
+    fn wrong_completion_fails_even_if_model_loaded() {
+        let mut state = ControlState::new();
+        let (id, account) = register_claimed(&mut state, 24_576);
+        // Pretend three passes already unlocked full claim
+        for _ in 0..3 {
+            state.cluster.record_challenge_ok(&id);
+        }
+        assert_eq!(state.cluster.verified_mem_mib(&id), 24_576);
+        state.nodes_model_loaded.insert(id.clone());
+        state.sync_best_mem_for_account(&account);
+
+        let challenge_id = Uuid::new_v4();
+        let expected = StubEngine::expected_text(CLUSTER_MODEL, &format!("joule-challenge:{challenge_id}"));
+        state.pending_challenges.insert(
+            challenge_id,
+            PendingChallenge {
+                node: id.clone(),
+                model: CLUSTER_MODEL.into(),
+                prompt: format!("joule-challenge:{challenge_id}"),
+                expected: expected.clone(),
+                started: Instant::now(),
+            },
+        );
+        // Wrong answer + model_loaded must still fail
+        let ok = state
+            .settle_challenge_result(challenge_id, "I am a 5070 farm".into(), &id)
+            .unwrap();
+        assert!(!ok);
+        let v = state.cluster.verified_mem_mib(&id);
+        assert!(v < 24_576, "fail must reduce verified, got {v}");
+        state.sync_best_mem_for_account(&account);
+        assert_eq!(
+            state.account_economy.get(&account).unwrap().best_mem_mib,
+            v,
+            "best_mem must track reduced verified"
+        );
+        let fair = state.fairness_for(&account);
+        assert_eq!(fair.mem_mib, v.max(256));
+        let mint = score_mint(EconomyEvent::Heartbeat, fair);
+        let mint_full = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 24_576,
+                continuous_online_secs: fair.continuous_online_secs,
+                contributed_mj_window: fair.contributed_mj_window,
+                consumed_mj_window: fair.consumed_mj_window,
+                disconnects_window: fair.disconnects_window,
+            },
+        );
+        assert!(
+            mint.total_mj < mint_full.total_mj,
+            "mint after fail must be less than full-claim mint"
+        );
+        let _ = expected;
+    }
+
+    #[test]
+    fn expired_challenge_records_fail_and_reduces_verified() {
+        let mut state = ControlState::new();
+        let (id, account) = register_claimed(&mut state, 16_384);
+        for _ in 0..3 {
+            state.cluster.record_challenge_ok(&id);
+        }
+        assert_eq!(state.cluster.verified_mem_mib(&id), 16_384);
+        state.sync_best_mem_for_account(&account);
+
+        let challenge_id = Uuid::new_v4();
+        state.pending_challenges.insert(
+            challenge_id,
+            PendingChallenge {
+                node: id.clone(),
+                model: CLUSTER_MODEL.into(),
+                prompt: "joule-challenge:x".into(),
+                expected: "whatever".into(),
+                started: Instant::now() - Duration::from_secs(120), // expired
+            },
+        );
+        let before = state.cluster.verified_mem_mib(&id);
+        state.prune();
+        assert!(
+            !state.pending_challenges.contains_key(&challenge_id),
+            "expired challenge removed"
+        );
+        let after = state.cluster.verified_mem_mib(&id);
+        assert!(after < before, "expiry fail must decay verified {before}->{after}");
+        assert_eq!(
+            state.account_economy.get(&account).unwrap().best_mem_mib,
+            after
+        );
+    }
+
+    #[test]
+    fn claim_only_join_mint_uses_floor_not_claim() {
+        let mut state = ControlState::new();
+        let (id, account) = register_claimed(&mut state, 65_536);
+        assert_eq!(state.cluster.verified_mem_mib(&id), 0);
+        let fair = state.fairness_for(&account);
+        assert_eq!(fair.mem_mib, 256, "unverified join must floor mem for economy");
+        assert!(mem_factor_bp(fair.mem_mib) < mem_factor_bp(65_536));
+        let mint = score_mint(EconomyEvent::Heartbeat, fair);
+        let mint_fake = score_mint(
+            EconomyEvent::Heartbeat,
+            FairnessSnapshot {
+                mem_mib: 65_536,
+                ..Default::default()
+            },
+        );
+        assert!(mint.total_mj < mint_fake.total_mj);
+    }
+
+    #[test]
+    fn exact_match_challenge_raises_verified() {
+        let mut state = ControlState::new();
+        let (id, account) = register_claimed(&mut state, 8192);
+        let challenge_id = Uuid::new_v4();
+        let prompt = format!("joule-challenge:{challenge_id}");
+        let expected = StubEngine::expected_text(CLUSTER_MODEL, &prompt);
+        state.pending_challenges.insert(
+            challenge_id,
+            PendingChallenge {
+                node: id.clone(),
+                model: CLUSTER_MODEL.into(),
+                prompt,
+                expected: expected.clone(),
+                started: Instant::now(),
+            },
+        );
+        let ok = state
+            .settle_challenge_result(challenge_id, expected, &id)
+            .unwrap();
+        assert!(ok);
+        assert!(state.cluster.verified_mem_mib(&id) > 0);
+        assert!(state.account_economy.get(&account).unwrap().best_mem_mib > 0);
     }
 }

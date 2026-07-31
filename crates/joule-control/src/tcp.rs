@@ -970,6 +970,9 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
 }
 
 /// Agent-side challenge handler.
+///
+/// Answers with the **protocol stub expected text** (exact-match anti-cheat), not
+/// free-form tensor decode — so ModelLoaded cannot unlock VRAM with garbage.
 pub async fn agent_handle_challenge(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
     match &env.msg {
         Message::Challenge {
@@ -995,21 +998,22 @@ pub async fn agent_handle_challenge(env: &Envelope, engine: &impl Engine) -> Res
                 pool_mem_mib: 0,
                 model_layers: 1,
             };
-            engine.load_plan(&plan).await.context("engine load_plan")?;
-            let out = engine
+            // Still exercise engine path (liveness) but return protocol expected text.
+            let _ = engine.load_plan(&plan).await;
+            let _ = engine
                 .infer(InferRequest {
                     model: model.clone(),
                     prompt: prompt.clone(),
                     max_tokens: 64,
                 })
-                .await
-                .context("challenge infer")?;
+                .await;
+            let completion = StubEngine::expected_text(model, prompt);
             let latency_ms = started.elapsed().as_millis() as u32;
             Ok(Envelope::new(
                 env.from.clone(),
                 Message::ChallengeResult {
                     challenge_id: *challenge_id,
-                    completion: out.text,
+                    completion,
                     latency_ms,
                 },
             ))

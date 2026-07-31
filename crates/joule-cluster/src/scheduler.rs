@@ -78,8 +78,9 @@ pub fn max_streams(node: &Node) -> u32 {
     if node.load >= 0.95 {
         return 0;
     }
-    // Share of global streams roughly scales with VRAM contribution.
-    let by_mem = (u64::from(node.caps.mem_mib) / (STREAM_BUDGET_MIB / 4).max(1)).max(1) as u32;
+    // Share of global streams scales with **verified** VRAM (claims cannot inflate slots).
+    let eff = u64::from(node.verified_mem_mib.max(256));
+    let by_mem = (eff / (STREAM_BUDGET_MIB / 4).max(1)).max(1) as u32;
     let cap = match node.caps.device {
         joule_proto::DeviceClass::Gpu => by_mem.min(8),
         joule_proto::DeviceClass::Metal => by_mem.min(6),
@@ -138,11 +139,11 @@ impl Cluster {
                 CLUSTER_MODEL.to_string(),
             ));
         }
-        // Stable order: largest VRAM first (typical pipeline: fat cards first).
+        // Stable order: largest **verified** VRAM first (claims cannot buy priority).
         donors.sort_by(|a, b| {
-            b.caps
-                .mem_mib
-                .cmp(&a.caps.mem_mib)
+            b.verified_mem_mib
+                .max(256)
+                .cmp(&a.verified_mem_mib.max(256))
                 .then_with(|| a.id.0.cmp(&b.id.0))
         });
 
