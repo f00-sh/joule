@@ -131,7 +131,14 @@ jobs:
           cp README.md LICENSE CHANGELOG.md "${STAGING}/" 2>/dev/null || true
           printf '%s\n' "${VER}" > "${STAGING}/VERSION"
           tar -C dist -czf "dist/${ASSET}" "${ASSET%.tar.gz}"
-          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256")
+          (
+            cd dist
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "${ASSET}" > "${ASSET}.sha256"
+            else
+              shasum -a 256 "${ASSET}" > "${ASSET}.sha256"
+            fi
+          )
           ls -la dist/
 
       - name: Package (windows)
