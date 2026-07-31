@@ -74,13 +74,14 @@
           <h3>macOS Apple Silicon</h3>
           <p class="muted">M1 / M2 / M3 / M4</p>
           <pre class="install-cmd"><code>curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh</code></pre>
-          <p class="muted">Homebrew (when tap published): <code>brew install f00-sh/tap/joule</code></p>
+          <p class="muted">Homebrew (live): <code>brew install f00-sh/tap/joule</code></p>
           <p><a class="btn ghost asset-link" data-match="darwin-aarch64" href="https://github.com/f00-sh/joule/releases/latest">Binary tarball</a></p>
         </article>
         <article class="platform-card" data-key="darwin-x86_64">
           <h3>macOS Intel</h3>
           <p class="muted">x86_64</p>
           <pre class="install-cmd"><code>curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh</code></pre>
+          <p class="muted">Homebrew (live): <code>brew install f00-sh/tap/joule</code></p>
           <p><a class="btn ghost asset-link" data-match="darwin-x86_64" href="https://github.com/f00-sh/joule/releases/latest">Binary tarball</a></p>
         </article>
         <article class="platform-card" data-key="windows-x86_64">
@@ -91,10 +92,11 @@
           <p><a class="btn ghost asset-link" data-match="windows-x86_64" href="https://github.com/f00-sh/joule/releases/latest">ZIP package</a></p>
         </article>
         <article class="platform-card" data-key="aur">
-          <h3>Arch Linux (AUR)</h3>
-          <p class="muted">After <code>joule-bin</code> is published</p>
-          <pre class="install-cmd"><code>yay -S joule-bin</code></pre>
-          <p class="muted">PKGBUILD lives in the repo under <code>packaging/aur/</code>.</p>
+          <h3>Arch Linux (f00 PKGBUILD)</h3>
+          <p class="muted">Published under f00-sh — clone and <code>makepkg -si</code> (not on aur.archlinux.org yet)</p>
+          <pre class="install-cmd"><code>git clone https://github.com/f00-sh/aur-joule-bin.git
+cd aur-joule-bin && makepkg -si</code></pre>
+          <p class="muted">Source: <a href="https://github.com/f00-sh/aur-joule-bin" rel="noopener">f00-sh/aur-joule-bin</a> · digests pin GitHub Releases.</p>
         </article>
       </div>
       <p id="release-meta" class="muted" style="margin-top:1rem">Latest release: loading…</p>

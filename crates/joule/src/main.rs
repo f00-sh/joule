@@ -623,8 +623,11 @@ async fn main() -> Result<()> {
             }
             if copy_code {
                 let (id, _) = identity::load_or_init(&id_path)?;
-                tray_app::copy_to_clipboard(id.code())?;
-                println!("CODE copied: {}", id.code());
+                identity::print_code_banner(&id, &id_path, false);
+                match tray_app::copy_to_clipboard(id.code()) {
+                    Ok(()) => println!("CODE copied to clipboard."),
+                    Err(e) => eprintln!("clipboard: {e} (code still printed above)"),
+                }
                 return Ok(());
             }
             if !enter_code.trim().is_empty() {

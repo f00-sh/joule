@@ -70,8 +70,10 @@ cargo run -p joule -- broadcast plan-chunks --chunks 12 --nodes 5
 
 ## Install channels
 
-- Curl from GitHub Releases: required (`scripts/install.sh`; installs man pages).
-- Package managers: **none yet** (do not document fake AUR/brew packages).
+- Curl from GitHub Releases: required (`scripts/install.sh`; installs man pages). Repo pin: **f00-sh/joule**.
+- Homebrew (live): `brew install f00-sh/tap/joule` — [f00-sh/homebrew-tap](https://github.com/f00-sh/homebrew-tap).
+- Arch (live f00 PKGBUILD): [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin) — `git clone` + `makepkg -si` (not necessarily on aur.archlinux.org).
+- Windows: `install.ps1` / ZIP from Releases (unsigned until cert).
 
 ## Releases
 
