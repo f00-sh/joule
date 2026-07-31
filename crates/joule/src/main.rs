@@ -24,7 +24,7 @@ use joule_proto::{
     NodeId, OperatorKind, SignedEnvelope, CLUSTER_MODEL,
 };
 use joule_runtime::{
-    apply_staged, load_model, match_target, parse_software_update, read_stage,
+    apply_staged, load_model, match_target, parse_software_update, prepare_and_install, read_stage,
     readiness_for_pool_ex, stage_blob, ClusterEngine, Engine, InferRequest, ManifestFile,
     RuntimeFlags, SoftwareTarget, StubEngine, WeightsStore,
 };
@@ -1482,6 +1482,7 @@ async fn run_agent(
                                         })
                                         .or_else(|| spec.pick_quant(mem_mib));
                                     if let Some(q) = quant {
+                                        // Prepare always (may arm while waiting for peer seeds).
                                         match store.prepare(spec, q) {
                                             Ok(st) => {
                                                 last_armed = st.armed;
@@ -1521,32 +1522,31 @@ async fn run_agent(
                                                         .write_all(&encode_line(&have)?)
                                                         .await?;
                                                 }
-                                                // Actual load into RAM when possible.
-                                                match load_model(&store, spec, q) {
-                                                    Ok(lm) => {
-                                                        let report = lm.report();
-                                                        println!("loaded: {}", report.message);
-                                                        engine.install_loaded(lm);
-                                                        let loaded = Envelope::new(
-                                                            node_id.clone(),
-                                                            Message::ModelLoaded {
-                                                                model: report.model,
-                                                                quant: report.quant,
-                                                                bytes_resident: report.bytes_resident,
-                                                                tensors: report.tensors as u32,
-                                                                message: report.message,
-                                                            },
-                                                        );
-                                                        writer
-                                                            .write_all(&encode_line(&loaded)?)
-                                                            .await?;
-                                                    }
-                                                    Err(e) => {
-                                                        info!(error = %e, "model load deferred")
-                                                    }
-                                                }
                                             }
                                             Err(e) => warn!(error = %e, "prepare failed"),
+                                        }
+                                        // Shared load path (same as peer-seed completion).
+                                        match prepare_and_install(&store, &engine, spec, q) {
+                                            Ok(report) => {
+                                                last_armed = true;
+                                                println!("loaded: {}", report.message);
+                                                let loaded = Envelope::new(
+                                                    node_id.clone(),
+                                                    Message::ModelLoaded {
+                                                        model: report.model,
+                                                        quant: report.quant,
+                                                        bytes_resident: report.bytes_resident,
+                                                        tensors: report.tensors as u32,
+                                                        message: report.message,
+                                                    },
+                                                );
+                                                writer
+                                                    .write_all(&encode_line(&loaded)?)
+                                                    .await?;
+                                            }
+                                            Err(e) => {
+                                                info!(error = %e, "model load deferred")
+                                            }
                                         }
                                     }
                                 }
@@ -1972,11 +1972,9 @@ async fn try_load_after_blob(
             );
             writer.write_all(&encode_line(&ok)?).await?;
             if st.files_complete {
-                match load_model(store, spec, q) {
-                    Ok(lm) => {
-                        let report = lm.report();
+                match prepare_and_install(store, engine, spec, q) {
+                    Ok(report) => {
                         println!("loaded after peer seed: {}", report.message);
-                        engine.install_loaded(lm);
                         let loaded = Envelope::new(
                             node_id.clone(),
                             Message::ModelLoaded {

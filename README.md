@@ -6,7 +6,7 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 
 | | |
 |---|---|
-| Status | **0.1.3** released (lab-tiny tensors; Kimi gated on pool) |
+| Status | **0.1.3** released (lab-tiny + lab-mid tensors; Kimi gated on pool) |
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |

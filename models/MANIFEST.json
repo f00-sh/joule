@@ -57,7 +57,7 @@
       ],
       "weights": {
         "published": true,
-        "note": "f00 does NOT host weights (website only). Content is sha256-addressed and peer-seeded. lab-tiny: repo:// from git checkout for developers. External URLs are optional hints (JOULE_ALLOW_EXTERNAL_FETCH=1). Full Kimi-K3 shards: seed from peers once someone has them.",
+        "note": "f00 does NOT host weights (website only). Content is sha256-addressed and peer-seeded. lab-tiny + lab-mid: repo:// fixtures from git for developers (lab-mid is the next multi-tensor class past lab-tiny). External URLs are optional hints (JOULE_ALLOW_EXTERNAL_FETCH=1). Full Kimi-K3 shards: seed from peers once someone has them.",
         "quants": [
           {
             "id": "lab-tiny",
@@ -69,6 +69,25 @@
                 "sha256": "b937cbc2c6def42c46579c6caab3b1a881b451994d6382d298d66d67f1549b24",
                 "url": "repo://models/fixtures/lab-tiny/model.safetensors",
                 "size_bytes": 32872
+              }
+            ]
+          },
+          {
+            "id": "lab-mid",
+            "min_node_vram_mib": 512,
+            "approx_file_mib": 1,
+            "files": [
+              {
+                "path": "model-00001-of-00002.safetensors",
+                "sha256": "94693b3dca415186b8ace995310b1682eec61e3c2dedf4d30efb4f073ed0b600",
+                "url": "repo://models/fixtures/lab-mid/model-00001-of-00002.safetensors",
+                "size_bytes": 327856
+              },
+              {
+                "path": "model-00002-of-00002.safetensors",
+                "sha256": "8abb0687fd79cedb4cc7728fada08b1a990b5ddd1f39d7a8b589b10e9591bf3d",
+                "url": "repo://models/fixtures/lab-mid/model-00002-of-00002.safetensors",
+                "size_bytes": 32856
               }
             ]
           },

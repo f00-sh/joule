@@ -154,17 +154,30 @@ impl ManifestFile {
 }
 
 impl ModelSpec {
-    /// Prefer the largest quant that fits **and has files listed** (downloadable).
-    /// Falls back to any fitting quant, then first quant.
+    /// Prefer the largest quant that fits **and has files listed** (by total `size_bytes`).
+    /// Among equal sizes, prefer more files. Falls back to any fitting quant, then first quant.
     pub fn pick_quant(&self, node_vram_mib: u32) -> Option<&QuantSpec> {
         let mut best_with_files: Option<&QuantSpec> = None;
+        let mut best_files_score: (u64, usize) = (0, 0);
         let mut best_any: Option<&QuantSpec> = None;
         for q in &self.weights.quants {
             if node_vram_mib < q.min_node_vram_mib {
                 continue;
             }
             best_any = Some(q);
-            if !q.files.is_empty() {
+            if q.files.is_empty() {
+                continue;
+            }
+            let bytes: u64 = q.files.iter().map(|f| f.size_bytes).sum();
+            let score = (bytes, q.files.len());
+            if best_with_files.is_none() || score > best_files_score {
+                // Skip multi-hundred-GB peer-only pins for auto-pick when smaller
+                // loadable fixtures exist (lab-tiny / lab-mid). Full K3 is explicit.
+                let peer_only = q.files.iter().all(|f| f.url.starts_with("peer://"));
+                if peer_only && best_with_files.is_some() {
+                    continue;
+                }
+                best_files_score = score;
                 best_with_files = Some(q);
             }
         }

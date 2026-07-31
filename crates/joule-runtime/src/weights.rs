@@ -542,6 +542,8 @@ mod tests {
         let spec = m.model("kimi-open").unwrap();
         let q = spec.pick_quant(8192).unwrap();
         assert!(!q.files.is_empty(), "got {}", q.id);
+        // Mid-class VRAM: largest loadable fixture (lab-mid), not empty/meta/K3 peer pins.
+        assert_eq!(q.id, "lab-mid", "got {}", q.id);
     }
 
     #[test]

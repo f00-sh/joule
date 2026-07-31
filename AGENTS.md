@@ -9,7 +9,7 @@
 | Domain | joule.f00.sh |
 | License | MIT |
 | Language | **Rust** (workspace; strict purity for first-party code) |
-| Status | 0.1.3 released (lab-tiny tensors; Kimi gated on pool) |
+| Status | 0.1.3 released (lab-tiny + lab-mid tensors; Kimi gated on pool) |
 
 **One-liner:** Distributed internet-wide supercomputer cluster — pool idle GPUs into open-weight AI inference (Kimi-class).
 

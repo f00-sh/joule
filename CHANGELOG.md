@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **lab-mid quant** — multi-file, multi-tensor fixture past lab-tiny (~360 KiB, 3 tensors, `repo://` peer-seedable); MANIFEST pin with honest digests
+- **`prepare_and_install`** shared agent path: prepare → load → `ClusterEngine::install` (Welcome/pool-ready + peer seed)
+- **pick_quant** prefers largest loadable fixture by size; skips multi-hundred-GB peer-only pins when smaller fixtures exist
+- Tests: `cluster_engine_lab_mid_infer_is_tensor_backed`, e2e `local_pool_lab_mid_tensor_infer`; seed script `scripts/seed-lab-mid.sh`
+
 ## [0.1.3] — 2026-07-31
 
 Connect path for external OpenAI-compatible apps + ship hygiene after v0.1.2.

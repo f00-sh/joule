@@ -21,6 +21,7 @@ pub use manifest::{
     InferenceMode, ManifestFile, MilestoneStatus, ModelReadiness, ModelSpec, QuantSpec,
     RuntimeFlags, EMBEDDED_MANIFEST,
 };
+// prepare_and_install is defined below next to ClusterEngine (crate root).
 pub use software::{
     apply_staged, current_arch, current_os, match_target, parse_software_update, read_stage,
     stage_blob, SoftwareTarget, SoftwareUpdateBody, StageStatus,
@@ -172,6 +173,27 @@ impl ClusterEngine {
     }
 }
 
+/// Shipped agent path: prepare a quant into the weight store, load tensors, install on engine.
+/// Used by `joule agent` after pool-ready / peer seed — not a test-only helper.
+pub fn prepare_and_install(
+    store: &WeightsStore,
+    engine: &ClusterEngine,
+    spec: &ModelSpec,
+    quant: &QuantSpec,
+) -> Result<LoadReport, String> {
+    let st = store.prepare(spec, quant)?;
+    if !st.files_complete {
+        return Err(format!(
+            "prepare incomplete for {}/{}: {}",
+            spec.id, quant.id, st.message
+        ));
+    }
+    let lm = load_model(store, spec, quant).map_err(|e| e.to_string())?;
+    let report = lm.report();
+    engine.install_loaded(lm);
+    Ok(report)
+}
+
 impl Default for ClusterEngine {
     fn default() -> Self {
         Self::new()
@@ -295,11 +317,29 @@ mod tests {
         assert!(r.can_load_model);
     }
 
+    fn demo_plan() -> ClusterPlan {
+        ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            shards: vec![ShardAssignment {
+                node: NodeId::new(),
+                role: ShardRole::Replica,
+                layer_start: Some(0),
+                layer_end: Some(0),
+                tp_rank: None,
+                tp_world: None,
+                mem_share_mib: 1024,
+                mem_fraction_ppm: 1_000_000,
+            }],
+            pool_mem_mib: 1024,
+            model_layers: 1,
+        }
+    }
+
     /// Shipped path: prepare lab-tiny → load_model → ClusterEngine::install_loaded → infer.
     /// Must be tensor-backed (`joule-tensor`), not stub echo.
     #[tokio::test]
     async fn cluster_engine_lab_tiny_infer_is_tensor_backed() {
-        use crate::load::load_model;
         use crate::manifest::ManifestFile;
         use crate::weights::WeightsStore;
         use std::fs;
@@ -319,32 +359,10 @@ mod tests {
             .iter()
             .find(|q| q.id == "lab-tiny")
             .expect("lab-tiny quant");
-        store.prepare(spec, quant).expect("prepare lab-tiny");
-        let loaded = load_model(&store, spec, quant).expect("load lab-tiny");
-        assert!(
-            !loaded.tensors.is_empty(),
-            "lab-tiny must install real tensors"
-        );
-
         let eng = ClusterEngine::new();
-        let plan = ClusterPlan {
-            plan_id: Uuid::new_v4(),
-            model: CLUSTER_MODEL.into(),
-            shards: vec![ShardAssignment {
-                node: NodeId::new(),
-                role: ShardRole::Replica,
-                layer_start: Some(0),
-                layer_end: Some(0),
-                tp_rank: None,
-                tp_world: None,
-                mem_share_mib: 1024,
-                mem_fraction_ppm: 1_000_000,
-            }],
-            pool_mem_mib: 1024,
-            model_layers: 1,
-        };
-        eng.load_plan(&plan).await.expect("load_plan");
-        eng.install_loaded(loaded);
+        eng.load_plan(&demo_plan()).await.expect("load_plan");
+        let report = prepare_and_install(&store, &eng, spec, quant).expect("prepare_and_install");
+        assert!(report.tensors >= 1, "lab-tiny tensors={}", report.tensors);
         assert!(eng.has_resident_weights());
         assert!(eng.is_model_loaded());
 
@@ -374,7 +392,7 @@ mod tests {
 
         // Without tensors: plan-only ClusterEngine is stub-mode, proving the branch.
         let eng2 = ClusterEngine::new();
-        eng2.load_plan(&plan).await.unwrap();
+        eng2.load_plan(&demo_plan()).await.unwrap();
         let stub_out = eng2
             .infer(InferRequest {
                 model: CLUSTER_MODEL.into(),
@@ -388,6 +406,95 @@ mod tests {
             "unloaded engine must use stub path, got {}",
             stub_out.text
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Next quant past lab-tiny: multi-file lab-mid is larger, multi-tensor, tensor-backed.
+    #[tokio::test]
+    async fn cluster_engine_lab_mid_infer_is_tensor_backed() {
+        use crate::manifest::ManifestFile;
+        use crate::weights::WeightsStore;
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "joule-lab-mid-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WeightsStore::new(&dir);
+        let m = ManifestFile::load_default().expect("manifest");
+        let spec = m.model("kimi-open").expect("kimi-open");
+        let tiny = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "lab-tiny")
+            .expect("lab-tiny");
+        let mid = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "lab-mid")
+            .expect("lab-mid quant in MANIFEST");
+        let tiny_bytes: u64 = tiny.files.iter().map(|f| f.size_bytes).sum();
+        let mid_bytes: u64 = mid.files.iter().map(|f| f.size_bytes).sum();
+        assert!(
+            mid_bytes > tiny_bytes,
+            "lab-mid ({mid_bytes}) must be larger than lab-tiny ({tiny_bytes})"
+        );
+        assert!(
+            mid.files.len() > tiny.files.len(),
+            "lab-mid should list more files than lab-tiny"
+        );
+        assert!(!mid.files.is_empty());
+        assert!(mid
+            .files
+            .iter()
+            .all(|f| !f.sha256.is_empty() && f.size_bytes > 0));
+
+        // Agents with mid-class VRAM pick lab-mid over lab-tiny (not peer K3).
+        let picked = spec.pick_quant(8192).expect("pick");
+        assert_eq!(
+            picked.id, "lab-mid",
+            "pick_quant(8192) should prefer lab-mid, got {}",
+            picked.id
+        );
+        // Tiny donors still get lab-tiny.
+        assert_eq!(spec.pick_quant(256).unwrap().id, "lab-tiny");
+
+        let eng = ClusterEngine::new();
+        eng.load_plan(&demo_plan()).await.unwrap();
+        let report = prepare_and_install(&store, &eng, spec, mid).expect("lab-mid install");
+        assert!(
+            report.tensors >= 3,
+            "lab-mid must load ≥3 tensors, got {}",
+            report.tensors
+        );
+        assert!(
+            report.bytes_resident > tiny_bytes,
+            "resident bytes {} should exceed lab-tiny {}",
+            report.bytes_resident,
+            tiny_bytes
+        );
+
+        let out = eng
+            .infer(InferRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "lab-mid pool infer".into(),
+                max_tokens: 24,
+            })
+            .await
+            .expect("infer");
+        assert!(
+            out.text.contains("joule-tensor"),
+            "lab-mid must be tensor-backed, got {}",
+            out.text
+        );
+        assert!(out.text.contains("lab-mid") || out.text.contains("kimi-open"));
+        assert!(!out.text.contains("joule-stub"), "got {}", out.text);
+        assert!(out.text.contains("lab-mid") || out.text.contains("pool"));
 
         let _ = fs::remove_dir_all(&dir);
     }

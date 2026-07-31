@@ -5,7 +5,7 @@ use joule_proto::{
     decode_line, encode_line, DeviceClass, Envelope, Message, NodeCaps, NodeId, CLUSTER_MODEL,
     PROTOCOL_VERSION,
 };
-use joule_runtime::StubEngine;
+use joule_runtime::{prepare_and_install, ClusterEngine, ManifestFile, StubEngine, WeightsStore};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -259,6 +259,188 @@ async fn pool_capacity_and_chat() {
 
     agent.abort();
     assert_eq!(PROTOCOL_VERSION, "0.1.0");
+}
+
+/// Local pool: seed/prepare lab-mid on ClusterEngine (agent load path) → Infer is tensor-backed.
+#[tokio::test]
+async fn local_pool_lab_mid_tensor_infer() {
+    use std::fs;
+
+    let dir = std::env::temp_dir().join(format!(
+        "joule-e2e-lab-mid-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let store = WeightsStore::new(&dir);
+    let m = ManifestFile::load_default().expect("manifest");
+    let spec = m.model("kimi-open").expect("kimi-open");
+    let mid = spec
+        .weights
+        .quants
+        .iter()
+        .find(|q| q.id == "lab-mid")
+        .expect("lab-mid");
+
+    // Same helper the agent uses after Welcome/pool-ready and peer seed.
+    let engine = ClusterEngine::new();
+    let report =
+        prepare_and_install(&store, &engine, spec, mid).expect("agent prepare_and_install");
+    assert!(report.tensors >= 3, "tensors={}", report.tensors);
+    assert!(engine.is_model_loaded());
+
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    // Agent loop uses ClusterEngine + lab-mid (not StubEngine).
+    let node_id = NodeId::new();
+    let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let hello = Envelope::new(
+        node_id.clone(),
+        Message::Hello {
+            account: "lab-mid-donor".into(),
+            caps: NodeCaps::for_cluster(DeviceClass::Gpu, 8192, 40),
+            pubkey_hex: String::new(),
+            sig_hex: String::new(),
+            signed_at_unix_ms: 0,
+        },
+    );
+    writer
+        .write_all(&encode_line(&hello).unwrap())
+        .await
+        .unwrap();
+    let welcome_line = lines.next_line().await.unwrap().expect("welcome");
+    let welcome = decode_line(welcome_line.as_bytes()).unwrap();
+    let api_key = match welcome.msg {
+        Message::Welcome { api_key, .. } => api_key,
+        other => panic!("expected welcome, got {other:?}"),
+    };
+    let hb = Envelope::new(
+        node_id.clone(),
+        Message::Heartbeat {
+            load: 0.0,
+            healthy: true,
+        },
+    );
+    writer.write_all(&encode_line(&hb).unwrap()).await.unwrap();
+    let alive = Envelope::new(
+        node_id.clone(),
+        Message::PeerAlive {
+            multiaddrs: vec!["tcp://127.0.0.1:17901".into()],
+            load: 0.05,
+            healthy: true,
+            blob_count: 2,
+            mem_mib: 8192,
+            verified_mem_mib: 0,
+            throughput_class: 40,
+        },
+    );
+    writer
+        .write_all(&encode_line(&alive).unwrap())
+        .await
+        .unwrap();
+
+    let eng = Arc::new(engine);
+    let agent = tokio::spawn({
+        let eng = eng.clone();
+        let node_id = node_id.clone();
+        async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let hb = Envelope::new(
+                            node_id.clone(),
+                            Message::Heartbeat { load: 0.05, healthy: true },
+                        );
+                        if writer.write_all(&encode_line(&hb).unwrap()).await.is_err() {
+                            break;
+                        }
+                    }
+                    line = lines.next_line() => {
+                        let Ok(Some(line)) = line else { break; };
+                        if line.trim().is_empty() { continue; }
+                        let env = decode_line(line.as_bytes()).unwrap();
+                        match &env.msg {
+                            Message::PlanOffer { plan, request_id } => {
+                                let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                                let reply = Envelope::new(
+                                    node_id.clone(),
+                                    Message::PlanAccept {
+                                        plan_id: plan.plan_id,
+                                        request_id: *request_id,
+                                        accepted,
+                                        reason: if accepted {
+                                            "lab-mid e2e".into()
+                                        } else {
+                                            "not in plan".into()
+                                        },
+                                    },
+                                );
+                                let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
+                            }
+                            Message::InferRequest { .. } => {
+                                let reply = joule_control::agent_handle_infer(&env, eng.as_ref())
+                                    .await
+                                    .expect("infer");
+                                let reply = Envelope::new(node_id.clone(), reply.msg);
+                                let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
+                            }
+                            Message::Challenge { .. } => {
+                                let reply = joule_control::agent_handle_challenge(&env, eng.as_ref())
+                                    .await
+                                    .expect("challenge");
+                                let reply = Envelope::new(node_id.clone(), reply.msg);
+                                let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let chat: serde_json::Value = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&api_key)
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role": "user", "content": "lab-mid local pool"}]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let content = chat["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        content.contains("joule-tensor"),
+        "local pool chat must be tensor-backed when lab-mid loaded, content={content} chat={chat}"
+    );
+    assert!(!content.contains("joule-stub"), "content={content}");
+
+    agent.abort();
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Welcome issues a real `joule_…` key; that key authenticates HTTP; wrong/missing fail closed.
