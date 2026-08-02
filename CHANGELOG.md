@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-08-02
+
+GUI-first shell + skeptic fixes (local TZ, real notary keys, clear agent connect UX).
+
+### Added
+- **`joule` / `joule gui`** — interactive egui dashboard: live graphs (backends, VRAM, balance, tokens), Start control / Start agent, donor pause/cap, sensors, open browser dashboard
+- Agent connect error explains control is down and points to GUI / `joule control`
+
+### Fixed
+- Local schedule TZ uses OS `tm_gmtoff` (not UTC default)
+- Notary checkpoints use per-node OS-random keys (not forgeable lab keys)
+- `tray --donor-set-cap 0` clears cap
+
 ## [0.1.5] — 2026-08-02
 
 Close high-value backlog: notary quorum hot path, attestation tiers on nodes API, donor local-TZ + tray, service_live flip.

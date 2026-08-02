@@ -88,7 +88,7 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 ║████████████████████████████████████████████████  ║
 ║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
-║  v0.1.5  ·  MIT  ·  2026                         ║
+║  v0.1.6  ·  MIT  ·  2026                         ║
 ║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝

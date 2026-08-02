@@ -37,3 +37,8 @@ rand = "0.8"
 hex = "0.4"
 base64 = "0.22"
 sha2 = "0.10"
+libc = "0.2"
+# Cross-platform graphical shell (normie primary UI): plots + controls.
+eframe = { version = "0.31", default-features = true }
+egui_plot = "0.31"
+open = "5"

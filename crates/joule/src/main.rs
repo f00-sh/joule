@@ -3,6 +3,7 @@
 mod client_status;
 mod donor_policy;
 mod gpu_probe;
+mod gui;
 mod identity;
 mod peer_net;
 mod tray_app;
@@ -57,12 +58,18 @@ struct PendingBlobRecv {
     about = "Distributed compute cluster: donate idle GPUs, earn millijoules, run open-weight AI"
 )]
 struct Cli {
+    /// Optional subcommand. **No subcommand = graphical dashboard** (normie default).
     #[command(subcommand)]
-    cmd: Commands,
+    cmd: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Graphical dashboard — graphs, start control/agent, donor controls (default).
+    Gui {
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+    },
     /// Print protocol and build identity.
     Version,
     /// Run the control plane (agent TCP + HTTP API + dashboard).
@@ -249,9 +256,9 @@ enum Commands {
         /// Resume local contribution.
         #[arg(long, default_value_t = false)]
         donor_resume: bool,
-        /// Set local mem cap MiB then exit (0 = clear).
-        #[arg(long, default_value_t = 0)]
-        donor_set_cap: u32,
+        /// Set local mem cap MiB then exit (`--donor-set-cap 0` clears the cap).
+        #[arg(long)]
+        donor_set_cap: Option<u32>,
         /// Print local donor policy + sensors then exit.
         #[arg(long, default_value_t = false)]
         donor_status: bool,
@@ -533,7 +540,14 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    match cli.cmd {
+    let cmd = cli.cmd.unwrap_or(Commands::Gui {
+        api: "http://127.0.0.1:7700".into(),
+    });
+    match cmd {
+        Commands::Gui { api } => {
+            // GUI is sync/eframe; leave async runtime after exit.
+            gui::run_gui(api)?;
+        }
         Commands::Version => {
             println!("joule {}", env!("CARGO_PKG_VERSION"));
             println!("protocol {}", joule_proto::PROTOCOL_VERSION);
@@ -794,9 +808,10 @@ async fn main() -> Result<()> {
                 })?;
                 return Ok(());
             }
-            if donor_set_cap > 0 {
+            if let Some(mib) = donor_set_cap {
+                // Explicit flag: 0 clears cap (product: tray --donor-set-cap 0).
                 run_donor_cmd(DonorCmd::SetCap {
-                    mib: donor_set_cap,
+                    mib,
                     policy: policy_path.display().to_string(),
                 })?;
                 return Ok(());
@@ -1209,7 +1224,16 @@ fn run_donor_cmd(cmd: DonorCmd) -> Result<()> {
                 "  schedule:        {}",
                 p.schedule
                     .as_ref()
-                    .map(|w| format!("{:04}-{:04} UTC mins", w.start_min_utc, w.end_min_utc))
+                    .map(|w| {
+                        format!(
+                            "{:02}:{:02}-{:02}:{:02} local (offset {}s)",
+                            w.start_min_utc / 60,
+                            w.start_min_utc % 60,
+                            w.end_min_utc / 60,
+                            w.end_min_utc % 60,
+                            donor_policy::system_utc_offset_secs()
+                        )
+                    })
                     .unwrap_or_else(|| "always".into())
             );
             println!(
@@ -1410,9 +1434,19 @@ async fn run_agent(
     }
 
     info!(%control, %account, %node_id, model = CLUSTER_MODEL, "connecting agent");
-    let sock = TcpStream::connect(&control)
-        .await
-        .with_context(|| format!("connect agent port {control}"))?;
+    let sock = match TcpStream::connect(&control).await {
+        Ok(s) => s,
+        Err(e) => {
+            bail!(
+                "cannot connect to control at {control}: {e}\n\n\
+                 The control plane is not running (or wrong host/port).\n\
+                 Normie path:  joule gui     # start panel, click Start control + Start agent\n\
+                 CLI path:     joule control # terminal 1\n\
+                               joule agent  # terminal 2 (this command)\n\
+                 Default agent port is 127.0.0.1:7701 · HTTP dashboard http://127.0.0.1:7700/"
+            );
+        }
+    };
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
 

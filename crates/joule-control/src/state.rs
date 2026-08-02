@@ -207,6 +207,9 @@ pub struct ControlState {
     pub active_replica_factor: u32,
     /// Last rebalance wall time (rate-limit BlobsHave-triggered rebalance).
     pub last_rebalance: Option<Instant>,
+    /// Per-node notary ed25519 secret keys (32 bytes). Generated at join with OS RNG.
+    /// Checkpoints only sign with these — never deterministic lab keys.
+    pub notary_secret_keys: HashMap<String, [u8; 32]>,
     dirty: bool,
 }
 
@@ -246,6 +249,7 @@ impl ControlState {
             active_chunks: Vec::new(),
             active_replica_factor: joule_cluster::DEFAULT_REPLICA_FACTOR,
             last_rebalance: None,
+            notary_secret_keys: HashMap::new(),
             dirty: false,
         }
     }
@@ -576,15 +580,25 @@ impl ControlState {
         self.cluster
             .upsert_node(id.clone(), account.to_string(), caps);
         let verified = self.cluster.verified_mem_mib(&id);
-        self.node_account.insert(id, account.to_string());
+        self.node_account.insert(id.clone(), account.to_string());
+        // Fresh OS-random notary key for this node (not deterministic from id).
+        self.notary_secret_keys
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                use rand::RngCore;
+                let mut sk = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut sk);
+                sk
+            });
         self.note_online(account, verified, true);
         self.mark_dirty();
         api_key
     }
 
     /// Seal a ledger checkpoint with **cryptographic notary quorum** (fail-closed).
-    /// Notary keys are derived from node ids via `lab_signing_key` for protocol
-    /// donors (product notaries are healthy mesh witnesses).
+    /// Signs only with per-node keys issued at join (`notary_secret_keys`). If a
+    /// chosen notary has no key, the checkpoint is skipped (fail closed — never
+    /// forge with deterministic lab keys).
     pub(crate) fn seal_and_checkpoint(&mut self) {
         let notaries = self.cluster.pick_notaries(3);
         if notaries.is_empty() {
@@ -593,7 +607,11 @@ impl ControlState {
         let head = self.ledger.head().head_hash_hex;
         let mut atts = Vec::with_capacity(notaries.len());
         for nid in &notaries {
-            let sk = joule_ledger::lab_signing_key(nid);
+            let Some(sk_bytes) = self.notary_secret_keys.get(nid) else {
+                tracing::warn!(%nid, "notary missing OS key — skip checkpoint (fail-closed)");
+                return;
+            };
+            let sk = ed25519_dalek::SigningKey::from_bytes(sk_bytes);
             atts.push(joule_ledger::sign_head(&sk, &head, nid));
         }
         let min_ok = notaries.len().clamp(1, 2);

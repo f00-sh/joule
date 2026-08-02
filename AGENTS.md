@@ -9,7 +9,7 @@
 | Domain | joule.f00.sh |
 | License | MIT |
 | Language | **Rust** (workspace; strict purity for first-party code) |
-| Status | 0.1.5 released (lab-tiny + lab-mid + lab-large; donor controls; Kimi gated) |
+| Status | 0.1.6 released (GUI dashboard + graphs; donor controls; Kimi gated) |
 
 **One-liner:** Distributed internet-wide supercomputer cluster — pool idle GPUs into open-weight AI inference (Kimi-class).
 
@@ -57,6 +57,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release
+cargo run -p joule --release -- gui
 cargo run -p joule --release -- control
 cargo run -p joule --release -- agent --account alice
 cargo run -p joule --release -- capacity --api http://127.0.0.1:7700 --json

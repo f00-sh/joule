@@ -6,7 +6,7 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 
 | | |
 |---|---|
-| Status | **0.1.4** released (lab-tiny + lab-mid + lab-large; donor controls; Kimi gated) |
+| Status | **0.1.6** released (GUI dashboard + graphs; donor controls; Kimi gated) |
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
@@ -87,9 +87,18 @@ cargo build --release -p joule
 ./target/release/joule lab
 ```
 
-## Quick start (local pool)
+## Quick start (normie / GUI first)
 
-### Terminal 1 — control plane (localhost)
+```text
+joule            # opens the graphical dashboard (graphs + buttons)
+# or:
+joule gui
+```
+
+In the GUI: **Start control** → **Start agent (donate)** → watch pool graphs.
+No separate “open a terminal and guess ports” required for the happy path.
+
+### Advanced: Terminal 1 — control plane (localhost)
 
 ```text
 cargo run -p joule --release -- control
@@ -210,7 +219,7 @@ See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 an
 ║████████████████████████████████████████████████  ║
 ║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
-║  v0.1.5  ·  MIT  ·  2026                         ║
+║  v0.1.6  ·  MIT  ·  2026                         ║
 ║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝

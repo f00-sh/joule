@@ -23,18 +23,43 @@ pub fn local_minute_of_day(unix_secs: u64, utc_offset_secs: i32) -> u16 {
     ((local / 60) % 1440) as u16
 }
 
-/// Best-effort system UTC offset (seconds east of UTC).
-/// Prefer `TZ`/`chrono`-free: compare local civil time via `strftime` is OS-heavy;
-/// use `i32::from(chrono)` alternative — env `JOULE_TZ_OFFSET_SECS` or 0.
+/// System UTC offset (seconds east of UTC) for **local** schedule evaluation.
+///
+/// Order: `JOULE_TZ_OFFSET_SECS` override (tests) → OS local offset via libc
+/// `tm_gmtoff` on Unix → 0 only if the OS probe fails.
 pub fn system_utc_offset_secs() -> i32 {
     if let Ok(v) = std::env::var("JOULE_TZ_OFFSET_SECS") {
         if let Ok(n) = v.parse::<i32>() {
             return n;
         }
     }
-    // Linux: /etc/localtime offset is hard without libc; default 0 (UTC).
-    // Agents in non-UTC regions set JOULE_TZ_OFFSET_SECS or use inject in tests.
-    0
+    os_local_utc_offset_secs().unwrap_or(0)
+}
+
+/// Probe OS local timezone offset. Pure I/O boundary — tests inject via env.
+pub fn os_local_utc_offset_secs() -> Option<i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: localtime_r with a stack tm is the standard way to read tm_gmtoff.
+        unsafe {
+            let mut now: libc::time_t = 0;
+            if libc::time(&mut now) == -1 {
+                return None;
+            }
+            let mut tm: libc::tm = std::mem::zeroed();
+            if libc::localtime_r(&now, &mut tm).is_null() {
+                return None;
+            }
+            // GNU/BSD: seconds east of UTC
+            Some(tm.tm_gmtoff as i32)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: use `_get_timezone` minutes west of UTC → negate to east.
+        // Without winapi, fall back to env only (tests set JOULE_TZ_OFFSET_SECS).
+        None
+    }
 }
 
 impl ScheduleWindow {
@@ -181,7 +206,7 @@ impl DonorPolicy {
                     .unwrap_or_else(|| "none".into())
             ),
             format!(
-                "schedule_local={}",
+                "schedule_local={} (offset_secs={})",
                 self.schedule
                     .as_ref()
                     .map(|w| format!(
@@ -191,7 +216,8 @@ impl DonorPolicy {
                         w.end_min_utc / 60,
                         w.end_min_utc % 60
                     ))
-                    .unwrap_or_else(|| "always".into())
+                    .unwrap_or_else(|| "always".into()),
+                off
             ),
             format!(
                 "sensors temp_c={:?} battery_pct={:?} on_ac={:?}",
@@ -251,6 +277,26 @@ mod tests {
         };
         assert_eq!(p.effective_mem_mib(8192), 4096);
         assert_eq!(p.effective_mem_mib(2048), 2048);
+    }
+
+    #[test]
+    fn os_local_offset_probe_or_env_override() {
+        // Env override is the test inject path for non-Unix CI; production uses OS probe.
+        std::env::set_var("JOULE_TZ_OFFSET_SECS", "-18000");
+        assert_eq!(system_utc_offset_secs(), -18000);
+        std::env::remove_var("JOULE_TZ_OFFSET_SECS");
+        // Without override, Unix must return Some from libc (or None on exotic targets).
+        #[cfg(unix)]
+        {
+            let o = os_local_utc_offset_secs();
+            assert!(
+                o.is_some(),
+                "Unix localtime_r/tm_gmtoff must yield an offset"
+            );
+            // system helper uses probe when env unset
+            let s = system_utc_offset_secs();
+            assert_eq!(s, o.unwrap());
+        }
     }
 
     #[test]
