@@ -7,6 +7,7 @@
 
 pub mod chain;
 pub mod economy;
+pub mod notary;
 
 pub use chain::{
     AccountAudit, ChainHead, EntryKind, SealedEntry, SealedLedger, CHECKPOINT_EVERY, GENESIS_HASH,
@@ -15,6 +16,10 @@ pub use economy::{
     churn_bp, estimate_contribution_millijoules, estimate_usage_millijoules, leecher_factors_bp,
     mem_factor_bp, score_burn, score_mint, split_donate_equitable, tenure_bp, BurnBreakdown,
     EconomyEvent, FairnessSnapshot, MintBreakdown, ECONOMY_VERSION,
+};
+pub use notary::{
+    lab_signing_key, notary_preimage, sign_head, verify_attestation, verify_quorum,
+    NotaryAttestation,
 };
 
 use serde::{Deserialize, Serialize};

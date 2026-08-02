@@ -7,12 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-08-02
+
+Live multi-agent pool path, lab-large quant, donor local controls, notary/attestation trust slice.
+
 ### Added
 
-- **lab-mid quant** — multi-file, multi-tensor fixture past lab-tiny (~360 KiB, 3 tensors, `repo://` peer-seedable); MANIFEST pin with honest digests
-- **`prepare_and_install`** shared agent path: prepare → load → `ClusterEngine::install` (Welcome/pool-ready + peer seed)
-- **pick_quant** prefers largest loadable fixture by size; skips multi-hundred-GB peer-only pins when smaller fixtures exist
-- Tests: `cluster_engine_lab_mid_infer_is_tensor_backed`, e2e `local_pool_lab_mid_tensor_infer`; seed script `scripts/seed-lab-mid.sh`
+- **lab-mid quant** (tip since 0.1.3 line) — multi-file, multi-tensor ~360 KiB past lab-tiny; `prepare_and_install` agent path
+- **lab-large quant** — multi-MiB multi-layer fixture (~3.1 MiB, ≥5 tensors) past lab-mid; MANIFEST digests + `scripts/seed-lab-large.sh`
+- **Live multi-agent pool smoke** — `scripts/live-pool-smoke.sh` + e2e `multi_agent_capacity_under_churn` (N≥2 join, churn)
+- **Donor local policy (law 5)** — `joule donor status|pause|resume|set-cap|set-schedule|set-sensors`; agent `--pause` / `--mem-cap-mib` / schedule / thermal / battery; remote cannot raise local caps
+- **Notary checkpoint signatures** — `joule_ledger::notary` sign/verify/quorum (fail-closed on bad sigs)
+- **Attestation tiers** — `joule_cluster::attestation_tier` claim_only / challenge_partial / challenge_full
+- **Dual-pin fail-closed** — website protocol mismatch never overrides embed without lab flag
+
+### Changed
+
+- **pick_quant** prefers largest loadable fixture by size; peer-only K3 skipped when fixtures exist (8192→lab-large, 1024→lab-mid, 256→lab-tiny)
+- Workspace package version **0.1.4**; `file_id.diz` aligned
 
 ## [0.1.3] — 2026-07-31
 

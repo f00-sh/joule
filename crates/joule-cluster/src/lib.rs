@@ -52,6 +52,38 @@ pub fn placement_mem_mib(verified_mem_mib: u32) -> u32 {
     verified_mem_mib
 }
 
+/// Capacity attestation tier (trust surface for untrusted donors).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttestationTier {
+    /// Claim only — verified is 0; mint uses floor only.
+    ClaimOnly,
+    /// Partial challenge unlock (0 < verified < claim).
+    ChallengePartial,
+    /// Peak proven equals claim (fully challenge-backed for current claim).
+    ChallengeFull,
+}
+
+impl AttestationTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ClaimOnly => "claim_only",
+            Self::ChallengePartial => "challenge_partial",
+            Self::ChallengeFull => "challenge_full",
+        }
+    }
+}
+
+/// Derive attestation tier from claim vs verified (no free full-claim without proof).
+pub fn attestation_tier(claimed_mem_mib: u32, verified_mem_mib: u32) -> AttestationTier {
+    if verified_mem_mib == 0 {
+        AttestationTier::ClaimOnly
+    } else if claimed_mem_mib > 0 && verified_mem_mib >= claimed_mem_mib {
+        AttestationTier::ChallengeFull
+    } else {
+        AttestationTier::ChallengePartial
+    }
+}
+
 use joule_proto::{
     ClusterCapacity, ClusterPlan, DeviceClass, LogicalDevice, NodeCaps, NodeId, CLUSTER_MODEL,
     CLUSTER_MODEL_LABEL,
@@ -769,5 +801,17 @@ mod tests {
             ranked[0], low_claim_high_v,
             "verified 4G must beat claim 64G/verified 1G"
         );
+    }
+
+    #[test]
+    fn attestation_tier_from_claim_verified() {
+        assert_eq!(attestation_tier(8192, 0), AttestationTier::ClaimOnly);
+        assert_eq!(
+            attestation_tier(8192, 1024),
+            AttestationTier::ChallengePartial
+        );
+        assert_eq!(attestation_tier(8192, 8192), AttestationTier::ChallengeFull);
+        // Claim-only never grades full without proof
+        assert_ne!(attestation_tier(65_536, 0), AttestationTier::ChallengeFull);
     }
 }

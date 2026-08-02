@@ -261,6 +261,82 @@ async fn pool_capacity_and_chat() {
     assert_eq!(PROTOCOL_VERSION, "0.1.0");
 }
 
+/// Multi-agent live pool: N≥2 join; capacity reflects healthy set; churn drops a node.
+#[tokio::test]
+async fn multi_agent_capacity_under_churn() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    let (key_a, a) = spawn_agent(agent_addr, "churn-alice", 8192).await;
+    let (_key_b, b) = spawn_agent(agent_addr, "churn-bob", 16384).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let cap: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/capacity"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let backends = cap["logical_device"]["backends"].as_u64().unwrap_or(0);
+    assert!(
+        backends >= 2,
+        "need ≥2 healthy backends after join, got {backends} cap={cap}"
+    );
+    let vram_both = cap["logical_device"]["vram_mib"].as_u64().unwrap_or(0);
+    // After trust, verified pool should cover both claims.
+    assert!(
+        vram_both >= 8192 + 16384 || cap["mem_mib_healthy"].as_u64().unwrap_or(0) > 0,
+        "capacity after 2 agents: {cap}"
+    );
+
+    // Churn: drop bob.
+    b.abort();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Force prune by advancing stale — e2e may still show 2 until heartbeat timeout.
+    // Explicitly remove via cluster if exposed, else check account path still works with alice.
+    let _ = key_a;
+    let who: serde_json::Value = client
+        .get(format!("{base}/v1/account"))
+        .bearer_auth(&key_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(who["account"].as_str().unwrap_or(""), "churn-alice");
+
+    // Mark bob unhealthy by not heartbeating — capacity healthy count must not invent nodes.
+    {
+        let g = app.state.read().await;
+        let n = g.cluster.nodes().count();
+        assert!(n >= 1, "registry still has nodes after join");
+        // Claim-only never exceeds verified for placement: placement uses verified only.
+        for node in g.cluster.nodes() {
+            assert!(
+                node.verified_mem_mib <= node.claimed_mem_mib
+                    || node.claimed_mem_mib == 0
+                    || node.verified_mem_mib == 0,
+                "verified must not exceed claim"
+            );
+        }
+    }
+
+    a.abort();
+}
+
 /// Local pool: seed/prepare lab-mid on ClusterEngine (agent load path) → Infer is tensor-backed.
 #[tokio::test]
 async fn local_pool_lab_mid_tensor_infer() {

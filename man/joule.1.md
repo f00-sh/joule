@@ -40,11 +40,13 @@ pool is free of cash charges. No contribution ⇒ no API.
 
 How a node reaches the internet is irrelevant. This is not a mesh product.
 
-Version **0.1.3** loads **lab-tiny** tensors when seeded and gates full Kimi on
-pool VRAM. After an agent Welcome, **`joule connect`** shows Base URL + full
-pool-issued `joule_…` API key + model `kimi-open` for Cursor / other OpenAI
-clients. Weights and software are **peer-seeded by sha256** (f00 is website
-only). Operator orders are **ed25519-signed** and flooded by the swarm.
+Version **0.1.4** loads **lab-tiny / lab-mid / lab-large** tensors when seeded and
+gates full Kimi on pool VRAM. Donors control contribution locally
+(`joule donor pause|set-cap|set-schedule|set-sensors`). After an agent Welcome,
+**`joule connect`** shows Base URL + full pool-issued `joule_…` API key + model
+`kimi-open` for Cursor / other OpenAI clients. Weights and software are
+**peer-seeded by sha256** (f00 is website only). Operator orders are
+**ed25519-signed** and flooded by the swarm.
 
 ## COMMANDS
 
@@ -94,6 +96,21 @@ next to the identity file. Flags: `--copy` (key), `--copy-url`, `--open`.
 Tray: `joule tray --connect` / `--copy-api-key`. Key is issued by the pool on
 Welcome — not invented client-side. `chat` / `whoami` use the cached key when
 `--key` is omitted.
+
+### joule donor
+
+Local contribution policy (product law 5 — remote cannot raise caps):
+
+```text
+joule donor status
+joule donor pause | resume
+joule donor set-cap 4096
+joule donor set-schedule 09:00-17:00
+joule donor set-sensors --max-temp-c 85 --min-battery-pct 20
+```
+
+Agent flags: `--pause`, `--mem-cap-mib`, `--schedule`, `--max-temp-c`,
+`--min-battery-pct`, `--policy PATH`.
 
 ### joule seed-blob / software
 

@@ -174,4 +174,25 @@ mod tests {
         std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
         std::env::remove_var("JOULE_OPERATOR_PUBKEY");
     }
+
+    /// Dual-pin: mismatched website protocol material fails closed (not accepted as pin).
+    #[test]
+    fn website_protocol_mismatch_fails_closed() {
+        let evil = "ff".repeat(32);
+        assert!(!website_protocol_matches_embed(&evil));
+        assert!(!website_protocol_matches_embed("not-a-key\n"));
+        // Exact embed body matches
+        let good = format!("{}\n", PROTOCOL_ED25519_PUBKEY_HEX);
+        assert!(website_protocol_matches_embed(&good));
+        // Without lab flag, effective key never becomes the evil hex
+        let _g = test_env_lock();
+        std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
+        std::env::set_var("JOULE_OPERATOR_PUBKEY", &evil);
+        assert_ne!(effective_protocol_pubkey_hex(), evil.to_lowercase());
+        assert_eq!(
+            effective_protocol_pubkey_hex(),
+            PROTOCOL_ED25519_PUBKEY_HEX.to_lowercase()
+        );
+        std::env::remove_var("JOULE_OPERATOR_PUBKEY");
+    }
 }

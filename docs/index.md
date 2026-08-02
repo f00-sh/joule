@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| Status | 0.1.3 released (lab-tiny tensors; Kimi gated on pool) |
+| Status | 0.1.4 released (lab-tiny + lab-mid + lab-large; donor controls; Kimi gated) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
 | License | MIT |
 
@@ -88,7 +88,7 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 ║████████████████████████████████████████████████  ║
 ║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
-║  v0.1.3  ·  MIT  ·  2026                         ║
+║  v0.1.4  ·  MIT  ·  2026                         ║
 ║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝

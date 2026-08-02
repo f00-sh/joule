@@ -454,12 +454,11 @@ mod tests {
             .iter()
             .all(|f| !f.sha256.is_empty() && f.size_bytes > 0));
 
-        // Agents with mid-class VRAM pick lab-mid over lab-tiny (not peer K3).
-        let picked = spec.pick_quant(8192).expect("pick");
+        // Mid-class (512–2047): lab-mid; large VRAM prefers lab-large.
         assert_eq!(
-            picked.id, "lab-mid",
-            "pick_quant(8192) should prefer lab-mid, got {}",
-            picked.id
+            spec.pick_quant(1024).expect("pick").id,
+            "lab-mid",
+            "pick_quant(1024) should prefer lab-mid"
         );
         // Tiny donors still get lab-tiny.
         assert_eq!(spec.pick_quant(256).unwrap().id, "lab-tiny");
@@ -496,6 +495,73 @@ mod tests {
         assert!(!out.text.contains("joule-stub"), "got {}", out.text);
         assert!(out.text.contains("lab-mid") || out.text.contains("pool"));
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// lab-large is multi-MiB multi-layer, strictly above lab-mid.
+    #[tokio::test]
+    async fn cluster_engine_lab_large_infer_is_tensor_backed() {
+        use crate::manifest::ManifestFile;
+        use crate::weights::WeightsStore;
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "joule-lab-large-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WeightsStore::new(&dir);
+        let m = ManifestFile::load_default().expect("manifest");
+        let spec = m.model("kimi-open").expect("kimi-open");
+        let mid = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "lab-mid")
+            .expect("lab-mid");
+        let large = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "lab-large")
+            .expect("lab-large in MANIFEST");
+        let mid_b: u64 = mid.files.iter().map(|f| f.size_bytes).sum();
+        let large_b: u64 = large.files.iter().map(|f| f.size_bytes).sum();
+        assert!(
+            large_b > mid_b,
+            "lab-large {large_b} must exceed lab-mid {mid_b}"
+        );
+        assert!(
+            large_b > 2 * 1024 * 1024,
+            "lab-large must be multi-MiB, got {large_b}"
+        );
+        assert_eq!(spec.pick_quant(8192).unwrap().id, "lab-large");
+        assert_eq!(spec.pick_quant(512).unwrap().id, "lab-mid");
+        assert_eq!(spec.pick_quant(256).unwrap().id, "lab-tiny");
+
+        let eng = ClusterEngine::new();
+        eng.load_plan(&demo_plan()).await.unwrap();
+        let report = prepare_and_install(&store, &eng, spec, large).expect("lab-large install");
+        assert!(
+            report.tensors >= 5,
+            "lab-large multi-layer tensors, got {}",
+            report.tensors
+        );
+        let out = eng
+            .infer(InferRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "lab-large multi-MiB".into(),
+                max_tokens: 16,
+            })
+            .await
+            .expect("infer");
+        assert!(
+            out.text.contains("joule-tensor"),
+            "lab-large must be tensor-backed: {}",
+            out.text
+        );
+        assert!(!out.text.contains("joule-stub"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

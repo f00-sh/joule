@@ -1,6 +1,7 @@
 //! joule — distributed compute cluster CLI.
 
 mod client_status;
+mod donor_policy;
 mod gpu_probe;
 mod identity;
 mod peer_net;
@@ -115,8 +116,31 @@ enum Commands {
         /// Set e.g. 0.0.0.0:7702 for internet donors. Empty disables peer listen.
         #[arg(long, default_value = "127.0.0.1:0")]
         peer_listen: String,
+        /// Local pause: do not contribute (healthy=false). Product law 5.
+        #[arg(long, default_value_t = false)]
+        pause: bool,
+        /// Local hard cap on advertised VRAM claim (MiB). Remote cannot raise this.
+        #[arg(long, default_value_t = 0)]
+        mem_cap_mib: u32,
+        /// Max GPU/CPU temp °C before auto-pause (0 = ignore). Uses platform sensors when present.
+        #[arg(long, default_value_t = 0.0)]
+        max_temp_c: f32,
+        /// Min battery % before auto-pause when on battery (0 = ignore).
+        #[arg(long, default_value_t = 0.0)]
+        min_battery_pct: f32,
+        /// UTC schedule window HH:MM-HH:MM (e.g. 09:00-17:00). Empty = always.
+        #[arg(long, default_value = "")]
+        schedule: String,
+        /// Load/save donor policy JSON (default: ~/.config/joule/donor-policy.json).
+        #[arg(long, default_value = "")]
+        policy: String,
         #[arg(long)]
         config: Option<PathBuf>,
+    },
+    /// Local donor contribution controls (pause, cap, schedule, thermal/battery).
+    Donor {
+        #[command(subcommand)]
+        cmd: DonorCmd,
     },
     /// Live cluster capacity from a running control plane (or synthetic lab peers).
     Capacity {
@@ -364,6 +388,47 @@ enum SoftwareCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum DonorCmd {
+    /// Show local donor policy (pause/cap/schedule/thermal/battery).
+    Status {
+        #[arg(long, default_value = "")]
+        policy: String,
+    },
+    /// Pause contribution (local only).
+    Pause {
+        #[arg(long, default_value = "")]
+        policy: String,
+    },
+    /// Resume contribution.
+    Resume {
+        #[arg(long, default_value = "")]
+        policy: String,
+    },
+    /// Set local VRAM claim hard cap (MiB). 0 clears cap.
+    SetCap {
+        mib: u32,
+        #[arg(long, default_value = "")]
+        policy: String,
+    },
+    /// Set UTC schedule window HH:MM-HH:MM (empty clears).
+    SetSchedule {
+        #[arg(default_value = "")]
+        window: String,
+        #[arg(long, default_value = "")]
+        policy: String,
+    },
+    /// Set max temp °C (0 clears) and/or min battery % (0 clears).
+    SetSensors {
+        #[arg(long, default_value_t = 0.0)]
+        max_temp_c: f32,
+        #[arg(long, default_value_t = 0.0)]
+        min_battery_pct: f32,
+        #[arg(long, default_value = "")]
+        policy: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ServiceCmd {
     /// Write unit/plist/task XML to stdout or --out.
     Generate {
@@ -570,6 +635,12 @@ async fn main() -> Result<()> {
             device,
             heartbeat_secs,
             peer_listen,
+            pause,
+            mem_cap_mib,
+            max_temp_c,
+            min_battery_pct,
+            schedule,
+            policy,
             config,
         } => {
             let _ = config;
@@ -590,6 +661,28 @@ async fn main() -> Result<()> {
             } else {
                 println!("lab account nickname: {}", ident.account_id);
             }
+            let policy_path = if policy.trim().is_empty() {
+                donor_policy::DonorPolicy::default_path()
+            } else {
+                PathBuf::from(&policy)
+            };
+            let mut pol = donor_policy::DonorPolicy::load(&policy_path).unwrap_or_default();
+            if pause {
+                pol.paused = true;
+            }
+            if mem_cap_mib > 0 {
+                pol.mem_cap_mib = Some(mem_cap_mib);
+            }
+            if max_temp_c > 0.0 {
+                pol.max_temp_c = Some(max_temp_c);
+            }
+            if min_battery_pct > 0.0 {
+                pol.min_battery_pct = Some(min_battery_pct);
+            }
+            if !schedule.trim().is_empty() {
+                pol.schedule = Some(parse_schedule_window(&schedule)?);
+            }
+            let _ = pol.save(&policy_path);
             run_agent(
                 control,
                 ident,
@@ -599,8 +692,12 @@ async fn main() -> Result<()> {
                 heartbeat_secs,
                 peer_listen,
                 Some(id_path),
+                pol,
             )
             .await?;
+        }
+        Commands::Donor { cmd } => {
+            run_donor_cmd(cmd)?;
         }
         Commands::Capacity { api, peers, json } => {
             run_capacity(api, peers, json).await?;
@@ -1014,6 +1111,137 @@ fn identity_path_arg(flag: &str) -> PathBuf {
     }
 }
 
+fn parse_schedule_window(s: &str) -> Result<donor_policy::ScheduleWindow> {
+    let s = s.trim();
+    let (a, b) = s
+        .split_once('-')
+        .ok_or_else(|| anyhow::anyhow!("schedule must be HH:MM-HH:MM"))?;
+    fn parse_hm(t: &str) -> Result<u16> {
+        let (h, m) = t
+            .trim()
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("bad time {t}"))?;
+        let h: u16 = h.parse().context("hour")?;
+        let m: u16 = m.parse().context("minute")?;
+        if h > 23 || m > 59 {
+            bail!("time out of range");
+        }
+        Ok(h * 60 + m)
+    }
+    Ok(donor_policy::ScheduleWindow {
+        start_min_utc: parse_hm(a)?,
+        end_min_utc: parse_hm(b)?,
+    })
+}
+
+fn policy_path_arg(flag: &str) -> PathBuf {
+    if flag.trim().is_empty() {
+        donor_policy::DonorPolicy::default_path()
+    } else {
+        PathBuf::from(flag)
+    }
+}
+
+fn run_donor_cmd(cmd: DonorCmd) -> Result<()> {
+    match cmd {
+        DonorCmd::Status { policy } => {
+            let path = policy_path_arg(&policy);
+            let p = donor_policy::DonorPolicy::load(&path).unwrap_or_default();
+            let sensors = donor_policy::probe_sensors();
+            let now = donor_policy::DonorPolicy::now_unix_secs();
+            let donating = p.allows_donate(now, sensors);
+            println!("donor policy: {}", path.display());
+            println!("  paused:          {}", p.paused);
+            println!(
+                "  mem_cap_mib:     {}",
+                p.mem_cap_mib
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "none".into())
+            );
+            println!(
+                "  schedule:        {}",
+                p.schedule
+                    .as_ref()
+                    .map(|w| format!("{:04}-{:04} UTC mins", w.start_min_utc, w.end_min_utc))
+                    .unwrap_or_else(|| "always".into())
+            );
+            println!(
+                "  max_temp_c:      {}",
+                p.max_temp_c
+                    .map(|t| format!("{t}"))
+                    .unwrap_or_else(|| "none".into())
+            );
+            println!(
+                "  min_battery_pct: {}",
+                p.min_battery_pct
+                    .map(|b| format!("{b}"))
+                    .unwrap_or_else(|| "none".into())
+            );
+            println!(
+                "  sensors:         temp={:?} battery={:?} on_ac={:?}",
+                sensors.temp_c, sensors.battery_pct, sensors.on_ac
+            );
+            println!(
+                "  allows_donate:   {} (local policy; remote cannot override)",
+                donating
+            );
+        }
+        DonorCmd::Pause { policy } => {
+            let path = policy_path_arg(&policy);
+            let mut p = donor_policy::DonorPolicy::load(&path).unwrap_or_default();
+            p.paused = true;
+            p.save(&path)?;
+            println!("paused contribution → {}", path.display());
+        }
+        DonorCmd::Resume { policy } => {
+            let path = policy_path_arg(&policy);
+            let mut p = donor_policy::DonorPolicy::load(&path).unwrap_or_default();
+            p.paused = false;
+            p.save(&path)?;
+            println!("resumed contribution → {}", path.display());
+        }
+        DonorCmd::SetCap { mib, policy } => {
+            let path = policy_path_arg(&policy);
+            let mut p = donor_policy::DonorPolicy::load(&path).unwrap_or_default();
+            p.mem_cap_mib = if mib == 0 { None } else { Some(mib) };
+            p.save(&path)?;
+            println!("mem_cap_mib={:?} → {}", p.mem_cap_mib, path.display());
+        }
+        DonorCmd::SetSchedule { window, policy } => {
+            let path = policy_path_arg(&policy);
+            let mut p = donor_policy::DonorPolicy::load(&path).unwrap_or_default();
+            p.schedule = if window.trim().is_empty() {
+                None
+            } else {
+                Some(parse_schedule_window(&window)?)
+            };
+            p.save(&path)?;
+            println!("schedule updated → {}", path.display());
+        }
+        DonorCmd::SetSensors {
+            max_temp_c,
+            min_battery_pct,
+            policy,
+        } => {
+            let path = policy_path_arg(&policy);
+            let mut p = donor_policy::DonorPolicy::load(&path).unwrap_or_default();
+            p.max_temp_c = if max_temp_c > 0.0 {
+                Some(max_temp_c)
+            } else {
+                None
+            };
+            p.min_battery_pct = if min_battery_pct > 0.0 {
+                Some(min_battery_pct)
+            } else {
+                None
+            };
+            p.save(&path)?;
+            println!("sensor limits updated → {}", path.display());
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     control: String,
@@ -1024,6 +1252,7 @@ async fn run_agent(
     heartbeat_secs: u64,
     peer_listen: String,
     identity_path: Option<PathBuf>,
+    policy: donor_policy::DonorPolicy,
 ) -> Result<()> {
     let node_id = NodeId::new();
     let account = ident.account_id.clone();
@@ -1031,10 +1260,12 @@ async fn run_agent(
                    // Startup GPU probe: clamp advertised claim (mint/placement still use verified only).
     let probe = gpu_probe::probe_vram();
     let claim_mib = gpu_probe::clamp_claim(mem_mib, &probe);
+    // Local donor cap (product law 5) — remote cannot raise this.
+    let claim_mib = policy.effective_mem_mib(claim_mib);
     let device_s = gpu_probe::effective_device(&device, claim_mib);
     if claim_mib != mem_mib {
         println!(
-            "gpu probe: requested claim {mem_mib} MiB → clamped to {claim_mib} MiB ({})",
+            "gpu probe / local cap: requested {mem_mib} MiB → effective claim {claim_mib} MiB ({})",
             probe.detail
         );
     } else {
@@ -1042,6 +1273,12 @@ async fn run_agent(
             "gpu probe: {} · claim {claim_mib} MiB ({})",
             probe.backend, probe.detail
         );
+    }
+    if policy.paused {
+        println!("donor policy: PAUSED (local) — heartbeats will report unhealthy");
+    }
+    if let Some(cap) = policy.mem_cap_mib {
+        println!("donor policy: mem_cap_mib={cap}");
     }
     let device = parse_device(device_s)?;
     let throughput_class = match device {
@@ -1153,9 +1390,24 @@ async fn run_agent(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
+                // Reload policy file so `joule donor pause` takes effect without restart.
+                let live_policy = donor_policy::DonorPolicy::load(
+                    &donor_policy::DonorPolicy::default_path(),
+                )
+                .unwrap_or_else(|_| policy.clone());
+                let sensors = donor_policy::probe_sensors();
+                let donating = live_policy.allows_donate(
+                    donor_policy::DonorPolicy::now_unix_secs(),
+                    sensors,
+                );
+                let offer_mem = if donating {
+                    live_policy.effective_mem_mib(mem_mib)
+                } else {
+                    0
+                };
                 let hb = Envelope::new(
                     node_id.clone(),
-                    Message::Heartbeat { load: 0.1, healthy: true },
+                    Message::Heartbeat { load: 0.1, healthy: donating },
                 );
                 if writer.write_all(&encode_line(&hb)?).await.is_err() {
                     bail!("control connection closed during heartbeat");
@@ -1168,9 +1420,9 @@ async fn run_agent(
                         Message::PeerAlive {
                             multiaddrs: multiaddrs.clone(),
                             load: 0.1,
-                            healthy: true,
+                            healthy: donating,
                             blob_count,
-                            mem_mib, // claim for UI only
+                            mem_mib: offer_mem, // claim for UI; 0 when local pause/cap schedule
                             // Never self-attest: peers must not treat this as control unlock.
                             verified_mem_mib: 0,
                             throughput_class,
