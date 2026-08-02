@@ -254,19 +254,15 @@ jobs:
           if compgen -G 'docs/releases/v*-memo.pdf' > /dev/null; then
             cp docs/releases/v*-memo.pdf dist/ || true
           fi
-          (
-            cd dist
-            : > SHA256SUMS
-            for f in * ; do
-              [[ -f "$f" ]] || continue
-              case "$f" in
-                *.sha256|SHA256SUMS) continue ;;
-              esac
-              sha256sum "$f" >> SHA256SUMS
-            done
-            cat SHA256SUMS
-            ls -la
-          )
+          # Versionless stable names for permanent /latest and joule.f00.sh/current/* links
+          VER="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          VER="${VER#v}"
+          if [[ -z "$VER" ]]; then
+            VER="$(ls dist/joule-*-linux-x86_64.tar.gz 2>/dev/null | head -1 | sed -n 's|.*/joule-\([0-9.]*\)-linux.*|\1|p')"
+          fi
+          chmod +x scripts/stable-release-aliases.sh
+          VER="$VER" scripts/stable-release-aliases.sh dist
+          ls -la dist/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -276,35 +272,39 @@ jobs:
           draft: ${{ github.ref_type != 'tag' }}
           generate_release_notes: true
           body: |
-            ## Native installers (GUI programs)
+            ## Permanent links (always newest)
 
-            | Platform | Installer |
+            Site: https://joule.f00.sh/current/
+            GitHub: `https://github.com/f00-sh/joule/releases/latest/download/<stable-name>`
+
+            ### GUI installers
+            | Platform | Permanent URL |
             |---|---|
-            | **Windows** | `joule-*-windows-x86_64-setup.exe` — double-click Setup wizard |
-            | **macOS** | `joule-*-darwin-*.pkg` (Installer) or `.dmg` (drag **joule.app** → Applications) |
-            | **Linux** | `joule-*-linux-*.deb` — `sudo dpkg -i …` (desktop entry + `/usr/bin/joule`) |
+            | Windows Setup | https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64-setup.exe |
+            | macOS arm64 .pkg | https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.pkg |
+            | macOS arm64 .dmg | https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.dmg |
+            | macOS intel .pkg | https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64.pkg |
+            | Linux amd64 .deb | https://github.com/f00-sh/joule/releases/latest/download/joule-linux-x86_64.deb |
+            | Linux arm64 .deb | https://github.com/f00-sh/joule/releases/latest/download/joule-linux-aarch64.deb |
 
-            CLI one-liners still work:
+            Site mirrors: `/current/windows/setup.exe`, `/current/macos/arm64.pkg`, `/current/linux/amd64.deb`, …
 
-            **Linux / macOS**
+            ### CLI
             ```bash
-            curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh
+            curl -fsSL https://joule.f00.sh/current/install.sh | sh
+            # or: …/releases/latest/download/install.sh
             ```
-
-            **Windows (PowerShell)**
             ```powershell
-            irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
+            irm https://joule.f00.sh/current/install.ps1 | iex
             ```
 
-            After install, run **joule** (GUI dashboard) or `joule version`.
+            Versioned assets (`joule-X.Y.Z-…`) still attach for checksums and packaging pins.
 
-            > Unsigned builds: Windows SmartScreen / macOS Gatekeeper may warn until
-            > Authenticode / Apple notarization certs are available. Use “More info → Run anyway”
-            > or right-click → Open on macOS.
+            After install: **joule** (GUI) or `joule version`.
 
-            Binaries and installers are on **GitHub Releases** only. Model weights are **never**
-            hosted on f00 — peers + official sources + sha256 only.
-            Site: https://joule.f00.sh/download.html
+            > Unsigned: SmartScreen / Gatekeeper may warn until Authenticode / notarization certs exist.
+
+            Weights never on f00. Download UI: https://joule.f00.sh/download.html
           files: |
             dist/*
         env:

@@ -1,7 +1,42 @@
-/* joule download page — OS autodetect + native installers from GitHub Releases */
+/* joule download — OS detect; permanent /current + GitHub latest URLs (no version in path). */
 (function () {
   const REPO = "f00-sh/joule";
   const API = `https://api.github.com/repos/${REPO}/releases/latest`;
+  /** Site permanent base (Cloudflare redirects → GitHub latest stable names). */
+  const CUR = "/current";
+  /** GitHub permanent base. */
+  const GH = `https://github.com/${REPO}/releases/latest/download`;
+
+  /** Stable asset map: GUI first, then CLI. */
+  const STABLE = {
+    "windows-x86_64": {
+      gui: { href: `${CUR}/windows/setup.exe`, label: "Download Windows Setup (.exe)", gh: `${GH}/joule-windows-x86_64-setup.exe` },
+      cli: { href: `${CUR}/windows/portable.zip`, label: "Portable ZIP", gh: `${GH}/joule-windows-x86_64.zip` },
+      oneliner: "irm https://joule.f00.sh/current/install.ps1 | iex",
+    },
+    "darwin-aarch64": {
+      gui: { href: `${CUR}/macos/arm64.pkg`, label: "Download macOS Installer (.pkg)", gh: `${GH}/joule-darwin-aarch64.pkg` },
+      gui2: { href: `${CUR}/macos/arm64.dmg`, label: "Disk Image (.dmg)", gh: `${GH}/joule-darwin-aarch64.dmg` },
+      cli: { href: `${CUR}/macos/arm64.tar.gz`, label: "CLI tarball", gh: `${GH}/joule-darwin-aarch64.tar.gz` },
+      oneliner: "curl -fsSL https://joule.f00.sh/current/install.sh | sh",
+    },
+    "darwin-x86_64": {
+      gui: { href: `${CUR}/macos/intel.pkg`, label: "Download macOS Installer (.pkg)", gh: `${GH}/joule-darwin-x86_64.pkg` },
+      gui2: { href: `${CUR}/macos/intel.dmg`, label: "Disk Image (.dmg)", gh: `${GH}/joule-darwin-x86_64.dmg` },
+      cli: { href: `${CUR}/macos/intel.tar.gz`, label: "CLI tarball", gh: `${GH}/joule-darwin-x86_64.tar.gz` },
+      oneliner: "curl -fsSL https://joule.f00.sh/current/install.sh | sh",
+    },
+    "linux-x86_64": {
+      gui: { href: `${CUR}/linux/amd64.deb`, label: "Download Linux package (.deb)", gh: `${GH}/joule-linux-x86_64.deb` },
+      cli: { href: `${CUR}/linux/amd64.tar.gz`, label: "CLI tarball", gh: `${GH}/joule-linux-x86_64.tar.gz` },
+      oneliner: "curl -fsSL https://joule.f00.sh/current/install.sh | sh",
+    },
+    "linux-aarch64": {
+      gui: { href: `${CUR}/linux/arm64.deb`, label: "Download Linux package (.deb)", gh: `${GH}/joule-linux-aarch64.deb` },
+      cli: { href: `${CUR}/linux/arm64.tar.gz`, label: "CLI tarball", gh: `${GH}/joule-linux-aarch64.tar.gz` },
+      oneliner: "curl -fsSL https://joule.f00.sh/current/install.sh | sh",
+    },
+  };
 
   function detect() {
     const ua = navigator.userAgent || "";
@@ -43,50 +78,6 @@
     return "Your system";
   }
 
-  function installCommand(d) {
-    if (d.os === "windows") {
-      return {
-        kind: "powershell",
-        cmd: "irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex",
-      };
-    }
-    return {
-      kind: "shell",
-      cmd: "curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh",
-    };
-  }
-
-  /** Prefer native GUI installers over CLI archives. */
-  function pickNativeInstaller(assets, d) {
-    const names = assets.map((a) => a.name);
-    const find = (re) => assets.find((a) => re.test(a.name));
-
-    if (d.os === "windows") {
-      return (
-        find(new RegExp(`joule-.*-windows-${d.arch}-setup\\.exe$`, "i")) ||
-        find(/joule-.*-windows-.*-setup\.exe$/i)
-      );
-    }
-    if (d.os === "darwin") {
-      return (
-        find(new RegExp(`joule-.*-darwin-${d.arch}\\.pkg$`, "i")) ||
-        find(new RegExp(`joule-.*-darwin-${d.arch}\\.dmg$`, "i")) ||
-        find(new RegExp(`joule-.*-darwin-${d.arch}-app\\.zip$`, "i"))
-      );
-    }
-    if (d.os === "linux") {
-      return find(new RegExp(`joule-.*-linux-${d.arch}\\.deb$`, "i"));
-    }
-    return null;
-  }
-
-  function pickCliArchive(assets, d) {
-    const keyOs = d.os === "windows" ? "windows" : d.os;
-    const ext = d.os === "windows" ? "zip" : "tar\\.gz";
-    const re = new RegExp(`joule-[^-]+-${keyOs}-${d.arch}\\.${ext}$`, "i");
-    return assets.find((a) => re.test(a.name));
-  }
-
   function setText(id, text) {
     const el = document.getElementById(id);
     if (el) el.textContent = text;
@@ -113,48 +104,55 @@
     return d;
   }
 
-  function wireAssetLinks(assets) {
-    document.querySelectorAll("a.asset-link").forEach((link) => {
-      const match = link.getAttribute("data-match");
-      if (!match) return;
-      // data-match can be exact suffix or regex-ish token
-      const hit = assets.find((a) => {
-        if (a.name === match) return true;
-        if (a.name.includes(match)) return true;
-        return false;
-      });
-      if (hit) {
-        link.href = hit.browser_download_url;
-        if (!link.dataset.keepLabel) {
-          link.textContent = hit.name;
-        }
-      }
-    });
+  function btn(href, label, primary) {
+    const a = document.createElement("a");
+    a.className = primary ? "btn" : "btn ghost";
+    a.href = href;
+    a.rel = "noopener";
+    a.textContent = label;
+    return a;
   }
 
   async function main() {
     let d = detect();
     d = await refineMacArch(d);
 
-    setText("detect-line", "Recommended for this browser / OS");
+    setText("detect-line", "Permanent GUI installer for this OS (always newest)");
     setText("detect-label", labelFor(d));
     highlightCard(d.key);
 
-    const ic = installCommand(d);
-    const cmdEl = document.getElementById("primary-cmd");
+    const pack = STABLE[d.key] || STABLE["linux-x86_64"];
     const cta = document.getElementById("primary-cta");
+    const cmdEl = document.getElementById("primary-cmd");
     const copyBtn = document.getElementById("copy-cmd");
 
-    if (cmdEl) {
+    if (cta) {
+      cta.innerHTML = "";
+      if (pack.gui) cta.appendChild(btn(pack.gui.href, pack.gui.label, true));
+      if (pack.gui2) cta.appendChild(btn(pack.gui2.href, pack.gui2.label, false));
+      if (pack.cli) cta.appendChild(btn(pack.cli.href, pack.cli.label, false));
+      const all = document.createElement("a");
+      all.className = "btn ghost";
+      all.href = "#all-platforms";
+      all.textContent = "All platforms";
+      cta.appendChild(all);
+      const cur = document.createElement("a");
+      cur.className = "btn ghost";
+      cur.href = "./current/";
+      cur.textContent = "/current map";
+      cta.appendChild(cur);
+    }
+
+    if (cmdEl && pack.oneliner) {
       cmdEl.hidden = false;
       const code = cmdEl.querySelector("code");
-      if (code) code.textContent = ic.cmd;
+      if (code) code.textContent = pack.oneliner;
     }
-    if (copyBtn) {
+    if (copyBtn && pack.oneliner) {
       copyBtn.hidden = false;
       copyBtn.addEventListener("click", async () => {
         try {
-          await navigator.clipboard.writeText(ic.cmd);
+          await navigator.clipboard.writeText(pack.oneliner);
           copyBtn.textContent = "Copied";
           setTimeout(() => {
             copyBtn.textContent = "Copy CLI install command";
@@ -165,11 +163,10 @@
       });
     }
 
+    // Metadata only — links do not depend on API success
     try {
-      const res = await fetch(API, {
-        headers: { Accept: "application/vnd.github+json" },
-      });
-      if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+      const res = await fetch(API, { headers: { Accept: "application/vnd.github+json" } });
+      if (!res.ok) throw new Error(String(res.status));
       const rel = await res.json();
       const tag = rel.tag_name || "—";
       const when = rel.published_at
@@ -181,69 +178,17 @@
         : "";
       setText(
         "release-meta",
-        `Latest release: ${tag}${when ? " · " + when : ""} · ${rel.html_url || "https://github.com/" + REPO + "/releases"}`
+        `Newest SemVer currently: ${tag}${when ? " · " + when : ""} · permanent paths always track latest · ${rel.html_url || ""}`
       );
-
-      const assets = rel.assets || [];
-      wireAssetLinks(assets);
-
-      const native = pickNativeInstaller(assets, d);
-      const cli = pickCliArchive(assets, d);
-
-      if (cta) {
-        cta.innerHTML = "";
-        if (native) {
-          const dl = document.createElement("a");
-          dl.className = "btn";
-          dl.href = native.browser_download_url;
-          dl.rel = "noopener";
-          if (d.os === "windows") dl.textContent = "Download Windows Setup (.exe)";
-          else if (d.os === "darwin") {
-            if (/\.pkg$/i.test(native.name)) dl.textContent = "Download macOS Installer (.pkg)";
-            else if (/\.dmg$/i.test(native.name)) dl.textContent = "Download macOS Disk Image (.dmg)";
-            else dl.textContent = "Download joule.app";
-          } else dl.textContent = "Download Linux package (.deb)";
-          cta.appendChild(dl);
-        }
-        if (cli) {
-          const a = document.createElement("a");
-          a.className = "btn ghost";
-          a.href = cli.browser_download_url;
-          a.rel = "noopener";
-          a.textContent = d.os === "windows" ? "ZIP (portable)" : "CLI tarball";
-          cta.appendChild(a);
-        }
-        const all = document.createElement("a");
-        all.className = "btn ghost";
-        all.href = "#all-platforms";
-        all.textContent = "All platforms";
-        cta.appendChild(all);
-      }
-
-      if (!native && cmdEl) {
-        // Fall back to CLI one-liner as primary when no native asset yet
-        setText("detect-line", "CLI install (native installer not in this release yet)");
-      } else if (native) {
-        setText("detect-line", "Native installer for this OS — real program, double-click to install");
-      }
-    } catch (e) {
+    } catch (_) {
+      setText(
+        "release-meta",
+        "Permanent /current and GitHub latest/download links stay valid; could not query tag name (network)."
+      );
       const err = document.getElementById("release-err");
       if (err) {
         err.hidden = false;
-        err.textContent =
-          "Could not load latest release from GitHub. Use the install commands once a tag is published.";
-      }
-      setText(
-        "release-meta",
-        "Latest release: not published yet — tag vX.Y.Z to cut automated builds."
-      );
-      if (cta) {
-        const a = document.createElement("a");
-        a.className = "btn";
-        a.href = "#primary-cmd";
-        a.textContent =
-          d.os === "windows" ? "CLI: PowerShell install" : "CLI: one-command install";
-        cta.appendChild(a);
+        err.textContent = "Tag metadata unavailable; download buttons still use permanent URLs.";
       }
     }
   }

@@ -44,14 +44,32 @@ Built by `.github/workflows/release.yml` on every `v*` tag from:
 
 ## Asset naming
 
+**Versioned** (for pins/checksums):
+
 ```text
 joule-{ver}-windows-x86_64-setup.exe
 joule-{ver}-darwin-{arch}.pkg
-joule-{ver}-darwin-{arch}.dmg
-joule-{ver}-darwin-{arch}-app.zip
-joule-{ver}-linux-{arch}.deb
-joule-{ver}-linux-{arch}.tar.gz
-joule-{ver}-darwin-{arch}.tar.gz
-joule-{ver}-windows-{arch}.zip
-install.sh  install.ps1  SHA256SUMS  file_id.diz
+…
 ```
+
+**Stable (permanent `latest` + site `/current`)** — same bytes, no SemVer in the name:
+
+```text
+joule-windows-x86_64-setup.exe
+joule-darwin-aarch64.pkg
+joule-darwin-aarch64.dmg
+joule-darwin-x86_64.pkg
+joule-linux-x86_64.deb
+joule-linux-x86_64.tar.gz
+…
+install.sh  install.ps1
+```
+
+Published by `scripts/stable-release-aliases.sh` in the release workflow.
+
+| Consumer | Permanent URL pattern |
+|----------|----------------------|
+| Site | `https://joule.f00.sh/current/windows/setup.exe` (Cloudflare `_redirects`) |
+| GitHub | `https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64-setup.exe` |
+
+Index page: `docs/current/index.html` → https://joule.f00.sh/current/

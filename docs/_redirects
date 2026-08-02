@@ -1,0 +1,34 @@
+# Permanent /current/* → always GitHub Releases /latest (versionless asset names).
+# Update release CI (stable-release-aliases.sh) if you add platforms — not this file's versions.
+# Cloudflare Pages: https://developers.cloudflare.com/pages/configuration/redirects/
+
+# --- GUI / native installers (primary) ---
+/current/windows/setup.exe           https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64-setup.exe  302
+/current/windows/setup               https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64-setup.exe  302
+/current/macos/arm64.pkg             https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.pkg  302
+/current/macos/arm64.dmg             https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.dmg  302
+/current/macos/arm64.app.zip         https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64-app.zip  302
+/current/macos/intel.pkg             https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64.pkg  302
+/current/macos/intel.dmg             https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64.dmg  302
+/current/macos/intel.app.zip         https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64-app.zip  302
+/current/linux/amd64.deb             https://github.com/f00-sh/joule/releases/latest/download/joule-linux-x86_64.deb  302
+/current/linux/arm64.deb             https://github.com/f00-sh/joule/releases/latest/download/joule-linux-aarch64.deb  302
+
+# Friendly aliases
+/current/win                         https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64-setup.exe  302
+/current/mac                         https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.pkg  302
+/current/mac-intel                   https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64.pkg  302
+/current/linux                       https://github.com/f00-sh/joule/releases/latest/download/joule-linux-x86_64.deb  302
+
+# --- CLI archives / one-liners ---
+/current/windows/portable.zip        https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64.zip  302
+/current/macos/arm64.tar.gz          https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.tar.gz  302
+/current/macos/intel.tar.gz          https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64.tar.gz  302
+/current/linux/amd64.tar.gz          https://github.com/f00-sh/joule/releases/latest/download/joule-linux-x86_64.tar.gz  302
+/current/linux/arm64.tar.gz          https://github.com/f00-sh/joule/releases/latest/download/joule-linux-aarch64.tar.gz  302
+/current/install.sh                  https://github.com/f00-sh/joule/releases/latest/download/install.sh  302
+/current/install.ps1                 https://github.com/f00-sh/joule/releases/latest/download/install.ps1  302
+
+# Index of permanent links
+/current                             /current/  302
+/current/                            /current/index.html  200

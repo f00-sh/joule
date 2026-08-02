@@ -44,11 +44,21 @@ if (-not $tag) { Die "release has no tag_name" }
 $ver = $tag.TrimStart("v")
 $arch = Get-ArchTag
 
-# Prefer native GUI Setup.exe when present; fall back to portable ZIP.
-$setupName = "$Project-$ver-windows-$arch-setup.exe"
-$zipName = "$Project-$ver-windows-$arch.zip"
-$setup = $rel.assets | Where-Object { $_.name -eq $setupName } | Select-Object -First 1
-$zipAsset = $rel.assets | Where-Object { $_.name -eq $zipName } | Select-Object -First 1
+# Prefer permanent stable Setup.exe name; fall back to versioned or ZIP.
+$setupStable = "$Project-windows-$arch-setup.exe"
+$setupVersioned = "$Project-$ver-windows-$arch-setup.exe"
+$zipStable = "$Project-windows-$arch.zip"
+$zipVersioned = "$Project-$ver-windows-$arch.zip"
+$setup = $rel.assets | Where-Object { $_.name -eq $setupStable } | Select-Object -First 1
+if (-not $setup) {
+    $setup = $rel.assets | Where-Object { $_.name -eq $setupVersioned } | Select-Object -First 1
+}
+$zipAsset = $rel.assets | Where-Object { $_.name -eq $zipStable } | Select-Object -First 1
+if (-not $zipAsset) {
+    $zipAsset = $rel.assets | Where-Object { $_.name -eq $zipVersioned } | Select-Object -First 1
+}
+$setupName = if ($setup) { $setup.name } else { $setupStable }
+$zipName = if ($zipAsset) { $zipAsset.name } else { $zipVersioned }
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("joule-install-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null

@@ -92,18 +92,24 @@ install_release() {
   need_cmd tar
   need_cmd install
   local tag ver asset url tmp api
-  api="https://api.github.com/repos/${REPO}/releases/latest"
-  tag="$(curl -fsSL "${api}" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
-  [[ -n "${tag}" ]] || die "could not resolve latest release tag (${api})"
-  ver="${tag#v}"
-  asset="${PROJECT}-${ver}-${os}-${arch}.tar.gz"
-  url="https://github.com/${REPO}/releases/download/${tag}/${asset}"
+  # Permanent stable name (no SemVer in path) — always tracks GitHub "latest".
+  asset="${PROJECT}-${os}-${arch}.tar.gz"
+  url="https://github.com/${REPO}/releases/latest/download/${asset}"
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap 'rm -rf "${tmp:-/tmp/joule-install-none}"' EXIT
   printf 'downloading %s\n' "${url}"
   if ! curl -fsSL "${url}" -o "${tmp}/${asset}"; then
-    die "release asset missing (${url}). Try another platform on https://joule.f00.sh/download.html or build: git clone + cargo build --release -p joule"
+    # Fallback: resolve tag and versioned asset (older releases without stable aliases).
+    api="https://api.github.com/repos/${REPO}/releases/latest"
+    tag="$(curl -fsSL "${api}" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
+    [[ -n "${tag}" ]] || die "could not resolve latest release (${api})"
+    ver="${tag#v}"
+    asset="${PROJECT}-${ver}-${os}-${arch}.tar.gz"
+    url="https://github.com/${REPO}/releases/download/${tag}/${asset}"
+    printf 'retry versioned asset %s\n' "${url}"
+    curl -fsSL "${url}" -o "${tmp}/${asset}" \
+      || die "release asset missing (${url}). See https://joule.f00.sh/current/"
   fi
   tar -C "${tmp}" -xzf "${tmp}/${asset}"
   # Tarball may be flat or a single top-level dir.

@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#1E78C8" />
-  <meta name="description" content="Download joule — one-click install for Linux, macOS, and Windows. Autodetects your system." />
+  <meta name="description" content="Download joule — permanent links to the newest GUI installers and CLI for Windows, macOS, and Linux." />
   <meta property="og:title" content="Download joule" />
   <meta property="og:url" content="https://joule.f00.sh/download.html" />
   <link rel="canonical" href="https://joule.f00.sh/download.html" />
@@ -27,106 +27,131 @@
         <a href="./">Home</a>
         <a href="./#pool">Live pool</a>
         <a href="./download.html" aria-current="page">Download</a>
-        <a href="https://github.com/f00-sh/joule/releases" rel="noopener">All releases</a>
-        <a href="https://github.com/f00-sh/joule" rel="noopener">GitHub</a>
+        <a href="./current/">/current</a>
+        <a href="https://github.com/f00-sh/joule/releases/latest" rel="noopener">GitHub latest</a>
       </nav>
     </div>
   </header>
 
   <main id="main" class="wrap">
     <section class="hero" id="top">
-      <p class="pill-free">native installers · GUI apps · CLI one-liners</p>
-      <h1>Install joule.<br /><em>Real OS installers.</em></h1>
+      <p class="pill-free">permanent URLs · GUI first · always newest</p>
+      <h1>Install joule.<br /><em>Same links every release.</em></h1>
       <p class="lead">
-        <strong>Windows Setup.exe</strong>, <strong>macOS .pkg / .dmg (joule.app)</strong>,
-        <strong>Linux .deb</strong> — built by CI on every release. CLI one-liners still work.
-        This page only <strong>links</strong> to GitHub Releases — model weights are never on f00.
+        Primary buttons use <strong>versionless</strong> paths under
+        <a href="./current/"><code>/current/…</code></a> and GitHub
+        <code>…/releases/latest/download/…</code> — no site edit when we ship a new SemVer.
       </p>
 
       <div class="download-hero" id="primary-download">
         <p class="muted" id="detect-line">Detecting your system…</p>
         <p class="big" id="detect-label">—</p>
         <div class="cta-row" id="primary-cta">
-          <!-- filled by download.js -->
+          <!-- filled by download.js from permanent URLs -->
         </div>
         <pre class="install-cmd" id="primary-cmd" hidden><code></code></pre>
-        <button type="button" class="btn ghost" id="copy-cmd" hidden>Copy install command</button>
+        <button type="button" class="btn ghost" id="copy-cmd" hidden>Copy CLI install command</button>
       </div>
     </section>
 
     <section id="all-platforms">
-      <h2>All platforms</h2>
-      <p class="muted">Download for another machine, or use a package manager.</p>
+      <h2>All platforms — permanent links</h2>
+      <p class="muted">GUI installers first; CLI below. These hrefs do not embed a version number.</p>
       <div class="platform-grid" id="platform-grid">
-        <article class="platform-card" data-key="linux-x86_64">
-          <h3>Linux x86_64</h3>
-          <p class="muted">Native <strong>.deb</strong> (desktop entry + <code>/usr/bin/joule</code>)</p>
-          <p><a class="btn asset-link" data-match="linux-x86_64.deb" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">Download .deb installer</a></p>
-          <pre class="install-cmd"><code>sudo dpkg -i joule-*-linux-x86_64.deb
-# CLI fallback:
-curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh</code></pre>
-          <p><a class="btn ghost asset-link" data-match="linux-x86_64.tar.gz" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">CLI tarball</a></p>
-        </article>
-        <article class="platform-card" data-key="linux-aarch64">
-          <h3>Linux aarch64</h3>
-          <p class="muted">Native <strong>.deb</strong> for ARM64</p>
-          <p><a class="btn asset-link" data-match="linux-aarch64.deb" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">Download .deb installer</a></p>
-          <pre class="install-cmd"><code>sudo dpkg -i joule-*-linux-aarch64.deb</code></pre>
-          <p><a class="btn ghost asset-link" data-match="linux-aarch64.tar.gz" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">CLI tarball</a></p>
-        </article>
-        <article class="platform-card" data-key="darwin-aarch64">
-          <h3>macOS Apple Silicon</h3>
-          <p class="muted"><strong>.pkg</strong> Installer + <strong>.dmg</strong> with <code>joule.app</code></p>
-          <p><a class="btn asset-link" data-match="darwin-aarch64.pkg" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">Download .pkg</a>
-             <a class="btn ghost asset-link" data-match="darwin-aarch64.dmg" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">Download .dmg</a></p>
-          <p class="muted">Also: Homebrew <code>brew install f00-sh/tap/joule</code> · CLI tarball · <code>joule.app</code> zip</p>
-          <p><a class="btn ghost asset-link" data-match="darwin-aarch64-app.zip" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">joule.app.zip</a>
-             <a class="btn ghost asset-link" data-match="darwin-aarch64.tar.gz" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">CLI tarball</a></p>
-        </article>
-        <article class="platform-card" data-key="darwin-x86_64">
-          <h3>macOS Intel</h3>
-          <p class="muted"><strong>.pkg</strong> + <strong>.dmg</strong> (joule.app)</p>
-          <p><a class="btn asset-link" data-match="darwin-x86_64.pkg" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">Download .pkg</a>
-             <a class="btn ghost asset-link" data-match="darwin-x86_64.dmg" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">Download .dmg</a></p>
-          <p><a class="btn ghost asset-link" data-match="darwin-x86_64.tar.gz" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">CLI tarball</a></p>
-        </article>
         <article class="platform-card" data-key="windows-x86_64">
           <h3>Windows x64</h3>
-          <p class="muted"><strong>Setup.exe</strong> wizard (Start Menu + optional PATH)</p>
-          <p><a class="btn asset-link" data-match="windows-x86_64-setup.exe" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">Download Setup.exe</a></p>
-          <pre class="install-cmd"><code># CLI alternative (no wizard):
-irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex</code></pre>
-          <p><a class="btn ghost asset-link" data-match="windows-x86_64.zip" data-keep-label="1" href="https://github.com/f00-sh/joule/releases/latest">Portable ZIP</a></p>
+          <p class="muted"><strong>GUI:</strong> Setup wizard</p>
+          <p>
+            <a class="btn" href="/current/windows/setup.exe">Download Setup.exe</a>
+          </p>
+          <p class="muted"><strong>CLI:</strong></p>
+          <pre class="install-cmd"><code>irm https://joule.f00.sh/current/install.ps1 | iex</code></pre>
+          <p><a class="btn ghost" href="/current/windows/portable.zip">Portable ZIP</a></p>
         </article>
+
+        <article class="platform-card" data-key="darwin-aarch64">
+          <h3>macOS Apple Silicon</h3>
+          <p class="muted"><strong>GUI:</strong> .pkg / .dmg (joule.app)</p>
+          <p>
+            <a class="btn" href="/current/macos/arm64.pkg">Download .pkg</a>
+            <a class="btn ghost" href="/current/macos/arm64.dmg">Download .dmg</a>
+          </p>
+          <p class="muted"><strong>CLI:</strong></p>
+          <pre class="install-cmd"><code>curl -fsSL https://joule.f00.sh/current/install.sh | sh</code></pre>
+          <p>
+            <a class="btn ghost" href="/current/macos/arm64.app.zip">joule.app.zip</a>
+            <a class="btn ghost" href="/current/macos/arm64.tar.gz">tarball</a>
+          </p>
+        </article>
+
+        <article class="platform-card" data-key="darwin-x86_64">
+          <h3>macOS Intel</h3>
+          <p class="muted"><strong>GUI:</strong> .pkg / .dmg</p>
+          <p>
+            <a class="btn" href="/current/macos/intel.pkg">Download .pkg</a>
+            <a class="btn ghost" href="/current/macos/intel.dmg">Download .dmg</a>
+          </p>
+          <p>
+            <a class="btn ghost" href="/current/macos/intel.app.zip">joule.app.zip</a>
+            <a class="btn ghost" href="/current/macos/intel.tar.gz">tarball</a>
+          </p>
+        </article>
+
+        <article class="platform-card" data-key="linux-x86_64">
+          <h3>Linux x86_64</h3>
+          <p class="muted"><strong>GUI/package:</strong> .deb</p>
+          <p>
+            <a class="btn" href="/current/linux/amd64.deb">Download .deb</a>
+          </p>
+          <pre class="install-cmd"><code>sudo dpkg -i joule-linux-x86_64.deb
+# or CLI:
+curl -fsSL https://joule.f00.sh/current/install.sh | sh</code></pre>
+          <p><a class="btn ghost" href="/current/linux/amd64.tar.gz">CLI tarball</a></p>
+        </article>
+
+        <article class="platform-card" data-key="linux-aarch64">
+          <h3>Linux aarch64</h3>
+          <p class="muted"><strong>GUI/package:</strong> .deb</p>
+          <p>
+            <a class="btn" href="/current/linux/arm64.deb">Download .deb</a>
+          </p>
+          <p><a class="btn ghost" href="/current/linux/arm64.tar.gz">CLI tarball</a></p>
+        </article>
+
         <article class="platform-card" data-key="aur">
-          <h3>Arch Linux (f00 PKGBUILD)</h3>
-          <p class="muted">Published under f00-sh — clone and <code>makepkg -si</code> (not on aur.archlinux.org yet)</p>
-          <pre class="install-cmd"><code>git clone https://github.com/f00-sh/aur-joule-bin.git
+          <h3>Also</h3>
+          <p class="muted">Optional package managers (not required for GUI install)</p>
+          <pre class="install-cmd"><code>brew install f00-sh/tap/joule
+
+git clone https://github.com/f00-sh/aur-joule-bin.git
 cd aur-joule-bin && makepkg -si</code></pre>
-          <p class="muted">Source: <a href="https://github.com/f00-sh/aur-joule-bin" rel="noopener">f00-sh/aur-joule-bin</a> · digests pin GitHub Releases.</p>
+          <p class="muted">Full permanent map: <a href="./current/">/current/</a></p>
         </article>
       </div>
       <p id="release-meta" class="muted" style="margin-top:1rem">Latest release: loading…</p>
       <p class="err" id="release-err" hidden></p>
     </section>
 
+    <section id="github-permanent">
+      <h2>GitHub permanent names</h2>
+      <p class="muted">Same files; useful when you want origin = github.com</p>
+      <pre class="install-cmd"><code>https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64-setup.exe
+https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.pkg
+https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.dmg
+https://github.com/f00-sh/joule/releases/latest/download/joule-linux-x86_64.deb
+https://github.com/f00-sh/joule/releases/latest/download/install.sh
+https://github.com/f00-sh/joule/releases/latest/download/install.ps1</code></pre>
+    </section>
+
     <section id="after">
       <h2>After install</h2>
       <ol class="steps">
-        <li>Install (above) — run the agent. A <strong>CODE</strong> is created for you.</li>
-        <li><strong>Do not lose the CODE</strong> — also saved as <code>JOULE-RECOVERY.txt</code> next to your identity file. Back it up.</li>
-        <li>Other PCs: <code>joule identity use YOUR-CODE</code> (or copy the recovery file).</li>
-        <li>See code again: <code>joule identity show</code> — never post CODE publicly.</li>
-        <li>Connect Cursor / other OpenAI apps: after the agent joins once, run <code>joule connect</code> for Base URL (<code>…/v1</code>), full pool-issued <code>joule_…</code> API key, and model <code>kimi-open</code> (also written to <code>JOULE-CONNECT.txt</code>).</li>
+        <li>Launch <strong>joule</strong> (GUI dashboard by default).</li>
+        <li><strong>Start control</strong> → <strong>Start agent</strong> (or CLI equivalents).</li>
+        <li>Back up your CODE / <code>JOULE-RECOVERY.txt</code>.</li>
+        <li>Connect apps: <code>joule connect</code> for Base URL + <code>joule_…</code> key + <code>kimi-open</code>.</li>
       </ol>
-      <p class="muted">
-        Full docs: <a href="./">joule.f00.sh</a> ·
-        <a href="https://github.com/f00-sh/joule">source</a> ·
-        packaging notes: <a href="https://github.com/f00-sh/joule/tree/main/packaging">packaging/</a>
-      </p>
     </section>
   </main>
-
-  <footer class="site-footer foot" data-f00-chrome-slot="footer"></footer>
 </body>
 </html>

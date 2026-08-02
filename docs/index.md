@@ -29,7 +29,7 @@ Every install method installs man page(s).
 ### Curl (releases)
 
 ```text
-curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh
+curl -fsSL https://joule.f00.sh/current/install.sh | sh
 ```
 
 ### From source

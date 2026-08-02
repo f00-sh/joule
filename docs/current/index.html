@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Permanent download links for the newest joule release — GUI installers first, then CLI." />
+  <title>joule /current — always the newest release</title>
+  <link rel="icon" href="https://f00.sh/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="https://f00.sh/theme/f00-theme.css" data-f00-theme="1" />
+  <link rel="stylesheet" href="../styles.css" />
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="nav-shell">
+      <a class="brand" href="../" aria-label="joule home">
+        <span class="brand-mark">f00</span>
+        <span class="brand-sub">/joule</span>
+      </a>
+      <nav class="site-nav" aria-label="Primary">
+        <a href="../">Home</a>
+        <a href="../download.html">Download</a>
+        <a href="./" aria-current="page">/current</a>
+        <a href="https://github.com/f00-sh/joule/releases/latest" rel="noopener">GitHub latest</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+    <section class="hero">
+      <p class="pill-free">permanent URLs · always newest SemVer</p>
+      <h1><code>/current</code><br /><em>never rewrite the site for a release.</em></h1>
+      <p class="lead">
+        These paths and GitHub <code>…/releases/latest/download/…</code> names are
+        <strong>versionless</strong>. Every tag republishes the same filenames → you keep one link forever.
+      </p>
+    </section>
+
+    <section>
+      <h2>GUI installers (prefer these)</h2>
+      <table>
+        <thead>
+          <tr><th>Platform</th><th>Site (permanent)</th><th>GitHub latest (permanent)</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Windows Setup.exe</td>
+            <td><a href="/current/windows/setup.exe"><code>/current/windows/setup.exe</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64-setup.exe"><code>joule-windows-x86_64-setup.exe</code></a></td>
+          </tr>
+          <tr>
+            <td>macOS Apple Silicon .pkg</td>
+            <td><a href="/current/macos/arm64.pkg"><code>/current/macos/arm64.pkg</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.pkg"><code>joule-darwin-aarch64.pkg</code></a></td>
+          </tr>
+          <tr>
+            <td>macOS Apple Silicon .dmg</td>
+            <td><a href="/current/macos/arm64.dmg"><code>/current/macos/arm64.dmg</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.dmg"><code>joule-darwin-aarch64.dmg</code></a></td>
+          </tr>
+          <tr>
+            <td>macOS Intel .pkg</td>
+            <td><a href="/current/macos/intel.pkg"><code>/current/macos/intel.pkg</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64.pkg"><code>joule-darwin-x86_64.pkg</code></a></td>
+          </tr>
+          <tr>
+            <td>macOS Intel .dmg</td>
+            <td><a href="/current/macos/intel.dmg"><code>/current/macos/intel.dmg</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64.dmg"><code>joule-darwin-x86_64.dmg</code></a></td>
+          </tr>
+          <tr>
+            <td>Linux amd64 .deb</td>
+            <td><a href="/current/linux/amd64.deb"><code>/current/linux/amd64.deb</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-linux-x86_64.deb"><code>joule-linux-x86_64.deb</code></a></td>
+          </tr>
+          <tr>
+            <td>Linux arm64 .deb</td>
+            <td><a href="/current/linux/arm64.deb"><code>/current/linux/arm64.deb</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-linux-aarch64.deb"><code>joule-linux-aarch64.deb</code></a></td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="muted">Shortcuts: <a href="/current/win"><code>/current/win</code></a> ·
+        <a href="/current/mac"><code>/current/mac</code></a> ·
+        <a href="/current/mac-intel"><code>/current/mac-intel</code></a> ·
+        <a href="/current/linux"><code>/current/linux</code></a></p>
+    </section>
+
+    <section>
+      <h2>CLI (secondary)</h2>
+      <table>
+        <thead>
+          <tr><th>What</th><th>Site</th><th>GitHub latest</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Linux / macOS one-liner</td>
+            <td colspan="2"><code>curl -fsSL https://joule.f00.sh/current/install.sh | sh</code></td>
+          </tr>
+          <tr>
+            <td>Windows PowerShell</td>
+            <td colspan="2"><code>irm https://joule.f00.sh/current/install.ps1 | iex</code></td>
+          </tr>
+          <tr>
+            <td>Windows portable ZIP</td>
+            <td><a href="/current/windows/portable.zip"><code>/current/windows/portable.zip</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-windows-x86_64.zip"><code>joule-windows-x86_64.zip</code></a></td>
+          </tr>
+          <tr>
+            <td>macOS arm64 tarball</td>
+            <td><a href="/current/macos/arm64.tar.gz"><code>/current/macos/arm64.tar.gz</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-aarch64.tar.gz"><code>joule-darwin-aarch64.tar.gz</code></a></td>
+          </tr>
+          <tr>
+            <td>macOS intel tarball</td>
+            <td><a href="/current/macos/intel.tar.gz"><code>/current/macos/intel.tar.gz</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-darwin-x86_64.tar.gz"><code>joule-darwin-x86_64.tar.gz</code></a></td>
+          </tr>
+          <tr>
+            <td>Linux amd64 tarball</td>
+            <td><a href="/current/linux/amd64.tar.gz"><code>/current/linux/amd64.tar.gz</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-linux-x86_64.tar.gz"><code>joule-linux-x86_64.tar.gz</code></a></td>
+          </tr>
+          <tr>
+            <td>Linux arm64 tarball</td>
+            <td><a href="/current/linux/arm64.tar.gz"><code>/current/linux/arm64.tar.gz</code></a></td>
+            <td><a href="https://github.com/f00-sh/joule/releases/latest/download/joule-linux-aarch64.tar.gz"><code>joule-linux-aarch64.tar.gz</code></a></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>How this stays permanent</h2>
+      <ol class="steps">
+        <li>Each SemVer release still attaches <em>versioned</em> assets (<code>joule-0.1.x-…</code>).</li>
+        <li>CI also attaches <strong>stable names</strong> (<code>joule-windows-x86_64-setup.exe</code>, …).</li>
+        <li>GitHub <code>/releases/latest/download/&lt;stable-name&gt;</code> always resolves to the newest tag.</li>
+        <li>This site’s <code>/current/…</code> paths are Cloudflare redirects to those stable names — no per-release HTML edits.</li>
+      </ol>
+      <p class="muted">Pretty download UI: <a href="../download.html">/download.html</a> · Source: <a href="https://github.com/f00-sh/joule">f00-sh/joule</a></p>
+    </section>
+  </main>
+</body>
+</html>

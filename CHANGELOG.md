@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Permanent download links: versionless GitHub `latest` asset names + site `/current/*` redirects (GUI first, then CLI); release CI publishes stable aliases every tag
+
 ## [0.1.8] — 2026-08-02
 
 Native OS GUI installers for Windows, macOS, and Linux.

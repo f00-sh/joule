@@ -38,35 +38,41 @@ The website ([joule.f00.sh](https://joule.f00.sh/)) is a f00-themed teaser with 
 
 ## Install
 
-**Preferred:** real **native OS installers** from [GitHub Releases](https://github.com/f00-sh/joule/releases)
-(or [joule.f00.sh/download.html](https://joule.f00.sh/download.html) which autodetects your OS).
+**Preferred:** permanent links that always resolve to the **newest** release
+([/current](https://joule.f00.sh/current/) · [download.html](https://joule.f00.sh/download.html)).
 
-| Platform | Native installer |
-|----------|------------------|
-| **Windows** | `joule-*-windows-x86_64-setup.exe` — double-click Setup wizard (Start Menu + GUI) |
-| **macOS** | `joule-*-darwin-*.pkg` or `.dmg` with **joule.app** (not Homebrew-only) |
-| **Linux** | `joule-*-linux-*.deb` — `sudo dpkg -i …` (desktop launcher + `/usr/bin/joule`) |
+### GUI first (permanent — no version in the URL)
 
-CLI one-liners still work for automation:
+| Platform | Site (forever) | GitHub `latest` stable name |
+|----------|----------------|-----------------------------|
+| **Windows Setup** | https://joule.f00.sh/current/windows/setup.exe | `joule-windows-x86_64-setup.exe` |
+| **macOS arm64 .pkg** | https://joule.f00.sh/current/macos/arm64.pkg | `joule-darwin-aarch64.pkg` |
+| **macOS arm64 .dmg** | https://joule.f00.sh/current/macos/arm64.dmg | `joule-darwin-aarch64.dmg` |
+| **Linux amd64 .deb** | https://joule.f00.sh/current/linux/amd64.deb | `joule-linux-x86_64.deb` |
+
+GitHub form: `https://github.com/f00-sh/joule/releases/latest/download/<stable-name>`  
+Full map (intel mac, arm64 linux, CLI): [joule.f00.sh/current/](https://joule.f00.sh/current/)
+
+### CLI one-liners (also permanent)
 
 ```text
 # Linux / macOS
-curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh
+curl -fsSL https://joule.f00.sh/current/install.sh | sh
 ```
 
 ```powershell
-# Windows (prefers Setup.exe when published; else portable ZIP)
-irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
+# Windows (launches Setup.exe when available)
+irm https://joule.f00.sh/current/install.ps1 | iex
 ```
 
 ### Package managers
 
 | Channel | Notes |
 |---------|--------|
-| **GitHub Releases** | Canonical installers + archives — [f00-sh/joule releases](https://github.com/f00-sh/joule/releases) |
+| **GitHub Releases** | Versioned + stable names — [releases](https://github.com/f00-sh/joule/releases) |
 | **Homebrew** | `brew install f00-sh/tap/joule` (optional; `.pkg`/`.dmg` also ship) |
-| **Arch PKGBUILD** | [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin) — `makepkg -si` after clone |
-| **Windows** | **Setup.exe** primary; ZIP + `install.ps1` fallback (unsigned until Authenticode cert) |
+| **Arch PKGBUILD** | [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin) |
+| **Windows** | **Setup.exe** via `/current/windows/setup.exe` (unsigned until cert) |
 
 ### Your joule code (multi-machine, no PII)
 
