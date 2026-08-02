@@ -7,13 +7,34 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Optional wall-clock schedule window (UTC minutes from midnight).
+/// Optional wall-clock schedule window in **local** minutes from midnight.
+/// (Field names keep `utc` for on-disk compatibility; values are local time.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleWindow {
-    /// Inclusive start minute of day UTC [0, 1440).
+    /// Inclusive start minute of local day [0, 1440).
     pub start_min_utc: u16,
-    /// Exclusive end minute of day UTC (0 = 1440). May wrap past midnight.
+    /// Exclusive end minute of local day (0 = 1440). May wrap past midnight.
     pub end_min_utc: u16,
+}
+
+/// Local minute-of-day from unix seconds + fixed offset (seconds east of UTC).
+pub fn local_minute_of_day(unix_secs: u64, utc_offset_secs: i32) -> u16 {
+    let local = (unix_secs as i64 + i64::from(utc_offset_secs)).rem_euclid(86_400) as u64;
+    ((local / 60) % 1440) as u16
+}
+
+/// Best-effort system UTC offset (seconds east of UTC).
+/// Prefer `TZ`/`chrono`-free: compare local civil time via `strftime` is OS-heavy;
+/// use `i32::from(chrono)` alternative — env `JOULE_TZ_OFFSET_SECS` or 0.
+pub fn system_utc_offset_secs() -> i32 {
+    if let Ok(v) = std::env::var("JOULE_TZ_OFFSET_SECS") {
+        if let Ok(n) = v.parse::<i32>() {
+            return n;
+        }
+    }
+    // Linux: /etc/localtime offset is hard without libc; default 0 (UTC).
+    // Agents in non-UTC regions set JOULE_TZ_OFFSET_SECS or use inject in tests.
+    0
 }
 
 impl ScheduleWindow {
@@ -100,12 +121,18 @@ impl DonorPolicy {
     }
 
     /// Whether the agent may donate (heartbeat healthy / join as contributor).
-    pub fn allows_donate(&self, now_unix_secs: u64, sensors: SensorSample) -> bool {
+    /// Schedule uses **local** wall time (`utc_offset_secs` east of UTC; inject for tests).
+    pub fn allows_donate_with_offset(
+        &self,
+        now_unix_secs: u64,
+        utc_offset_secs: i32,
+        sensors: SensorSample,
+    ) -> bool {
         if self.paused {
             return false;
         }
         if let Some(ref win) = self.schedule {
-            let minute = ((now_unix_secs / 60) % 1440) as u16;
+            let minute = local_minute_of_day(now_unix_secs, utc_offset_secs);
             if !win.contains_minute(minute) {
                 return false;
             }
@@ -128,11 +155,50 @@ impl DonorPolicy {
         true
     }
 
+    /// Production helper: local TZ via [`system_utc_offset_secs`].
+    pub fn allows_donate(&self, now_unix_secs: u64, sensors: SensorSample) -> bool {
+        self.allows_donate_with_offset(now_unix_secs, system_utc_offset_secs(), sensors)
+    }
+
     pub fn now_unix_secs() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0)
+    }
+
+    /// Human summary for tray/status (includes sensors).
+    pub fn status_lines(&self, sensors: SensorSample) -> Vec<String> {
+        let now = Self::now_unix_secs();
+        let off = system_utc_offset_secs();
+        let donating = self.allows_donate_with_offset(now, off, sensors);
+        vec![
+            format!("paused={}", self.paused),
+            format!(
+                "mem_cap={}",
+                self.mem_cap_mib
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "none".into())
+            ),
+            format!(
+                "schedule_local={}",
+                self.schedule
+                    .as_ref()
+                    .map(|w| format!(
+                        "{:02}:{:02}-{:02}:{:02}",
+                        w.start_min_utc / 60,
+                        w.start_min_utc % 60,
+                        w.end_min_utc / 60,
+                        w.end_min_utc % 60
+                    ))
+                    .unwrap_or_else(|| "always".into())
+            ),
+            format!(
+                "sensors temp_c={:?} battery_pct={:?} on_ac={:?}",
+                sensors.temp_c, sensors.battery_pct, sensors.on_ac
+            ),
+            format!("allows_donate={donating} (local; remote cannot override)"),
+        ]
     }
 }
 
@@ -188,7 +254,7 @@ mod tests {
     }
 
     #[test]
-    fn schedule_window_utc() {
+    fn schedule_window_local_tz() {
         let win = ScheduleWindow {
             start_min_utc: 9 * 60,
             end_min_utc: 17 * 60,
@@ -199,11 +265,15 @@ mod tests {
             schedule: Some(win),
             ..Default::default()
         };
-        // 10:00 UTC
+        // unix 10:00 UTC + offset -5h → local 05:00 → outside 9–17
         let t = 10 * 3600u64;
-        assert!(p.allows_donate(t, SensorSample::default()));
-        // 20:00 UTC
-        assert!(!p.allows_donate(20 * 3600, SensorSample::default()));
+        assert!(!p.allows_donate_with_offset(t, -5 * 3600, SensorSample::default()));
+        // same UTC 10:00 with offset 0 → local 10:00 → inside
+        assert!(p.allows_donate_with_offset(t, 0, SensorSample::default()));
+        // UTC 14:00 + offset +8h → local 22:00 → outside
+        assert!(!p.allows_donate_with_offset(14 * 3600, 8 * 3600, SensorSample::default()));
+        // UTC 02:00 + offset +8h → local 10:00 → inside
+        assert!(p.allows_donate_with_offset(2 * 3600, 8 * 3600, SensorSample::default()));
     }
 
     #[test]

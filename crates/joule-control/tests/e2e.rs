@@ -261,6 +261,117 @@ async fn pool_capacity_and_chat() {
     assert_eq!(PROTOCOL_VERSION, "0.1.0");
 }
 
+/// Dashboard nodes JSON includes attestation_tier from claim vs verified.
+#[tokio::test]
+async fn nodes_api_includes_attestation_tier() {
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let (_k, h) = spawn_agent(agent_addr, "tier-alice", 8192).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    {
+        // leave verified 0 → claim_only
+        let _g = app.state.read().await;
+    }
+    let client = reqwest::Client::new();
+    let body: serde_json::Value = client
+        .get(format!("http://{http_addr}/v1/cluster/nodes"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nodes = body["nodes"].as_array().expect("nodes array");
+    assert!(!nodes.is_empty());
+    for n in nodes {
+        let tier = n["attestation_tier"].as_str().unwrap_or("");
+        assert!(
+            matches!(tier, "claim_only" | "challenge_partial" | "challenge_full"),
+            "missing/bad attestation_tier in {n}"
+        );
+        assert_eq!(
+            tier, "claim_only",
+            "unverified node is claim_only, got {tier}"
+        );
+    }
+    // After trust, full tier
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+    let body2: serde_json::Value = client
+        .get(format!("http://{http_addr}/v1/cluster/nodes"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let tier2 = body2["nodes"][0]["attestation_tier"].as_str().unwrap_or("");
+    assert_eq!(
+        tier2, "challenge_full",
+        "trusted claims → full, got {tier2}"
+    );
+    h.abort();
+}
+
+/// service_live flips via mark_node_loaded when pool gates satisfied (real control path).
+#[tokio::test]
+async fn service_live_flips_when_mesh_loaded() {
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    // ≥3 backends, large verified VRAM for kimi-eligible
+    let mut handles = vec![];
+    for (i, mem) in [(0, 24_576u32), (1, 24_576), (2, 24_576)] {
+        let (k, h) = spawn_agent(agent_addr, &format!("live-{i}"), mem).await;
+        let _ = k;
+        handles.push(h);
+    }
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let mut node_ids = vec![];
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+        node_ids = g.cluster.nodes().map(|n| n.id.clone()).collect();
+        assert!(
+            !g.service_live,
+            "service_live starts false before model loaded"
+        );
+        for id in &node_ids {
+            g.mark_node_loaded(id.clone());
+        }
+        assert!(
+            g.service_live,
+            "service_live must flip true when pool+mesh loaded"
+        );
+    }
+    let client = reqwest::Client::new();
+    let ready: serde_json::Value = client
+        .get(format!("http://{http_addr}/v1/models/readiness"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // readiness may still show modes; operator status exposes service_live
+    let op: serde_json::Value = client
+        .get(format!("http://{http_addr}/v1/operator/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        op["service_live"], true,
+        "operator status shows service_live op={op} ready={ready}"
+    );
+    for h in handles {
+        h.abort();
+    }
+}
+
 /// Local donor pause (Heartbeat healthy=false) drops backends without process kill.
 /// Mem-cap on Hello clamps claimed_mem_mib (same as agent --mem-cap-mib).
 #[tokio::test]

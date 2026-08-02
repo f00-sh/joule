@@ -40,7 +40,7 @@ pool is free of cash charges. No contribution ⇒ no API.
 
 How a node reaches the internet is irrelevant. This is not a mesh product.
 
-Version **0.1.4** loads **lab-tiny / lab-mid / lab-large** tensors when seeded and
+Version **0.1.5** loads **lab-tiny / lab-mid / lab-large** tensors when seeded and
 gates full Kimi on pool VRAM. Donors control contribution locally
 (`joule donor pause|set-cap|set-schedule|set-sensors`). After an agent Welcome,
 **`joule connect`** shows Base URL + full pool-issued `joule_…` API key + model

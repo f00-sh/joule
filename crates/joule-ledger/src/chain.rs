@@ -4,6 +4,7 @@
 //! breaking `entry_hash` linkage. See `docs/design/self-govern-v0.md`.
 
 use crate::economy::ECONOMY_VERSION;
+use crate::notary::{verify_quorum, NotaryAttestation};
 use crate::{LedgerError, Millijoule};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,6 +58,9 @@ pub struct SealedEntry {
     /// Optional notary node ids recorded at checkpoints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notaries: Vec<String>,
+    /// Cryptographic notary attestations of the pre-checkpoint head (sidecar; not in entry_hash).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notary_attestations: Vec<NotaryAttestation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +190,7 @@ impl SealedLedger {
         hex::encode(h.finalize())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_raw(
         &mut self,
         account: String,
@@ -194,6 +199,7 @@ impl SealedLedger {
         kind: EntryKind,
         verified_mem_mib: Option<u32>,
         notaries: Vec<String>,
+        notary_attestations: Vec<NotaryAttestation>,
     ) -> Result<SealedEntry, LedgerError> {
         let have = self.balance(&account);
         if delta < 0 && have + delta < 0 {
@@ -230,6 +236,7 @@ impl SealedLedger {
             economy_version,
             verified_mem_mib,
             notaries,
+            notary_attestations,
         };
         *self.balances.entry(account).or_insert(0) += delta;
         self.entries.push(entry.clone());
@@ -251,6 +258,7 @@ impl SealedLedger {
             EntryKind::MintContribute,
             verified_mem_mib,
             vec![],
+            vec![],
         )
     }
 
@@ -267,6 +275,7 @@ impl SealedLedger {
             format!("usage:{}", detail.into()),
             EntryKind::BurnUsage,
             None,
+            vec![],
             vec![],
         )
     }
@@ -286,6 +295,7 @@ impl SealedLedger {
             EntryKind::DonatePool,
             None,
             vec![],
+            vec![],
         )
     }
 
@@ -304,13 +314,28 @@ impl SealedLedger {
             EntryKind::DonateReceive,
             None,
             vec![],
+            vec![],
         )
     }
 
-    /// Protocol checkpoint: zero-value entry binding head + notary set.
-    pub fn checkpoint(&mut self, notaries: Vec<String>) -> Result<SealedEntry, LedgerError> {
+    /// Protocol checkpoint with **required** cryptographic notary quorum (fail-closed).
+    ///
+    /// Attestations must verify against the **pre-checkpoint** head hash. Unsigned
+    /// checkpoints are rejected when `min_ok > 0`.
+    pub fn checkpoint_with_quorum(
+        &mut self,
+        notaries: Vec<String>,
+        attestations: Vec<NotaryAttestation>,
+        min_ok: usize,
+    ) -> Result<SealedEntry, LedgerError> {
         let head = self.head().head_hash_hex;
-        let reason = format!("checkpoint|head={head}|notaries={}", notaries.join(","));
+        if min_ok > 0 {
+            verify_quorum(&head, &attestations, min_ok).map_err(LedgerError::Chain)?;
+        }
+        let reason = format!(
+            "checkpoint|head={head}|notaries={}|quorum={min_ok}",
+            notaries.join(",")
+        );
         self.append_raw(
             "_protocol".into(),
             0,
@@ -318,19 +343,60 @@ impl SealedLedger {
             EntryKind::Checkpoint,
             None,
             notaries,
+            attestations,
         )
     }
 
-    pub fn maybe_checkpoint(&mut self, notaries: Vec<String>) -> Option<SealedEntry> {
+    /// Legacy id-only checkpoint — **fails closed** (requires empty notaries + min_ok 0 only).
+    /// Prefer [`checkpoint_with_quorum`].
+    pub fn checkpoint(&mut self, notaries: Vec<String>) -> Result<SealedEntry, LedgerError> {
+        // Production path: never seal without crypto when notaries are named.
+        if !notaries.is_empty() {
+            return Err(LedgerError::Chain(
+                "checkpoint requires notary quorum attestations (use checkpoint_with_quorum)"
+                    .into(),
+            ));
+        }
+        self.checkpoint_with_quorum(notaries, vec![], 0)
+    }
+
+    /// When height hits CHECKPOINT_EVERY, seal with notary quorum (fail-closed).
+    pub fn maybe_checkpoint_with_quorum(
+        &mut self,
+        notaries: Vec<String>,
+        attestations: Vec<NotaryAttestation>,
+        min_ok: usize,
+    ) -> Result<Option<SealedEntry>, LedgerError> {
         if self.entries.is_empty() {
-            return None;
+            return Ok(None);
         }
         let h = self.entries.len() as u64;
         if h % CHECKPOINT_EVERY == 0 {
-            self.checkpoint(notaries).ok()
+            Ok(Some(self.checkpoint_with_quorum(
+                notaries,
+                attestations,
+                min_ok,
+            )?))
         } else {
-            None
+            Ok(None)
         }
+    }
+
+    pub fn maybe_checkpoint(&mut self, notaries: Vec<String>) -> Option<SealedEntry> {
+        // Backward-compatible name: if notaries empty, no-op unsigned; else requires
+        // callers to use maybe_checkpoint_with_quorum (returns None on fail path).
+        if notaries.is_empty() {
+            return None;
+        }
+        None
+    }
+
+    /// Last checkpoint entry with cryptographic attestations (public audit).
+    pub fn last_signed_checkpoint(&self) -> Option<&SealedEntry> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|e| e.kind == EntryKind::Checkpoint && !e.notary_attestations.is_empty())
     }
 
     /// Full chain integrity check (detects tampering).
@@ -461,5 +527,50 @@ mod tests {
         led.mint_contribution("z", 5, "t", None).unwrap();
         assert!(led.burn_usage("z", 10, "x").is_err());
         assert_eq!(led.len(), 1);
+    }
+
+    #[test]
+    fn checkpoint_requires_valid_quorum() {
+        use crate::notary::{lab_signing_key, sign_head};
+        let mut led = SealedLedger::new();
+        led.mint_contribution("alice", 10, "t", None).unwrap();
+        let head = led.head().head_hash_hex;
+        let sk_a = lab_signing_key("n-a");
+        let sk_b = lab_signing_key("n-b");
+        let good = vec![
+            sign_head(&sk_a, &head, "n-a"),
+            sign_head(&sk_b, &head, "n-b"),
+        ];
+        let sealed = led
+            .checkpoint_with_quorum(vec!["n-a".into(), "n-b".into()], good, 2)
+            .unwrap();
+        assert_eq!(sealed.kind, EntryKind::Checkpoint);
+        assert_eq!(sealed.notary_attestations.len(), 2);
+        assert!(led.last_signed_checkpoint().is_some());
+
+        led.mint_contribution("alice", 1, "t2", None).unwrap();
+        let head2 = led.head().head_hash_hex;
+        let mut bad = sign_head(&sk_a, &head2, "n-a");
+        bad.sig_hex = "00".repeat(64);
+        let err = led
+            .checkpoint_with_quorum(vec!["n-a".into()], vec![bad], 1)
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("quorum") || msg.contains("signature") || msg.contains("invalid"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn unsigned_named_notaries_rejected() {
+        let mut led = SealedLedger::new();
+        led.mint_contribution("bob", 5, "x", None).unwrap();
+        let err = led.checkpoint(vec!["ghost".into()]).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("quorum") || msg.contains("attestation"),
+            "{msg}"
+        );
     }
 }

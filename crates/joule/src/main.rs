@@ -243,6 +243,21 @@ enum Commands {
         /// Copy pool API key (for Cursor etc.) then exit.
         #[arg(long, default_value_t = false)]
         copy_api_key: bool,
+        /// Pause local contribution (same as `joule donor pause`).
+        #[arg(long, default_value_t = false)]
+        donor_pause: bool,
+        /// Resume local contribution.
+        #[arg(long, default_value_t = false)]
+        donor_resume: bool,
+        /// Set local mem cap MiB then exit (0 = clear).
+        #[arg(long, default_value_t = 0)]
+        donor_set_cap: u32,
+        /// Print local donor policy + sensors then exit.
+        #[arg(long, default_value_t = false)]
+        donor_status: bool,
+        /// Policy file for donor tray actions (default: ~/.config/joule/donor-policy.json).
+        #[arg(long, default_value = "")]
+        policy: String,
     },
     /// First-run onboard: create CODE, write recovery file, show instructions once.
     Onboard {
@@ -753,8 +768,39 @@ async fn main() -> Result<()> {
             open_recovery,
             connect,
             copy_api_key,
+            donor_pause,
+            donor_resume,
+            donor_set_cap,
+            donor_status,
+            policy,
         } => {
             let id_path = identity::default_path();
+            let policy_path = policy_path_arg(&policy);
+            if donor_status {
+                run_donor_cmd(DonorCmd::Status {
+                    policy: policy_path.display().to_string(),
+                })?;
+                return Ok(());
+            }
+            if donor_pause {
+                run_donor_cmd(DonorCmd::Pause {
+                    policy: policy_path.display().to_string(),
+                })?;
+                return Ok(());
+            }
+            if donor_resume {
+                run_donor_cmd(DonorCmd::Resume {
+                    policy: policy_path.display().to_string(),
+                })?;
+                return Ok(());
+            }
+            if donor_set_cap > 0 {
+                run_donor_cmd(DonorCmd::SetCap {
+                    mib: donor_set_cap,
+                    policy: policy_path.display().to_string(),
+                })?;
+                return Ok(());
+            }
             if onboard {
                 let (id, fresh) = identity::load_or_init(&id_path)?;
                 identity::print_code_banner(&id, &id_path, fresh || true);

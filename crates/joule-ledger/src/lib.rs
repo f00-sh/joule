@@ -237,6 +237,31 @@ impl Ledger {
     pub fn maybe_checkpoint(&mut self, notaries: Vec<String>) -> Option<SealedEntry> {
         self.inner.maybe_checkpoint(notaries)
     }
+
+    /// Checkpoint with cryptographic notary quorum (production mint path).
+    pub fn maybe_checkpoint_with_quorum(
+        &mut self,
+        notaries: Vec<String>,
+        attestations: Vec<crate::NotaryAttestation>,
+        min_ok: usize,
+    ) -> Result<Option<SealedEntry>, LedgerError> {
+        self.inner
+            .maybe_checkpoint_with_quorum(notaries, attestations, min_ok)
+    }
+
+    pub fn checkpoint_with_quorum(
+        &mut self,
+        notaries: Vec<String>,
+        attestations: Vec<crate::NotaryAttestation>,
+        min_ok: usize,
+    ) -> Result<SealedEntry, LedgerError> {
+        self.inner
+            .checkpoint_with_quorum(notaries, attestations, min_ok)
+    }
+
+    pub fn last_signed_checkpoint(&self) -> Option<&SealedEntry> {
+        self.inner.last_signed_checkpoint()
+    }
 }
 
 fn tracing_stub_restore() {

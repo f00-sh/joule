@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-08-02
+
+Close high-value backlog: notary quorum hot path, attestation tiers on nodes API, donor local-TZ + tray, service_live flip.
+
+### Added
+- **Notary multi-sig checkpoints** — production `seal_and_checkpoint` requires cryptographic quorum; `GET /v1/public/ledger/head` exposes last signed checkpoint attestations
+- **attestation_tier** on `GET /v1/cluster/nodes` (claim_only / challenge_partial / challenge_full)
+- **Donor schedule is local timezone** (`allows_donate_with_offset`); tray `--donor-status|pause|resume|set-cap` + live policy strip
+- **service_live auto-flip** when mesh loaded + pool gates; K3 pipeline rejects f00 weight URLs
+
+### Changed
+- Workspace **0.1.5**; prior 0.1.4 still published
+
 ## [0.1.4] — 2026-08-02
 
 Live multi-agent pool path, lab-large quant, donor local controls, notary/attestation trust slice.

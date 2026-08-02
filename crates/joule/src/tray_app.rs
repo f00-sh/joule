@@ -21,6 +21,7 @@ pub async fn run_tray(api: String, key: Option<String>, interval_secs: u64) -> R
     );
     println!("identity: joule tray --copy-code | --enter-code UUID | --open-recovery | --onboard");
     println!("connect:  joule connect | tray --copy-api-key | tray --connect");
+    println!("donor:    tray --donor-status | --donor-pause | --donor-resume | --donor-set-cap N");
     println!("Ctrl-C to stop.\n");
 
     loop {
@@ -30,6 +31,17 @@ pub async fn run_tray(api: String, key: Option<String>, interval_secs: u64) -> R
                 println!("{}", format_tray_tooltip(&st));
                 println!();
                 println!("{}", format_monitor_dash(&st));
+                // Local donor policy (law 5) — always from the real policy file path.
+                let pol = crate::donor_policy::DonorPolicy::load(
+                    &crate::donor_policy::DonorPolicy::default_path(),
+                )
+                .unwrap_or_default();
+                let sensors = crate::donor_policy::probe_sensors();
+                println!();
+                println!("donor policy (local):");
+                for line in pol.status_lines(sensors) {
+                    println!("  {line}");
+                }
                 println!();
                 println!("updated {}", chrono_like_now());
             }

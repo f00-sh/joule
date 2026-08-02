@@ -81,13 +81,20 @@ pub fn validate_k3_scale(p: &WeightPipeline) -> Result<(), String> {
             p.quant_id
         ));
     }
-    // sha256 field shape when shards present
+    // sha256 field shape when shards present; never require f00 payload hosting.
     for s in &p.shards {
         if s.sha256.len() != 64 {
             return Err(format!("bad sha256 on {}", s.path));
         }
         if s.size_bytes == 0 && p.multi_hundred_gb_class {
             return Err(format!("zero size on large-class shard {}", s.path));
+        }
+        let u = s.url.to_ascii_lowercase();
+        if u.contains("f00.sh") || u.contains("://joule.f00") {
+            return Err(format!(
+                "weight URL must not use f00 hosting (got {})",
+                s.url
+            ));
         }
     }
     Ok(())
@@ -166,6 +173,24 @@ mod tests {
         assert!(p.multi_hundred_gb_class);
         validate_k3_scale(&p).unwrap();
         assert!(p.shards.len() >= 8);
+    }
+
+    #[test]
+    fn k3_shards_never_use_f00_weight_urls() {
+        let m = ManifestFile::load_default().unwrap();
+        let model = m.model("kimi-open").unwrap();
+        for q in &model.weights.quants {
+            let p = pipeline_from_quant(model, q);
+            validate_k3_scale(&p).unwrap();
+            for s in &p.shards {
+                assert!(
+                    !s.url.contains("f00.sh"),
+                    "quant {} shard {} must not host on f00",
+                    q.id,
+                    s.path
+                );
+            }
+        }
     }
 
     #[test]

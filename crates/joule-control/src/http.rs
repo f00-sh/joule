@@ -338,12 +338,20 @@ async fn public_ledger_head(State(app): State<App>) -> impl IntoResponse {
     let g = app.state.read().await;
     let head = g.ledger.head();
     let chain_ok = g.ledger.verify_chain().is_ok();
+    let last_cp = g.ledger.last_signed_checkpoint();
     Json(json!({
         "ok": true,
         "chain_ok": chain_ok,
         "head": head,
         "no_money": true,
         "law": "balances only from sealed chain replay; claims ≠ verified VRAM",
+        "last_signed_checkpoint": last_cp.map(|e| json!({
+            "height": e.height,
+            "entry_hash_hex": e.entry_hash_hex,
+            "notaries": e.notaries,
+            "notary_attestations": e.notary_attestations,
+            "reason": e.reason,
+        })),
     }))
 }
 
