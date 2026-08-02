@@ -73,7 +73,8 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 | **Decentralized discovery (mesh target)** | [design/decentral-discovery-v0.md](design/decentral-discovery-v0.md) |
 | Client status / tray / service install | [design/client-v0.md](design/client-v0.md) |
 | Self-govern ledger | [design/self-govern-v0.md](design/self-govern-v0.md) |
-| Operator SOP (NASA PDF) | [sop-joule-ops.pdf](sop-joule-ops.pdf) — generated on release |
+| Operator SOP (NASA PDF) | [sop-joule-ops.pdf](sop-joule-ops.pdf) |
+| This release memo (PDF) | [releases/v0.1.7-memo.pdf](releases/v0.1.7-memo.pdf) |
 | Release memos | [releases/](releases/) |
 | README | [../README.md](../README.md) |
 | Man page | [../man/joule.1.md](../man/joule.1.md) |
@@ -88,7 +89,7 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 ║████████████████████████████████████████████████  ║
 ║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
-║  v0.1.6  ·  MIT  ·  2026                         ║
+║  v0.1.7  ·  MIT  ·  2026                         ║
 ║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝

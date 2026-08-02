@@ -1,6 +1,7 @@
 # Release memos
 
-NASA-style release memos for each shipped SemVer version land here as PDFs
-(and optional Markdown sources) when `/release` runs.
+NASA-style release memos for each shipped SemVer version.
 
-Until the first release, this directory is an index stub only.
+| Version | Memo |
+|---------|------|
+| 0.1.7 | [v0.1.7-memo.pdf](v0.1.7-memo.pdf) · [JSON](v0.1.7-memo.json) |

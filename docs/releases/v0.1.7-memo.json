@@ -1,0 +1,69 @@
+{
+  "org": "f00-sh",
+  "org_sub": "joule",
+  "reply_to": "OPS/JOULE",
+  "to": "joule users and operators",
+  "from": "Project Engineering",
+  "subject": "joule v0.1.7 release — interactive GUI graphs and tabs",
+  "ref": "CHANGELOG.md [0.1.7], tag v0.1.7",
+  "date": "2026-08-02",
+  "opening": "v0.1.7 ships a richer interactive GUI for normie operators: multi-series live plots with zoom/pan, Overview/Graphs/Donor/Chat tabs, and a fix so gpu_probe env tests stay green under parallel cargo test.",
+  "sections": [
+    {
+      "heading": "Summary",
+      "body": "This release builds on v0.1.6 GUI shell. Primary surface remains `joule` / `joule gui`. Graphs are interactive; donor policy and cluster chat are in-window. Packaging channels (GitHub Releases, Homebrew tap, f00 AUR PKGBUILD) pin 0.1.7 after CI assets land."
+    },
+    {
+      "heading": "Added",
+      "items": [
+        "GUI tabs: Overview, Graphs, Donor, Chat",
+        "Multi-series plots: backends, agents, mesh, dht, VRAM, balance, tokens, tok/s, economy window",
+        "Zoom, pan, scroll, box-zoom, double-click reset, series toggles, linked time axes, sparklines",
+        "Token mix bar chart; balance rate plot",
+        "Full donor policy editor (pause, VRAM cap, local schedule, max temp, min battery)",
+        "In-app chat against /v1/chat/completions with cached API key",
+        "Poll interval slider; start/stop control and agent; force poll; clear history; reset plot views"
+      ]
+    },
+    {
+      "heading": "Fixed",
+      "items": [
+        "gpu_probe env override tests serialized to avoid process-global env races under parallel cargo test"
+      ]
+    },
+    {
+      "heading": "Upgrade / install",
+      "steps": [
+        {"n": "1", "text": "Linux/macOS one-liner:", "code": "curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh | sh"},
+        {"n": "2", "text": "Homebrew:", "code": "brew upgrade f00-sh/tap/joule"},
+        {"n": "3", "text": "From source:", "code": "git pull && cargo install --path crates/joule --force"}
+      ]
+    },
+    {
+      "heading": "Verification",
+      "items": [
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets -- -D warnings",
+        "cargo test --workspace",
+        "joule version → 0.1.7",
+        "scripts/live-pool-smoke.sh backends_join=2 backends_pause_only=1"
+      ]
+    },
+    {
+      "heading": "References",
+      "items": [
+        "https://github.com/f00-sh/joule/releases/tag/v0.1.7",
+        "https://joule.f00.sh/",
+        "docs/sop-joule-ops.pdf",
+        "CHANGELOG.md"
+      ]
+    }
+  ],
+  "signature": {
+    "name": "Project Engineering",
+    "title": "f00-sh / joule",
+    "office": ""
+  },
+  "cc": "Maintainers",
+  "enclosure": "file_id.diz; install.sh; multi-arch binaries (CI)"
+}

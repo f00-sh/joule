@@ -1,69 +1,117 @@
 {
-  "title": "joule operator SOP",
-  "document_id": "JOULE-SOP-OPS-001",
-  "version": "0.0.0",
-  "status": "draft",
-  "purpose": "Day-to-day operation of a joule distributed cluster lab and future public pool gateway/dashboard.",
-  "scope": "Operators running joule coordinators, donor agents, capacity dashboard, and release gates for f00-sh/joule.",
-  "audience": "joule operators and release owners",
+  "org": "f00-sh",
+  "org_sub": "joule distributed cluster",
+  "reply_to": "OPS/JOULE",
+  "to": "joule operators and release owners",
+  "from": "Project Engineering",
+  "subject": "joule operator standard operating procedure",
+  "ref": "AGENTS.md, README.md, docs/design/cluster-v0.md",
+  "date": "2026-08-02",
+  "doc_id": "JOULE-SOP-OPS-001",
+  "doc_title": "STANDARD OPERATING PROCEDURE — joule cluster",
+  "version": "v0.1.7",
+  "status": "released",
+  "opening": "Operators run joule as a GUI-first local pool or multi-agent cluster: start control, donate with an agent under local policy, watch live capacity graphs, and ship only when cargo gates and the docs pack are green.",
   "sections": [
     {
-      "heading": "Purpose",
-      "body": "This SOP defines how operators run joule safely: cluster lab checks, live capacity visibility, contribution gates, and release documentation. Graphical flowcharts are mandatory for gate and ship flows."
+      "heading": "1. Purpose",
+      "body": "This SOP defines day-to-day operation of a joule lab or standing pool: quality gates, donor contribution control, live capacity visibility (CLI and GUI), and the release ship flow for f00-sh/joule."
     },
     {
-      "heading": "Day-to-day gates",
-      "body": "Before exposing any gateway: (1) cargo test green, (2) joule lab succeeds, (3) joule capacity --json succeeds, (4) ledger mint/burn demo succeeds, (5) dashboard or capacity API reflects healthy nodes when cluster is live, (6) no freeloader path without contribution checks when API is enabled.",
+      "heading": "2. Day-to-day operator gates",
+      "body": "Before exposing any gateway or telling donors the pool is open, complete these checks in order. Fail closed on any red step.",
+      "steps": [
+        {"n": "2.1", "text": "Run workspace tests.", "code": "cargo test --workspace"},
+        {"n": "2.2", "text": "Optional offline lab.", "code": "cargo run -p joule --release -- lab"},
+        {"n": "2.3", "text": "Start control (GUI or CLI).", "code": "joule gui   # or: joule control"},
+        {"n": "2.4", "text": "Start agent with local policy.", "code": "joule agent --control 127.0.0.1:7701 --policy ~/.config/joule/donor-policy.json"},
+        {"n": "2.5", "text": "Read live capacity.", "code": "joule capacity --api http://127.0.0.1:7700 --json"},
+        {"n": "2.6", "text": "Confirm GUI Overview shows backends and connection state; Graphs zoom/pan work."}
+      ],
       "flowchart": {
         "title": "Day-to-day operator gates",
+        "color": true,
         "nodes": [
-          { "id": "start", "label": "Start ops check" },
-          { "id": "test", "label": "cargo test --workspace" },
-          { "id": "lab", "label": "joule lab" },
-          { "id": "cap", "label": "joule capacity --json" },
-          { "id": "ledger", "label": "joule credits" },
-          { "id": "dash", "label": "Dashboard shows live capacity?" },
-          { "id": "gate_api", "label": "API enabled?" },
-          { "id": "contrib", "label": "Contribution gate live?" },
-          { "id": "ok", "label": "Operate" },
-          { "id": "block", "label": "Block exposure" }
+          {"id": "start", "label": "Start ops check", "shape": "terminator"},
+          {"id": "test", "label": "cargo test --workspace", "shape": "process"},
+          {"id": "ctrl", "label": "Start control (GUI/CLI)", "shape": "process"},
+          {"id": "agent", "label": "Start agent + policy", "shape": "process"},
+          {"id": "cap", "label": "capacity --json + GUI graphs", "shape": "process"},
+          {"id": "live", "label": "Pool honest?", "shape": "decision"},
+          {"id": "ok", "label": "Operate", "shape": "terminator"},
+          {"id": "block", "label": "Block exposure", "shape": "terminator"}
         ],
         "edges": [
-          { "from": "start", "to": "test" },
-          { "from": "test", "to": "lab" },
-          { "from": "lab", "to": "cap" },
-          { "from": "cap", "to": "ledger" },
-          { "from": "ledger", "to": "dash" },
-          { "from": "dash", "to": "gate_api", "label": "yes or lab-only" },
-          { "from": "dash", "to": "block", "label": "live pool but broken" },
-          { "from": "gate_api", "to": "contrib", "label": "yes" },
-          { "from": "gate_api", "to": "ok", "label": "no (lab only)" },
-          { "from": "contrib", "to": "ok", "label": "yes" },
-          { "from": "contrib", "to": "block", "label": "no" }
+          {"from": "start", "to": "test"},
+          {"from": "test", "to": "ctrl"},
+          {"from": "ctrl", "to": "agent"},
+          {"from": "agent", "to": "cap"},
+          {"from": "cap", "to": "live"},
+          {"from": "live", "to": "ok", "label": "yes"},
+          {"from": "live", "to": "block", "label": "no"}
+        ]
+      },
+      "figure": {
+        "path": "figures/joule-gui-ops.png",
+        "title": "GUI-first operator surface",
+        "caption": "joule version and GUI tab path (Overview / Graphs / Donor / Chat) after release build.",
+        "max_height": 280,
+        "border": true
+      }
+    },
+    {
+      "heading": "3. Donor local controls (law 5)",
+      "body": "Remote operators cannot raise local caps. Agents reload the policy path passed with --policy. Schedule windows use OS local timezone (tm_gmtoff on Unix).",
+      "items": [
+        "Pause/resume: joule donor pause|resume or GUI Donor tab / tray",
+        "VRAM cap: joule donor set-cap N (0 clears) or tray --donor-set-cap",
+        "Schedule / thermal / battery: donor policy JSON or GUI Donor tab",
+        "Status: joule donor status — prints local schedule and sensors"
+      ]
+    },
+    {
+      "heading": "4. Release ship flow",
+      "body": "Ship only when gates are green. Documentation pack is mandatory: CHANGELOG, file_id.diz, README, Pages, man, SOP PDF, this-version NASA memo PDF, SemVer tag, GitHub Release assets (CI on tag v*).",
+      "flowchart": {
+        "title": "Release ship flow",
+        "color": true,
+        "nodes": [
+          {"id": "ready", "label": "Release candidate", "shape": "terminator"},
+          {"id": "verify", "label": "fmt + clippy + test", "shape": "process"},
+          {"id": "docs", "label": "Docs pack + PDFs", "shape": "process"},
+          {"id": "tag", "label": "Tag vX.Y.Z + push", "shape": "process"},
+          {"id": "ci", "label": "GHA multi-arch build", "shape": "process"},
+          {"id": "pub", "label": "GitHub Release assets", "shape": "process"},
+          {"id": "pkg", "label": "Homebrew + AUR pin", "shape": "process"},
+          {"id": "done", "label": "Done", "shape": "terminator"}
+        ],
+        "edges": [
+          {"from": "ready", "to": "verify"},
+          {"from": "verify", "to": "docs"},
+          {"from": "docs", "to": "tag"},
+          {"from": "tag", "to": "ci"},
+          {"from": "ci", "to": "pub"},
+          {"from": "pub", "to": "pkg"},
+          {"from": "pkg", "to": "done"}
         ]
       }
     },
     {
-      "heading": "Release ship flow",
-      "body": "Ship only via house release workflow: tests green, CHANGELOG, file_id.diz, README/Pages/man sync, SOP PDF, release memo PDF, tag, attach assets.",
-      "flowchart": {
-        "title": "Release ship flow",
-        "nodes": [
-          { "id": "ready", "label": "Release candidate" },
-          { "id": "verify", "label": "Tests + lab + capacity" },
-          { "id": "docs", "label": "Docs pack" },
-          { "id": "tag", "label": "SemVer tag" },
-          { "id": "assets", "label": "Attach install + file_id.diz" },
-          { "id": "publish", "label": "GitHub Release" }
-        ],
-        "edges": [
-          { "from": "ready", "to": "verify" },
-          { "from": "verify", "to": "docs" },
-          { "from": "docs", "to": "tag" },
-          { "from": "tag", "to": "assets" },
-          { "from": "assets", "to": "publish" }
-        ]
-      }
+      "heading": "5. Product laws (do not violate)",
+      "items": [
+        "Compute is the only currency on the public pool — no money",
+        "No contribution ⇒ no API access",
+        "Credits = sealed hash-chain millijoules only; verified VRAM only for mint/placement",
+        "Single model: kimi-open",
+        "Website is not a weight CDN — content-addressed peer seed only"
+      ]
     }
-  ]
+  ],
+  "signature": {
+    "name": "Project Engineering",
+    "title": "f00-sh / joule OPS",
+    "office": ""
+  },
+  "cc": "Maintainers, Release Operators",
+  "enclosure": "file_id.diz; CHANGELOG.md; docs/releases/v0.1.7-memo.pdf"
 }

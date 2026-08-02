@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-08-02
+
+Interactive GUI graphs and donor/chat tabs; probe-test race fix.
+
+### Added
+- **GUI Overview / Graphs / Donor / Chat tabs** — multi-series live plots (backends, agents, mesh, dht, VRAM, balance, tokens, tok/s), zoom/pan/box-zoom, series toggles, sparklines, token bar chart
+- In-app **cluster chat** and full **donor policy** editor (pause, VRAM cap, local schedule, thermal/battery)
+- Poll interval slider, start/stop control+agent, force poll, clear history, reset plot views
+
+### Fixed
+- Serialize `gpu_probe` env override tests so parallel `cargo test` stays green
+
 ## [0.1.6] — 2026-08-02
 
 GUI-first shell + skeptic fixes (local TZ, real notary keys, clear agent connect UX).
