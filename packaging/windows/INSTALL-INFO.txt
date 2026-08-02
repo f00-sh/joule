@@ -1,0 +1,21 @@
+joule — Windows installer
+=========================
+
+This Setup wizard installs the real joule program:
+
+  • joule.exe — native GUI dashboard (default) + full CLI
+  • Start Menu shortcut
+  • Optional desktop icon
+  • Optional user PATH entry for terminals
+
+After install:
+  1. Launch "joule" from the Start Menu (opens the interactive dashboard)
+  2. Click "Start control" then "Start agent (donate)"
+  3. Or in a terminal:  joule version
+
+Unsigned builds: Windows SmartScreen may warn until Authenticode
+code-signing is available. Choose "More info" → "Run anyway".
+
+Website: https://joule.f00.sh/
+Releases: https://github.com/f00-sh/joule/releases
+Weights: never hosted on f00 — peer-seeded by sha256 only.

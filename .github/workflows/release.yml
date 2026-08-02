@@ -1,16 +1,21 @@
-# Build multi-platform joule binaries and publish a GitHub Release.
+# Build multi-platform joule binaries + **native GUI OS installers**.
 # Trigger: push tag v*  or  workflow_dispatch (manual, dry-run without tag).
 #
-# Assets (example v0.1.0):
-#   joule-0.1.0-linux-x86_64.tar.gz
-#   joule-0.1.0-linux-aarch64.tar.gz
-#   joule-0.1.0-darwin-x86_64.tar.gz
-#   joule-0.1.0-darwin-aarch64.tar.gz
-#   joule-0.1.0-windows-x86_64.zip
-#   install.sh  install.ps1  SHA256SUMS  file_id.diz
+# CLI archives (always):
+#   joule-VER-linux-ARCH.tar.gz
+#   joule-VER-darwin-ARCH.tar.gz
+#   joule-VER-windows-ARCH.zip
 #
-# Installers are published on GitHub Releases only. joule.f00.sh download page
-# links here — f00 never hosts model weights.
+# Native installers:
+#   joule-VER-windows-x86_64-setup.exe   (Inno Setup wizard)
+#   joule-VER-darwin-ARCH.pkg            (macOS Installer)
+#   joule-VER-darwin-ARCH.dmg            (drag joule.app → Applications)
+#   joule-VER-darwin-ARCH-app.zip        (standalone .app)
+#   joule-VER-linux-ARCH.deb             (dpkg + .desktop)
+#
+# Also: install.sh install.ps1 SHA256SUMS file_id.diz SOP/memo PDFs when present
+#
+# Installers live on GitHub Releases only. f00 never hosts model weights.
 
 name: release
 
@@ -45,31 +50,35 @@ jobs:
             asset_arch: x86_64
             ext: tar.gz
             cross: false
+            native: deb
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             asset_os: linux
             asset_arch: aarch64
             ext: tar.gz
             cross: true
-          # Both Darwin targets on macos-14 (x86_64 cross-compiled; avoids scarce macos-13 runners)
+            native: deb
           - os: macos-14
             target: x86_64-apple-darwin
             asset_os: darwin
             asset_arch: x86_64
             ext: tar.gz
             cross: false
+            native: macos
           - os: macos-14
             target: aarch64-apple-darwin
             asset_os: darwin
             asset_arch: aarch64
             ext: tar.gz
             cross: false
+            native: macos
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset_os: windows
             asset_arch: x86_64
             ext: zip
             cross: false
+            native: inno
 
     steps:
       - uses: actions/checkout@v6
@@ -112,7 +121,7 @@ jobs:
         shell: bash
         run: cross build --release -p joule --target ${{ matrix.target }}
 
-      - name: Package (unix)
+      - name: Package CLI archive (unix)
         if: matrix.ext == 'tar.gz'
         shell: bash
         run: |
@@ -142,7 +151,7 @@ jobs:
           )
           ls -la dist/
 
-      - name: Package (windows)
+      - name: Package CLI archive (windows zip)
         if: matrix.ext == 'zip'
         shell: bash
         run: |
@@ -163,14 +172,52 @@ jobs:
           (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256" || shasum -a 256 "${ASSET}" > "${ASSET}.sha256")
           ls -la dist/
 
+      - name: Native macOS installers (.app .pkg .dmg)
+        if: matrix.native == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x packaging/macos/build-native.sh
+          packaging/macos/build-native.sh \
+            --bin "target/${{ matrix.target }}/release/joule" \
+            --version "${{ steps.ver.outputs.ver }}" \
+            --arch "${{ matrix.asset_arch }}" \
+            --out dist
+          ls -la dist/
+
+      - name: Native Linux .deb
+        if: matrix.native == 'deb'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq dpkg-dev
+          chmod +x packaging/linux/build-deb.sh
+          packaging/linux/build-deb.sh \
+            --bin "target/${{ matrix.target }}/release/joule" \
+            --version "${{ steps.ver.outputs.ver }}" \
+            --arch "${{ matrix.asset_arch }}" \
+            --out dist
+          ls -la dist/
+
+      - name: Native Windows Setup.exe (Inno Setup)
+        if: matrix.native == 'inno'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          powershell -File packaging/windows/build-native.ps1 `
+            -Bin "target/${{ matrix.target }}/release/joule.exe" `
+            -Version "${{ steps.ver.outputs.ver }}" `
+            -Arch "${{ matrix.asset_arch }}" `
+            -Out dist
+          Get-ChildItem dist | Format-Table Name, Length
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: joule-${{ matrix.asset_os }}-${{ matrix.asset_arch }}
           path: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/*.sha256
+            dist/*
           if-no-files-found: error
 
   publish:
@@ -191,16 +238,30 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) -exec cp -v {} dist/ \;
+          find artifacts -type f \( \
+            -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \
+            -o -name '*.exe' -o -name '*.msi' -o -name '*.pkg' \
+            -o -name '*.dmg' -o -name '*.deb' -o -name '*.app.zip' \
+          \) -exec cp -v {} dist/ \;
+          # catch *-app.zip named without leading *
+          find artifacts -type f -name '*-app.zip' -exec cp -v {} dist/ \; || true
+          find artifacts -type f -name '*-setup.exe' -exec cp -v {} dist/ \; || true
           cp scripts/install.sh dist/install.sh
           cp scripts/install.ps1 dist/install.ps1
           chmod 755 dist/install.sh
           if [[ -f file_id.diz ]]; then cp file_id.diz dist/; fi
+          if [[ -f docs/sop-joule-ops.pdf ]]; then cp docs/sop-joule-ops.pdf dist/; fi
+          if compgen -G 'docs/releases/v*-memo.pdf' > /dev/null; then
+            cp docs/releases/v*-memo.pdf dist/ || true
+          fi
           (
             cd dist
             : > SHA256SUMS
-            for f in *.tar.gz *.zip; do
+            for f in * ; do
               [[ -f "$f" ]] || continue
+              case "$f" in
+                *.sha256|SHA256SUMS) continue ;;
+              esac
               sha256sum "$f" >> SHA256SUMS
             done
             cat SHA256SUMS
@@ -215,7 +276,15 @@ jobs:
           draft: ${{ github.ref_type != 'tag' }}
           generate_release_notes: true
           body: |
-            ## Install (dummy easy)
+            ## Native installers (GUI programs)
+
+            | Platform | Installer |
+            |---|---|
+            | **Windows** | `joule-*-windows-x86_64-setup.exe` — double-click Setup wizard |
+            | **macOS** | `joule-*-darwin-*.pkg` (Installer) or `.dmg` (drag **joule.app** → Applications) |
+            | **Linux** | `joule-*-linux-*.deb` — `sudo dpkg -i …` (desktop entry + `/usr/bin/joule`) |
+
+            CLI one-liners still work:
 
             **Linux / macOS**
             ```bash
@@ -227,9 +296,15 @@ jobs:
             irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
             ```
 
-            Or pick your platform on https://joule.f00.sh/download.html
+            After install, run **joule** (GUI dashboard) or `joule version`.
 
-            Binaries are content on **GitHub Releases**. Model weights are **never** hosted on f00 — peers + official sources + sha256 only.
+            > Unsigned builds: Windows SmartScreen / macOS Gatekeeper may warn until
+            > Authenticode / Apple notarization certs are available. Use “More info → Run anyway”
+            > or right-click → Open on macOS.
+
+            Binaries and installers are on **GitHub Releases** only. Model weights are **never**
+            hosted on f00 — peers + official sources + sha256 only.
+            Site: https://joule.f00.sh/download.html
           files: |
             dist/*
         env:

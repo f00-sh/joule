@@ -6,7 +6,7 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 
 | | |
 |---|---|
-| Status | **0.1.7** released (interactive GUI graphs/tabs; donor+chat; Kimi gated) |
+| Status | **0.1.8** released (native OS installers + interactive GUI) |
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
@@ -38,10 +38,16 @@ The website ([joule.f00.sh](https://joule.f00.sh/)) is a f00-themed teaser with 
 
 ## Install
 
-**Dummy easy:** [joule.f00.sh/download.html](https://joule.f00.sh/download.html) autodetects your OS.
-Prebuilt binaries are produced by GitHub Actions and published on **GitHub Releases** (the website only links).
+**Preferred:** real **native OS installers** from [GitHub Releases](https://github.com/f00-sh/joule/releases)
+(or [joule.f00.sh/download.html](https://joule.f00.sh/download.html) which autodetects your OS).
 
-### One-liner
+| Platform | Native installer |
+|----------|------------------|
+| **Windows** | `joule-*-windows-x86_64-setup.exe` — double-click Setup wizard (Start Menu + GUI) |
+| **macOS** | `joule-*-darwin-*.pkg` or `.dmg` with **joule.app** (not Homebrew-only) |
+| **Linux** | `joule-*-linux-*.deb` — `sudo dpkg -i …` (desktop launcher + `/usr/bin/joule`) |
+
+CLI one-liners still work for automation:
 
 ```text
 # Linux / macOS
@@ -49,7 +55,7 @@ curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/install.sh |
 ```
 
 ```powershell
-# Windows (PowerShell — no admin)
+# Windows (prefers Setup.exe when published; else portable ZIP)
 irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
 ```
 
@@ -57,10 +63,10 @@ irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
 
 | Channel | Notes |
 |---------|--------|
-| **GitHub Releases** | Canonical — [f00-sh/joule releases](https://github.com/f00-sh/joule/releases) |
-| **Homebrew** | `brew install f00-sh/tap/joule` ([formula](https://github.com/f00-sh/homebrew-tap/blob/main/Formula/joule.rb)) |
+| **GitHub Releases** | Canonical installers + archives — [f00-sh/joule releases](https://github.com/f00-sh/joule/releases) |
+| **Homebrew** | `brew install f00-sh/tap/joule` (optional; `.pkg`/`.dmg` also ship) |
 | **Arch PKGBUILD** | [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin) — `makepkg -si` after clone |
-| **Windows** | ZIP + `install.ps1` (user-local). Signed MSI/EXE when a cert is available |
+| **Windows** | **Setup.exe** primary; ZIP + `install.ps1` fallback (unsigned until Authenticode cert) |
 
 ### Your joule code (multi-machine, no PII)
 
@@ -211,7 +217,7 @@ See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 an
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
 | Scene card | [file_id.diz](file_id.diz) |
 | Operator SOP (PDF) | [docs/sop-joule-ops.pdf](docs/sop-joule-ops.pdf) |
-| This release memo (PDF) | [docs/releases/v0.1.7-memo.pdf](docs/releases/v0.1.7-memo.pdf) |
+| This release memo (PDF) | [docs/releases/v0.1.8-memo.pdf](docs/releases/v0.1.8-memo.pdf) |
 | Release memos | [docs/releases/](docs/releases/) |
 
 ## Scene card
@@ -222,7 +228,7 @@ See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 an
 ║████████████████████████████████████████████████  ║
 ║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
-║  v0.1.7  ·  MIT  ·  2026                         ║
+║  v0.1.8  ·  MIT  ·  2026                         ║
 ║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝

@@ -9,7 +9,7 @@
 | Domain | joule.f00.sh |
 | License | MIT |
 | Language | **Rust** (workspace; strict purity for first-party code) |
-| Status | 0.1.7 released (interactive GUI graphs/tabs; donor+chat; Kimi gated) |
+| Status | 0.1.8 released (native OS installers + interactive GUI) |
 
 **One-liner:** Distributed internet-wide supercomputer cluster — pool idle GPUs into open-weight AI inference (Kimi-class).
 
@@ -72,10 +72,11 @@ cargo run -p joule -- broadcast plan-chunks --chunks 12 --nodes 5
 
 ## Install channels
 
-- Curl from GitHub Releases: required (`scripts/install.sh`; installs man pages). Repo pin: **f00-sh/joule**.
+- **Native installers (primary):** Windows `*-setup.exe`, macOS `.pkg`/`.dmg`/`joule.app`, Linux `.deb` from GitHub Releases.
+- Curl CLI: `scripts/install.sh` (man pages). Repo pin: **f00-sh/joule**.
 - Homebrew (live): `brew install f00-sh/tap/joule` — [f00-sh/homebrew-tap](https://github.com/f00-sh/homebrew-tap).
 - Arch (live f00 PKGBUILD): [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin) — `git clone` + `makepkg -si` (not necessarily on aur.archlinux.org).
-- Windows: `install.ps1` / ZIP from Releases (unsigned until cert).
+- Windows: **Setup.exe** + `install.ps1` / ZIP (unsigned until Authenticode cert).
 
 ## Releases
 

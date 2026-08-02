@@ -1,4 +1,4 @@
-/* joule download page — OS autodetect + latest GitHub release assets */
+/* joule download page — OS autodetect + native installers from GitHub Releases */
 (function () {
   const REPO = "f00-sh/joule";
   const API = `https://api.github.com/repos/${REPO}/releases/latest`;
@@ -22,15 +22,15 @@
       else if (/linux|android/i.test(ua) || /linux/i.test(platform)) os = "linux";
     }
 
-    // Arch: coarse — Apple Silicon often reports MacIntel historically; use UA hints.
-    if (/aarch64|arm64|Apple Silicon/i.test(ua) || (os === "darwin" && !/Intel/i.test(ua) && /Mac OS X 1[1-9]|Mac OS X 1[0-9]_/i.test(ua))) {
-      // Prefer arm on modern Macs when we cannot prove Intel.
+    if (
+      /aarch64|arm64|Apple Silicon/i.test(ua) ||
+      (os === "darwin" && !/Intel/i.test(ua) && /Mac OS X 1[1-9]|Mac OS X 1[0-9]_/i.test(ua))
+    ) {
       if (os === "darwin" && !/Intel Mac/i.test(ua)) arch = "aarch64";
     }
     if (/arm64|aarch64/i.test(ua) || /aarch64/i.test(platform)) arch = "aarch64";
     if (/x86_64|Win64|WOW64|Intel/i.test(ua) && os === "windows") arch = "x86_64";
 
-    // Fine-tune Mac: navigator.userAgentData.getHighEntropyValues when available (async later).
     return { os, arch, key: `${os === "windows" ? "windows" : os}-${arch}` };
   }
 
@@ -56,11 +56,35 @@
     };
   }
 
-  function assetMatchKey(name) {
-    // joule-0.1.0-linux-x86_64.tar.gz
-    const m = name.match(/joule-[^-]+-([a-z]+)-([a-z0-9_]+)\.(tar\.gz|zip)$/i);
-    if (!m) return null;
-    return `${m[1]}-${m[2]}`;
+  /** Prefer native GUI installers over CLI archives. */
+  function pickNativeInstaller(assets, d) {
+    const names = assets.map((a) => a.name);
+    const find = (re) => assets.find((a) => re.test(a.name));
+
+    if (d.os === "windows") {
+      return (
+        find(new RegExp(`joule-.*-windows-${d.arch}-setup\\.exe$`, "i")) ||
+        find(/joule-.*-windows-.*-setup\.exe$/i)
+      );
+    }
+    if (d.os === "darwin") {
+      return (
+        find(new RegExp(`joule-.*-darwin-${d.arch}\\.pkg$`, "i")) ||
+        find(new RegExp(`joule-.*-darwin-${d.arch}\\.dmg$`, "i")) ||
+        find(new RegExp(`joule-.*-darwin-${d.arch}-app\\.zip$`, "i"))
+      );
+    }
+    if (d.os === "linux") {
+      return find(new RegExp(`joule-.*-linux-${d.arch}\\.deb$`, "i"));
+    }
+    return null;
+  }
+
+  function pickCliArchive(assets, d) {
+    const keyOs = d.os === "windows" ? "windows" : d.os;
+    const ext = d.os === "windows" ? "zip" : "tar\\.gz";
+    const re = new RegExp(`joule-[^-]+-${keyOs}-${d.arch}\\.${ext}$`, "i");
+    return assets.find((a) => re.test(a.name));
   }
 
   function setText(id, text) {
@@ -89,6 +113,25 @@
     return d;
   }
 
+  function wireAssetLinks(assets) {
+    document.querySelectorAll("a.asset-link").forEach((link) => {
+      const match = link.getAttribute("data-match");
+      if (!match) return;
+      // data-match can be exact suffix or regex-ish token
+      const hit = assets.find((a) => {
+        if (a.name === match) return true;
+        if (a.name.includes(match)) return true;
+        return false;
+      });
+      if (hit) {
+        link.href = hit.browser_download_url;
+        if (!link.dataset.keepLabel) {
+          link.textContent = hit.name;
+        }
+      }
+    });
+  }
+
   async function main() {
     let d = detect();
     d = await refineMacArch(d);
@@ -114,7 +157,7 @@
           await navigator.clipboard.writeText(ic.cmd);
           copyBtn.textContent = "Copied";
           setTimeout(() => {
-            copyBtn.textContent = "Copy install command";
+            copyBtn.textContent = "Copy CLI install command";
           }, 1500);
         } catch (_) {
           copyBtn.textContent = "Select & copy the command";
@@ -122,22 +165,6 @@
       });
     }
 
-    if (cta) {
-      const a = document.createElement("a");
-      a.className = "btn";
-      a.href = "#primary-cmd";
-      a.textContent =
-        d.os === "windows" ? "Install with PowerShell" : "Install with one command";
-      cta.appendChild(a);
-
-      const all = document.createElement("a");
-      all.className = "btn ghost";
-      all.href = "#all-platforms";
-      all.textContent = "Other platforms";
-      cta.appendChild(all);
-    }
-
-    // Latest release metadata + wire asset links
     try {
       const res = await fetch(API, {
         headers: { Accept: "application/vnd.github+json" },
@@ -158,42 +185,66 @@
       );
 
       const assets = rel.assets || [];
-      document.querySelectorAll("a.asset-link").forEach((link) => {
-        const want = link.getAttribute("data-match");
-        const hit = assets.find((a) => assetMatchKey(a.name) === want);
-        if (hit) {
-          link.href = hit.browser_download_url;
-          link.textContent = `Download ${hit.name}`;
-        }
-      });
+      wireAssetLinks(assets);
 
-      // Primary binary button when we know the asset
-      const primaryKey =
-        d.os === "windows"
-          ? "windows-x86_64"
-          : d.os === "darwin"
-            ? `darwin-${d.arch}`
-            : `linux-${d.arch}`;
-      const primaryAsset = assets.find((a) => assetMatchKey(a.name) === primaryKey);
-      if (primaryAsset && cta) {
-        const dl = document.createElement("a");
-        dl.className = "btn ghost";
-        dl.href = primaryAsset.browser_download_url;
-        dl.textContent = "Direct binary download";
-        dl.rel = "noopener";
-        cta.appendChild(dl);
+      const native = pickNativeInstaller(assets, d);
+      const cli = pickCliArchive(assets, d);
+
+      if (cta) {
+        cta.innerHTML = "";
+        if (native) {
+          const dl = document.createElement("a");
+          dl.className = "btn";
+          dl.href = native.browser_download_url;
+          dl.rel = "noopener";
+          if (d.os === "windows") dl.textContent = "Download Windows Setup (.exe)";
+          else if (d.os === "darwin") {
+            if (/\.pkg$/i.test(native.name)) dl.textContent = "Download macOS Installer (.pkg)";
+            else if (/\.dmg$/i.test(native.name)) dl.textContent = "Download macOS Disk Image (.dmg)";
+            else dl.textContent = "Download joule.app";
+          } else dl.textContent = "Download Linux package (.deb)";
+          cta.appendChild(dl);
+        }
+        if (cli) {
+          const a = document.createElement("a");
+          a.className = "btn ghost";
+          a.href = cli.browser_download_url;
+          a.rel = "noopener";
+          a.textContent = d.os === "windows" ? "ZIP (portable)" : "CLI tarball";
+          cta.appendChild(a);
+        }
+        const all = document.createElement("a");
+        all.className = "btn ghost";
+        all.href = "#all-platforms";
+        all.textContent = "All platforms";
+        cta.appendChild(all);
+      }
+
+      if (!native && cmdEl) {
+        // Fall back to CLI one-liner as primary when no native asset yet
+        setText("detect-line", "CLI install (native installer not in this release yet)");
+      } else if (native) {
+        setText("detect-line", "Native installer for this OS — real program, double-click to install");
       }
     } catch (e) {
       const err = document.getElementById("release-err");
       if (err) {
         err.hidden = false;
         err.textContent =
-          "Could not load latest release from GitHub (network or no release yet). Use the install commands above once a tag is published.";
+          "Could not load latest release from GitHub. Use the install commands once a tag is published.";
       }
       setText(
         "release-meta",
-        "Latest release: not published yet — tag vX.Y.Z to cut the first automated build."
+        "Latest release: not published yet — tag vX.Y.Z to cut automated builds."
       );
+      if (cta) {
+        const a = document.createElement("a");
+        a.className = "btn";
+        a.href = "#primary-cmd";
+        a.textContent =
+          d.os === "windows" ? "CLI: PowerShell install" : "CLI: one-command install";
+        cta.appendChild(a);
+      }
     }
   }
 

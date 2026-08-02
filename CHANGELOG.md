@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-08-02
+
+Native OS GUI installers for Windows, macOS, and Linux.
+
+### Added
+- **Windows Setup.exe** (Inno Setup wizard) — Start Menu, optional PATH, launches GUI
+- **macOS** `joule.app` + **.pkg** installer + **.dmg** (drag to Applications) + app zip
+- **Linux .deb** with `/usr/bin/joule` and `.desktop` launcher
+- Release CI builds and publishes all native installers beside CLI archives
+- Download page prefers native installers; `install.ps1` launches Setup.exe when present
+
 ## [0.1.7] — 2026-08-02
 
 Interactive GUI graphs and donor/chat tabs; probe-test race fix.

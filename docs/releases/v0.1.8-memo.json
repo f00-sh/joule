@@ -1,0 +1,36 @@
+{
+  "org": "f00-sh",
+  "org_sub": "joule",
+  "reply_to": "OPS/JOULE",
+  "to": "joule users and operators",
+  "from": "Project Engineering",
+  "subject": "joule v0.1.8 release — native OS GUI installers",
+  "ref": "CHANGELOG.md [0.1.8], tag v0.1.8",
+  "date": "2026-08-02",
+  "opening": "v0.1.8 ships real native installers: Windows Setup.exe, macOS .pkg/.dmg with joule.app, and Linux .deb — not tarball-only.",
+  "sections": [
+    {
+      "heading": "Summary",
+      "body": "Users double-click platform installers. CLI one-liners remain. Unsigned until Authenticode/Apple notarization certs exist; SmartScreen/Gatekeeper may warn."
+    },
+    {
+      "heading": "Added",
+      "items": [
+        "Windows: joule-*-windows-x86_64-setup.exe (Inno Setup)",
+        "macOS: .pkg, .dmg, joule.app.zip per arch",
+        "Linux: .deb with desktop entry",
+        "download.html prefers native assets"
+      ]
+    },
+    {
+      "heading": "Install",
+      "items": [
+        "Windows: download Setup.exe from Releases",
+        "macOS: open .pkg or drag .app from .dmg",
+        "Linux: sudo dpkg -i joule-*-linux-*.deb"
+      ]
+    }
+  ],
+  "signature": {"name": "Project Engineering", "title": "f00-sh / joule", "office": ""},
+  "cc": "Maintainers"
+}

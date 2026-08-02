@@ -1,23 +1,18 @@
 joule for Windows
 =================
 
-Easy install (recommended)
-  Open PowerShell and run:
+Preferred install (native GUI Setup wizard):
+  Download joule-*-windows-x86_64-setup.exe from GitHub Releases
+  Double-click → Next → Install → Launch joule
 
-    irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
+CLI-only alternatives:
+  irm https://github.com/f00-sh/joule/releases/latest/download/install.ps1 | iex
+  Or unzip joule-*-windows-x86_64.zip and run joule.exe
 
-This zip
-  1. Unzip anywhere
-  2. Put joule.exe on your PATH, or run .\install.ps1 from the zip
-  3. joule version
-  4. joule agent --account YOURNAME
+After install, Start Menu → joule opens the interactive dashboard.
+Terminal: joule version | joule gui | joule control | joule agent
 
-Service / tray
-  joule service generate --platform windows --kind agent
-  joule service install-help --platform windows
-  joule tray   (when GUI tray is enabled in your build)
+Unsigned: SmartScreen may warn until Authenticode cert is available.
+More info → Run anyway.
 
-Notes
-  - Release binaries are on GitHub only (not model weights).
-  - Weights come from peers or official sources (sha256 verified).
-  - Docs: https://joule.f00.sh/download.html
+https://joule.f00.sh/

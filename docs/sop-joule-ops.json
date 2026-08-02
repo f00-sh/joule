@@ -8,8 +8,8 @@
   "ref": "AGENTS.md, README.md, docs/design/cluster-v0.md",
   "date": "2026-08-02",
   "doc_id": "JOULE-SOP-OPS-001",
-  "doc_title": "STANDARD OPERATING PROCEDURE — joule cluster",
-  "version": "v0.1.7",
+  "doc_title": "STANDARD OPERATING PROCEDURE \u2014 joule cluster",
+  "version": "v0.1.8",
   "status": "released",
   "opening": "Operators run joule as a GUI-first local pool or multi-agent cluster: start control, donate with an agent under local policy, watch live capacity graphs, and ship only when cargo gates and the docs pack are green.",
   "sections": [
@@ -18,37 +18,124 @@
       "body": "This SOP defines day-to-day operation of a joule lab or standing pool: quality gates, donor contribution control, live capacity visibility (CLI and GUI), and the release ship flow for f00-sh/joule."
     },
     {
+      "heading": "2a. Native installers",
+      "body": "Prefer OS installers from GitHub Releases: Windows Setup.exe, macOS .pkg/.dmg (joule.app), Linux .deb. CLI curl/irm one-liners remain for automation.",
+      "items": [
+        "Windows: joule-*-windows-x86_64-setup.exe",
+        "macOS: joule-*-darwin-*.pkg or .dmg",
+        "Linux: sudo dpkg -i joule-*-linux-*.deb"
+      ]
+    },
+    {
       "heading": "2. Day-to-day operator gates",
       "body": "Before exposing any gateway or telling donors the pool is open, complete these checks in order. Fail closed on any red step.",
       "steps": [
-        {"n": "2.1", "text": "Run workspace tests.", "code": "cargo test --workspace"},
-        {"n": "2.2", "text": "Optional offline lab.", "code": "cargo run -p joule --release -- lab"},
-        {"n": "2.3", "text": "Start control (GUI or CLI).", "code": "joule gui   # or: joule control"},
-        {"n": "2.4", "text": "Start agent with local policy.", "code": "joule agent --control 127.0.0.1:7701 --policy ~/.config/joule/donor-policy.json"},
-        {"n": "2.5", "text": "Read live capacity.", "code": "joule capacity --api http://127.0.0.1:7700 --json"},
-        {"n": "2.6", "text": "Confirm GUI Overview shows backends and connection state; Graphs zoom/pan work."}
+        {
+          "n": "2.1",
+          "text": "Run workspace tests.",
+          "code": "cargo test --workspace"
+        },
+        {
+          "n": "2.2",
+          "text": "Optional offline lab.",
+          "code": "cargo run -p joule --release -- lab"
+        },
+        {
+          "n": "2.3",
+          "text": "Start control (GUI or CLI).",
+          "code": "joule gui   # or: joule control"
+        },
+        {
+          "n": "2.4",
+          "text": "Start agent with local policy.",
+          "code": "joule agent --control 127.0.0.1:7701 --policy ~/.config/joule/donor-policy.json"
+        },
+        {
+          "n": "2.5",
+          "text": "Read live capacity.",
+          "code": "joule capacity --api http://127.0.0.1:7700 --json"
+        },
+        {
+          "n": "2.6",
+          "text": "Confirm GUI Overview shows backends and connection state; Graphs zoom/pan work."
+        }
       ],
       "flowchart": {
         "title": "Day-to-day operator gates",
         "color": true,
         "nodes": [
-          {"id": "start", "label": "Start ops check", "shape": "terminator"},
-          {"id": "test", "label": "cargo test --workspace", "shape": "process"},
-          {"id": "ctrl", "label": "Start control (GUI/CLI)", "shape": "process"},
-          {"id": "agent", "label": "Start agent + policy", "shape": "process"},
-          {"id": "cap", "label": "capacity --json + GUI graphs", "shape": "process"},
-          {"id": "live", "label": "Pool honest?", "shape": "decision"},
-          {"id": "ok", "label": "Operate", "shape": "terminator"},
-          {"id": "block", "label": "Block exposure", "shape": "terminator"}
+          {
+            "id": "start",
+            "label": "Start ops check",
+            "shape": "terminator"
+          },
+          {
+            "id": "test",
+            "label": "cargo test --workspace",
+            "shape": "process"
+          },
+          {
+            "id": "ctrl",
+            "label": "Start control (GUI/CLI)",
+            "shape": "process"
+          },
+          {
+            "id": "agent",
+            "label": "Start agent + policy",
+            "shape": "process"
+          },
+          {
+            "id": "cap",
+            "label": "capacity --json + GUI graphs",
+            "shape": "process"
+          },
+          {
+            "id": "live",
+            "label": "Pool honest?",
+            "shape": "decision"
+          },
+          {
+            "id": "ok",
+            "label": "Operate",
+            "shape": "terminator"
+          },
+          {
+            "id": "block",
+            "label": "Block exposure",
+            "shape": "terminator"
+          }
         ],
         "edges": [
-          {"from": "start", "to": "test"},
-          {"from": "test", "to": "ctrl"},
-          {"from": "ctrl", "to": "agent"},
-          {"from": "agent", "to": "cap"},
-          {"from": "cap", "to": "live"},
-          {"from": "live", "to": "ok", "label": "yes"},
-          {"from": "live", "to": "block", "label": "no"}
+          {
+            "from": "start",
+            "to": "test"
+          },
+          {
+            "from": "test",
+            "to": "ctrl"
+          },
+          {
+            "from": "ctrl",
+            "to": "agent"
+          },
+          {
+            "from": "agent",
+            "to": "cap"
+          },
+          {
+            "from": "cap",
+            "to": "live"
+          },
+          {
+            "from": "live",
+            "to": "ok",
+            "label": "yes"
+          },
+          {
+            "from": "live",
+            "to": "block",
+            "label": "no"
+          }
         ]
       },
       "figure": {
@@ -66,7 +153,7 @@
         "Pause/resume: joule donor pause|resume or GUI Donor tab / tray",
         "VRAM cap: joule donor set-cap N (0 clears) or tray --donor-set-cap",
         "Schedule / thermal / battery: donor policy JSON or GUI Donor tab",
-        "Status: joule donor status — prints local schedule and sensors"
+        "Status: joule donor status \u2014 prints local schedule and sensors"
       ]
     },
     {
@@ -76,34 +163,87 @@
         "title": "Release ship flow",
         "color": true,
         "nodes": [
-          {"id": "ready", "label": "Release candidate", "shape": "terminator"},
-          {"id": "verify", "label": "fmt + clippy + test", "shape": "process"},
-          {"id": "docs", "label": "Docs pack + PDFs", "shape": "process"},
-          {"id": "tag", "label": "Tag vX.Y.Z + push", "shape": "process"},
-          {"id": "ci", "label": "GHA multi-arch build", "shape": "process"},
-          {"id": "pub", "label": "GitHub Release assets", "shape": "process"},
-          {"id": "pkg", "label": "Homebrew + AUR pin", "shape": "process"},
-          {"id": "done", "label": "Done", "shape": "terminator"}
+          {
+            "id": "ready",
+            "label": "Release candidate",
+            "shape": "terminator"
+          },
+          {
+            "id": "verify",
+            "label": "fmt + clippy + test",
+            "shape": "process"
+          },
+          {
+            "id": "docs",
+            "label": "Docs pack + PDFs",
+            "shape": "process"
+          },
+          {
+            "id": "tag",
+            "label": "Tag vX.Y.Z + push",
+            "shape": "process"
+          },
+          {
+            "id": "ci",
+            "label": "GHA multi-arch build",
+            "shape": "process"
+          },
+          {
+            "id": "pub",
+            "label": "GitHub Release assets",
+            "shape": "process"
+          },
+          {
+            "id": "pkg",
+            "label": "Homebrew + AUR pin",
+            "shape": "process"
+          },
+          {
+            "id": "done",
+            "label": "Done",
+            "shape": "terminator"
+          }
         ],
         "edges": [
-          {"from": "ready", "to": "verify"},
-          {"from": "verify", "to": "docs"},
-          {"from": "docs", "to": "tag"},
-          {"from": "tag", "to": "ci"},
-          {"from": "ci", "to": "pub"},
-          {"from": "pub", "to": "pkg"},
-          {"from": "pkg", "to": "done"}
+          {
+            "from": "ready",
+            "to": "verify"
+          },
+          {
+            "from": "verify",
+            "to": "docs"
+          },
+          {
+            "from": "docs",
+            "to": "tag"
+          },
+          {
+            "from": "tag",
+            "to": "ci"
+          },
+          {
+            "from": "ci",
+            "to": "pub"
+          },
+          {
+            "from": "pub",
+            "to": "pkg"
+          },
+          {
+            "from": "pkg",
+            "to": "done"
+          }
         ]
       }
     },
     {
       "heading": "5. Product laws (do not violate)",
       "items": [
-        "Compute is the only currency on the public pool — no money",
-        "No contribution ⇒ no API access",
+        "Compute is the only currency on the public pool \u2014 no money",
+        "No contribution \u21d2 no API access",
         "Credits = sealed hash-chain millijoules only; verified VRAM only for mint/placement",
         "Single model: kimi-open",
-        "Website is not a weight CDN — content-addressed peer seed only"
+        "Website is not a weight CDN \u2014 content-addressed peer seed only"
       ]
     }
   ],
@@ -113,5 +253,5 @@
     "office": ""
   },
   "cc": "Maintainers, Release Operators",
-  "enclosure": "file_id.diz; CHANGELOG.md; docs/releases/v0.1.7-memo.pdf"
+  "enclosure": "file_id.diz; CHANGELOG.md; docs/releases/v0.1.8-memo.pdf"
 }

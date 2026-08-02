@@ -43,19 +43,36 @@ $tag = $rel.tag_name
 if (-not $tag) { Die "release has no tag_name" }
 $ver = $tag.TrimStart("v")
 $arch = Get-ArchTag
-$assetName = "$Project-$ver-windows-$arch.zip"
-$asset = $rel.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
-if (-not $asset) {
-    Die "release asset missing: $assetName (tag $tag). See https://github.com/$Repo/releases"
-}
 
-$url = $asset.browser_download_url
+# Prefer native GUI Setup.exe when present; fall back to portable ZIP.
+$setupName = "$Project-$ver-windows-$arch-setup.exe"
+$zipName = "$Project-$ver-windows-$arch.zip"
+$setup = $rel.assets | Where-Object { $_.name -eq $setupName } | Select-Object -First 1
+$zipAsset = $rel.assets | Where-Object { $_.name -eq $zipName } | Select-Object -First 1
+
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("joule-install-" + [guid]::NewGuid().ToString("n"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
-$zipPath = Join-Path $tmp $assetName
 
 try {
-    Write-Host "Downloading $url"
+    if ($setup) {
+        $setupPath = Join-Path $tmp $setupName
+        Write-Host "Downloading native Setup: $($setup.browser_download_url)"
+        Invoke-WebRequest -Uri $setup.browser_download_url -OutFile $setupPath -UseBasicParsing
+        Write-Host "Launching GUI installer (Setup wizard)…"
+        Start-Process -FilePath $setupPath -Wait
+        Write-Host ""
+        Write-Host "Setup finished ($tag). Launch joule from the Start Menu, or: joule version"
+        Write-Host "docs: https://joule.f00.sh/download.html"
+        return
+    }
+
+    if (-not $zipAsset) {
+        Die "release asset missing: $setupName or $zipName (tag $tag). See https://github.com/$Repo/releases"
+    }
+
+    $url = $zipAsset.browser_download_url
+    $zipPath = Join-Path $tmp $zipName
+    Write-Host "No Setup.exe in release — installing portable ZIP: $url"
     Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
     Expand-Archive -Path $zipPath -DestinationPath $tmp -Force
 
@@ -78,8 +95,8 @@ try {
 
     Write-Host ""
     Write-Host "installed $($InstallBin)\joule.exe  (from $tag)"
-    Write-Host "run:  joule version"
-    Write-Host "then: joule agent --account YOU"
+    Write-Host "run:  joule          # GUI dashboard"
+    Write-Host "      joule version"
     Write-Host "docs: https://joule.f00.sh/download.html"
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
