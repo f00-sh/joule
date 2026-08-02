@@ -183,6 +183,10 @@ fn probe_metal_sysctl() -> Option<GpuProbe> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Env overrides are process-global; serialize tests that touch them.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn clamp_never_exceeds_probe() {
@@ -204,23 +208,23 @@ mod tests {
     }
 
     #[test]
-    fn env_override_is_real_entry() {
-        // Drive the real probe_vram entry with env (not a reimplemented clamp).
-        std::env::set_var("JOULE_PROBE_VRAM_MIB", "3072");
+    fn env_override_and_force_cpu_are_real_entries() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Drive real probe_vram with env (not a reimplemented clamp).
         std::env::remove_var("JOULE_PROBE_FORCE_CPU");
+        std::env::set_var("JOULE_PROBE_VRAM_MIB", "3072");
         let p = probe_vram();
         assert!(p.available);
         assert_eq!(p.total_mem_mib, 3072);
         assert_eq!(clamp_claim(99_999, &p), 3072);
-        std::env::remove_var("JOULE_PROBE_VRAM_MIB");
-    }
 
-    #[test]
-    fn force_cpu_env() {
+        // FORCE_CPU wins even if VRAM override remains set.
         std::env::set_var("JOULE_PROBE_FORCE_CPU", "1");
         let p = probe_vram();
         assert!(!p.available);
         assert_eq!(p.total_mem_mib, 0);
+
         std::env::remove_var("JOULE_PROBE_FORCE_CPU");
+        std::env::remove_var("JOULE_PROBE_VRAM_MIB");
     }
 }

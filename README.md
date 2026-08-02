@@ -95,7 +95,9 @@ joule            # opens the graphical dashboard (graphs + buttons)
 joule gui
 ```
 
-In the GUI: **Start control** → **Start agent (donate)** → watch pool graphs.
+In the GUI: **Start control** → **Start agent (donate)** → **Overview/Graphs** tabs
+(zoom/pan/box-zoom, series toggles, sparklines), **Donor** (pause/cap/schedule/thermal),
+**Chat** against the pool.
 No separate “open a terminal and guess ports” required for the happy path.
 
 ### Advanced: Terminal 1 — control plane (localhost)
