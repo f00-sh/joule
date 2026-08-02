@@ -327,9 +327,11 @@ table.fair th {
   color: var(--f00-fg);
 }
 
-pre.cmd {
-  background: var(--f00-code-bg);
-  border: 1px solid var(--f00-border);
+pre.cmd, pre.install-cmd, .install-cmd {
+  background: var(--f00-code-bg, #050404) !important;
+  color: #EDE6DE !important;
+  border: 1px solid #C8CED4 !important;
+  border-radius: 0 !important;
   padding: 0.9rem 1rem;
   overflow-x: auto;
   font-size: 0.82rem;
