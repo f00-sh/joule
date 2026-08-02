@@ -268,4 +268,50 @@ mod tests {
         assert_eq!(loaded, p);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Agent must reload **this** policy path (not a different default file).
+    #[test]
+    fn explicit_policy_path_pause_and_cap_are_independent_of_default() {
+        let dir = std::env::temp_dir().join(format!(
+            "joule-policy-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let agent_path = dir.join("agent-session.json");
+        let other_path = dir.join("other-default.json");
+        // Session file: paused + cap 4096
+        DonorPolicy {
+            paused: true,
+            mem_cap_mib: Some(4096),
+            ..Default::default()
+        }
+        .save(&agent_path)
+        .unwrap();
+        // Unrelated default-looking file: fully open
+        DonorPolicy::default().save(&other_path).unwrap();
+
+        let session = DonorPolicy::load(&agent_path).unwrap();
+        let other = DonorPolicy::load(&other_path).unwrap();
+        assert!(session.paused);
+        assert!(!other.paused);
+        assert_eq!(session.effective_mem_mib(8192), 4096);
+        assert_eq!(other.effective_mem_mib(8192), 8192);
+        assert!(!session.allows_donate(0, SensorSample::default()));
+        assert!(other.allows_donate(0, SensorSample::default()));
+        // Mutating session path is what `joule donor pause --policy agent-session` does
+        let mut s2 = DonorPolicy::load(&agent_path).unwrap();
+        s2.paused = false;
+        s2.save(&agent_path).unwrap();
+        assert!(DonorPolicy::load(&agent_path)
+            .unwrap()
+            .allows_donate(0, SensorSample::default()));
+        // other file untouched
+        assert!(!DonorPolicy::load(&other_path).unwrap().paused);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

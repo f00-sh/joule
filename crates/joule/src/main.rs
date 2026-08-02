@@ -31,7 +31,7 @@ use joule_runtime::{
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -693,6 +693,7 @@ async fn main() -> Result<()> {
                 peer_listen,
                 Some(id_path),
                 pol,
+                policy_path,
             )
             .await?;
         }
@@ -1242,6 +1243,16 @@ fn run_donor_cmd(cmd: DonorCmd) -> Result<()> {
     Ok(())
 }
 
+/// Reload donor policy from the path this agent was started with (`--policy` /
+/// `JOULE_DONOR_POLICY` via `DonorPolicy::default_path`). Never silently switch
+/// to a different default path mid-session.
+pub(crate) fn reload_live_policy(
+    policy_path: &Path,
+    fallback: &donor_policy::DonorPolicy,
+) -> donor_policy::DonorPolicy {
+    donor_policy::DonorPolicy::load(policy_path).unwrap_or_else(|_| fallback.clone())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_agent(
     control: String,
@@ -1253,6 +1264,7 @@ async fn run_agent(
     peer_listen: String,
     identity_path: Option<PathBuf>,
     policy: donor_policy::DonorPolicy,
+    policy_path: PathBuf,
 ) -> Result<()> {
     let node_id = NodeId::new();
     let account = ident.account_id.clone();
@@ -1274,6 +1286,7 @@ async fn run_agent(
             probe.backend, probe.detail
         );
     }
+    println!("donor policy file: {}", policy_path.display());
     if policy.paused {
         println!("donor policy: PAUSED (local) — heartbeats will report unhealthy");
     }
@@ -1390,11 +1403,8 @@ async fn run_agent(
     loop {
         tokio::select! {
             _ = heartbeat.tick() => {
-                // Reload policy file so `joule donor pause` takes effect without restart.
-                let live_policy = donor_policy::DonorPolicy::load(
-                    &donor_policy::DonorPolicy::default_path(),
-                )
-                .unwrap_or_else(|_| policy.clone());
+                // Reload **this agent's** policy path so `joule donor pause --policy <same>` works.
+                let live_policy = reload_live_policy(&policy_path, &policy);
                 let sensors = donor_policy::probe_sensors();
                 let donating = live_policy.allows_donate(
                     donor_policy::DonorPolicy::now_unix_secs(),
@@ -1461,14 +1471,25 @@ async fn run_agent(
                         if !multiaddrs.is_empty() {
                             println!("mesh dial:  {}", multiaddrs.join(", "));
                             let blob_count = WeightsStore::list_blob_store().len() as u32;
+                            let live = reload_live_policy(&policy_path, &policy);
+                            let sensors = donor_policy::probe_sensors();
+                            let donating = live.allows_donate(
+                                donor_policy::DonorPolicy::now_unix_secs(),
+                                sensors,
+                            );
+                            let offer = if donating {
+                                live.effective_mem_mib(mem_mib)
+                            } else {
+                                0
+                            };
                             let alive = Envelope::new(
                                 node_id.clone(),
                                 Message::PeerAlive {
                                     multiaddrs: multiaddrs.clone(),
                                     load: 0.1,
-                                    healthy: true,
+                                    healthy: donating,
                                     blob_count,
-                                    mem_mib,
+                                    mem_mib: offer,
                                     verified_mem_mib: 0, // never self-attest
                                     throughput_class,
                                 },

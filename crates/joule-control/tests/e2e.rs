@@ -261,6 +261,137 @@ async fn pool_capacity_and_chat() {
     assert_eq!(PROTOCOL_VERSION, "0.1.0");
 }
 
+/// Local donor pause (Heartbeat healthy=false) drops backends without process kill.
+/// Mem-cap on Hello clamps claimed_mem_mib (same as agent --mem-cap-mib).
+#[tokio::test]
+async fn donor_pause_and_mem_cap_affect_offered_capacity() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    // Agent A: full 8192 claim, stays healthy.
+    let (_ka, ha) = spawn_agent(agent_addr, "cap-alice", 8192).await;
+    // Agent B: Hello with capped claim 4096 (shipped agent applies policy.effective_mem_mib).
+    let node_b = NodeId::new();
+    let sock_b = TcpStream::connect(agent_addr).await.expect("b connect");
+    let (reader_b, mut writer_b) = sock_b.into_split();
+    let mut lines_b = BufReader::new(reader_b).lines();
+    let hello_b = Envelope::new(
+        node_b.clone(),
+        Message::Hello {
+            account: "cap-bob".into(),
+            caps: NodeCaps::for_cluster(DeviceClass::Gpu, 4096, 40), // after mem-cap clamp
+            pubkey_hex: String::new(),
+            sig_hex: String::new(),
+            signed_at_unix_ms: 0,
+        },
+    );
+    writer_b
+        .write_all(&encode_line(&hello_b).unwrap())
+        .await
+        .unwrap();
+    let welcome_b = lines_b.next_line().await.unwrap().expect("welcome b");
+    let _ = decode_line(welcome_b.as_bytes()).unwrap();
+    // Start healthy
+    let hb_ok = Envelope::new(
+        node_b.clone(),
+        Message::Heartbeat {
+            load: 0.05,
+            healthy: true,
+        },
+    );
+    writer_b
+        .write_all(&encode_line(&hb_ok).unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    // Mem-cap claim recorded on bob
+    {
+        let g = app.state.read().await;
+        let bob = g
+            .cluster
+            .nodes()
+            .find(|n| n.account == "cap-bob")
+            .expect("bob node");
+        assert_eq!(
+            bob.claimed_mem_mib, 4096,
+            "Hello claim must be local mem-cap (not 8192)"
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let cap_before: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/capacity"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let backends_before = cap_before["logical_device"]["backends"]
+        .as_u64()
+        .or_else(|| cap_before["nodes_healthy"].as_u64())
+        .unwrap_or(0);
+    assert!(
+        backends_before >= 2,
+        "need 2 healthy before pause, got {backends_before} {cap_before}"
+    );
+
+    // Pause bob only (same as agent reloading policy.paused=true → Heartbeat healthy=false).
+    // Process stays alive — capacity drop must not require kill.
+    let hb_pause = Envelope::new(
+        node_b.clone(),
+        Message::Heartbeat {
+            load: 0.05,
+            healthy: false,
+        },
+    );
+    writer_b
+        .write_all(&encode_line(&hb_pause).unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let cap_after: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/capacity"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let backends_after = cap_after["logical_device"]["backends"]
+        .as_u64()
+        .or_else(|| cap_after["nodes_healthy"].as_u64())
+        .unwrap_or(0);
+    assert!(
+        backends_after < backends_before,
+        "pause-only must reduce healthy backends {backends_before} → {backends_after} cap={cap_after}"
+    );
+    assert!(backends_after >= 1, "alice still healthy: {cap_after}");
+    {
+        let g = app.state.read().await;
+        let bob = g
+            .cluster
+            .nodes()
+            .find(|n| n.account == "cap-bob")
+            .expect("bob still registered");
+        assert!(!bob.healthy, "paused bob must be marked unhealthy");
+    }
+
+    ha.abort();
+    drop(writer_b);
+}
+
 /// Multi-agent live pool: N≥2 join; capacity reflects healthy set; churn drops a node.
 #[tokio::test]
 async fn multi_agent_capacity_under_churn() {
