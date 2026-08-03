@@ -7,7 +7,7 @@
       "description": "Single model on one logical GPU (sum of donor VRAM). Open checkpoint pipeline: lab-tiny (always loadable) + Kimi-K3 meta from Hugging Face. Full multi-hundred-GB K3 shards pin when operators host a mirror.",
       "min_pool_vram_mib": 65536,
       "min_backends": 3,
-      "model_layers": 80,
+      "model_layers": 93,
       "milestones": [
         {
           "id": "spark",

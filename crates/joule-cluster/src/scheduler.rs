@@ -10,8 +10,11 @@ use joule_proto::{ClusterPlan, NodeId, ShardAssignment, ShardRole, CLUSTER_MODEL
 use serde::Serialize;
 use uuid::Uuid;
 
-/// Default transformer layer count for placement math (placeholder until model config).
-pub const DEFAULT_MODEL_LAYERS: u32 = 80;
+/// Default transformer layer count for **scheduling geometry** (VRAM-proportional
+/// `layer_start`/`layer_end` only — not executed pipeline-parallel until intermediate
+/// shards do real activation work). Must match verified Kimi-K3
+/// `text_config.num_hidden_layers` (see `joule_runtime::verified_k3_model_layers` = 93).
+pub const DEFAULT_MODEL_LAYERS: u32 = 93;
 
 /// Rough KV/activation budget (MiB) reserved per concurrent generation stream
 /// against **aggregate** pool VRAM. Lower → more concurrent users.
@@ -167,6 +170,7 @@ impl Cluster {
             ));
         }
 
+        // Geometry only: ranges for agree/hash — not real PP activation (see cluster-v0.md).
         let layers = DEFAULT_MODEL_LAYERS;
         let mut shards = Vec::with_capacity(donors.len());
         let mut layer_cursor = 0u32;

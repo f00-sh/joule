@@ -16,6 +16,8 @@ repos:
       - id: trailing-whitespace
         exclude: '\.md$'
       - id: end-of-file-fixer
+        # Content-addressed meta pin: trailing newline would change sha256 vs MANIFEST.
+        exclude: 'models/fixtures/kimi-k3-meta/config\.json$'
       - id: check-yaml
         args: [--unsafe]
       - id: check-toml

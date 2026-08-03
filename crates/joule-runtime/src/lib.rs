@@ -5,6 +5,7 @@
 //! RAM. Service-live is a separate control flag after the mesh has loaded.
 
 mod decode;
+mod k3_meta;
 mod k3_pipeline;
 mod load;
 mod manifest;
@@ -12,6 +13,11 @@ mod software;
 mod weights;
 
 pub use decode::generate as generate_from_loaded;
+pub use k3_meta::{
+    config_sha256_hex, manifest_k3_config_digest, num_hidden_layers_from_config_json,
+    placement_model_layers, verified_k3_model_layers, verified_k3_model_layers_from,
+    EMBEDDED_K3_CONFIG_JSON,
+};
 pub use k3_pipeline::{
     pipeline_from_quant, pipelines_for_model, shard_cache_path, synthetic_k3_shard_template,
     validate_k3_scale, PipelineShard, WeightPipeline,
@@ -26,10 +32,13 @@ pub use software::{
     apply_staged, current_arch, current_os, match_target, parse_software_update, read_stage,
     stage_blob, SoftwareTarget, SoftwareUpdateBody, StageStatus,
 };
-pub use weights::{BlobAnnounce, PrepareStatus, WeightsStore};
+pub use weights::{
+    digests_verified_for_quant, is_lab_fixture_quant, is_synthetic_placeholder_digest,
+    quant_can_unlock_service_digests, BlobAnnounce, PrepareStatus, WeightsStore,
+};
 
-/// Gate: digests verified for the primary quant of the default manifest model.
-/// Used by control `service_live` honesty and readiness flags.
+/// Gate: digests verified for a **lab fixture** quant of the default manifest model.
+/// Never unlocks on `kimi-k3-shards` / placeholder peer pins (CI has no full K3 weights).
 pub fn digests_verified_for_primary_lab(store: &WeightsStore) -> Result<bool, String> {
     let m = ManifestFile::load_default()?;
     let spec = m.primary().ok_or_else(|| "no primary model".to_string())?;
@@ -37,7 +46,7 @@ pub fn digests_verified_for_primary_lab(store: &WeightsStore) -> Result<bool, St
         .pick_quant(8192)
         .or_else(|| spec.weights.quants.first())
         .ok_or_else(|| "no quant".to_string())?;
-    Ok(store.digests_verified(&spec.id, quant))
+    Ok(digests_verified_for_quant(store, &spec.id, quant))
 }
 
 use async_trait::async_trait;
@@ -346,6 +355,52 @@ mod tests {
             pool_mem_mib: 1024,
             model_layers: 1,
         }
+    }
+
+    #[test]
+    fn k3_shards_fail_closed_lab_unlocks_digests() {
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.primary().unwrap();
+        let k3 = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "kimi-k3-shards")
+            .expect("k3-shards");
+        let dir = std::env::temp_dir().join(format!("joule-k3-fc-{}", Uuid::new_v4()));
+        let blob = std::env::temp_dir().join(format!("joule-k3-fc-b-{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
+        std::env::set_var("JOULE_BLOBS_DIR", &blob);
+        let store = WeightsStore::new(&dir);
+        assert!(
+            !digests_verified_for_quant(&store, &spec.id, k3),
+            "kimi-k3-shards must not unlock digests"
+        );
+        assert!(!quant_can_unlock_service_digests(k3));
+        // Same quant digests_verified_for_primary_lab uses (pick_quant 8192 → lab-large).
+        let lab = spec.pick_quant(8192).expect("lab-large");
+        assert!(
+            is_lab_fixture_quant(lab),
+            "primary path must stay lab fixture"
+        );
+        let eng = ClusterEngine::new();
+        let _ = prepare_and_install(&store, &eng, spec, lab).expect("lab install");
+        assert!(
+            digests_verified_for_quant(&store, &spec.id, lab),
+            "lab fixture must unlock digests after sha256 stage"
+        );
+        assert!(digests_verified_for_primary_lab(&store).unwrap());
+        eprintln!(
+            "OBSERVE k3-fail-closed: k3_unlock={} lab={} digests={} primary_lab={}",
+            quant_can_unlock_service_digests(k3),
+            lab.id,
+            digests_verified_for_quant(&store, &spec.id, lab),
+            digests_verified_for_primary_lab(&store).unwrap()
+        );
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
     }
 
     #[test]

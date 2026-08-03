@@ -28,7 +28,8 @@ pub struct ModelSpec {
 }
 
 fn default_layers() -> u32 {
-    80
+    // Aligned with verified Kimi-K3 text_config.num_hidden_layers (offline meta pin).
+    93
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

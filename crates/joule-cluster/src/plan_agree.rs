@@ -105,7 +105,7 @@ mod tests {
             plan_id: Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap(),
             model: "kimi-open".into(),
             pool_mem_mib: 16384,
-            model_layers: 80,
+            model_layers: 93,
             shards: vec![
                 ShardAssignment {
                     node: a.clone(),
@@ -113,7 +113,7 @@ mod tests {
                     mem_share_mib: 8192,
                     mem_fraction_ppm: 500_000,
                     layer_start: Some(0),
-                    layer_end: Some(39),
+                    layer_end: Some(46),
                     tp_rank: None,
                     tp_world: None,
                 },
@@ -122,8 +122,8 @@ mod tests {
                     role: ShardRole::Pipeline,
                     mem_share_mib: 8192,
                     mem_fraction_ppm: 500_000,
-                    layer_start: Some(40),
-                    layer_end: Some(79),
+                    layer_start: Some(47),
+                    layer_end: Some(92),
                     tp_rank: None,
                     tp_world: None,
                 },

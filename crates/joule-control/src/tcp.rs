@@ -1313,7 +1313,9 @@ pub async fn challenge_loop(app: App) {
 
 /// Agent-side: run this node's **shard** of a pool-wide inference.
 ///
-/// Non-tail shards only ACK (activation handoff stub). Tail produces tokens.
+/// **Honesty:** multi-donor `layer_start`/`layer_end` are scheduling geometry only.
+/// Non-tail shards only ACK (empty text) — no real activation handoff / pipeline-parallel
+/// K3 yet. Tail produces tokens via full `engine.infer`.
 /// `engine` may be a stub or a [`joule_runtime::ClusterEngine`] with tensors loaded.
 pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
     match &env.msg {
@@ -1409,5 +1411,107 @@ pub async fn agent_handle_challenge(env: &Envelope, _engine: &impl Engine) -> Re
             ))
         }
         _ => anyhow::bail!("not a challenge"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use joule_proto::{ClusterPlan, ShardAssignment, ShardRole, CLUSTER_MODEL};
+    use joule_runtime::StubEngine;
+    use uuid::Uuid;
+
+    fn demo_plan(layers: u32) -> ClusterPlan {
+        ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            shards: vec![
+                ShardAssignment {
+                    node: NodeId::new(),
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(0),
+                    layer_end: Some(layers / 2),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 4096,
+                    mem_fraction_ppm: 500_000,
+                },
+                ShardAssignment {
+                    node: NodeId::new(),
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(layers / 2 + 1),
+                    layer_end: Some(layers.saturating_sub(1)),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 4096,
+                    mem_fraction_ppm: 500_000,
+                },
+            ],
+            pool_mem_mib: 8192,
+            model_layers: layers,
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_donor_infer_non_tail_empty_ack_only() {
+        let plan = demo_plan(joule_runtime::placement_model_layers());
+        let eng = StubEngine::new();
+        let env = Envelope::new(
+            plan.shards[0].node.clone(),
+            Message::InferRequest {
+                request_id: Uuid::new_v4(),
+                model: CLUSTER_MODEL.into(),
+                prompt: "should-not-infer".into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: false,
+            },
+        );
+        let reply = agent_handle_infer(&env, &eng).await.expect("handle");
+        match reply.msg {
+            Message::InferDone {
+                text,
+                prompt_tokens,
+                completion_tokens,
+                shard_ok,
+                ..
+            } => {
+                assert!(text.is_empty(), "non-tail must not run full infer: {text}");
+                assert_eq!(prompt_tokens, 0);
+                assert_eq!(completion_tokens, 0);
+                assert!(shard_ok);
+            }
+            other => panic!("expected InferDone, got {other:?}"),
+        }
+        eprintln!(
+            "OBSERVE no-fake-pp: non-tail empty ACK; model_layers={} geometry only",
+            plan.model_layers
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_donor_infer_tail_runs_engine() {
+        let plan = demo_plan(joule_runtime::placement_model_layers());
+        let eng = StubEngine::new();
+        eng.load_plan(&plan).await.unwrap();
+        let env = Envelope::new(
+            plan.shards[1].node.clone(),
+            Message::InferRequest {
+                request_id: Uuid::new_v4(),
+                model: CLUSTER_MODEL.into(),
+                prompt: "tail-full-infer".into(),
+                max_tokens: 8,
+                plan: plan.clone(),
+                is_tail: true,
+            },
+        );
+        let reply = agent_handle_infer(&env, &eng).await.expect("handle");
+        match reply.msg {
+            Message::InferDone { text, .. } => {
+                assert!(!text.is_empty(), "tail must produce tokens");
+                assert!(text.contains("tail-full-infer") || text.contains("joule"));
+            }
+            other => panic!("expected InferDone, got {other:?}"),
+        }
     }
 }

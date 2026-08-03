@@ -234,7 +234,7 @@ website may **mirror signed** bootstrap/stats; never required as payload or as t
 
 | Item | Status |
 |------|--------|
-| Multi-hundred-GB kimi-open/K3 pipeline | **Landed** — `kimi-k3-shards` in MANIFEST (16×20 GiB peer:// pins); `joule_runtime::k3_pipeline` validates multi-hundred-GB class; lab-tiny regression kept |
+| Multi-hundred-GB kimi-open/K3 weight **pins** | **Landed** — `kimi-k3-shards` in MANIFEST (16×20 GiB peer:// pins, synthetic digests); `joule_runtime::k3_pipeline` validates size class; **CI digests/service_live unlock only via lab fixtures** (K3 placeholders fail closed). Placement `layer_*` = scheduling geometry only (not true PP). File shards ≠ transformer layers. |
 | Public multiaddrs | **Landed** — `advertise_public_multiaddrs`, non-loopback public-style checks, agent dual tcp/quic announce |
 | Swarm durability at multi-chunk scale | **Landed** — redundant `plan_redundant_chunks` + erasure placement/reconstruct under multi-node loss |
 

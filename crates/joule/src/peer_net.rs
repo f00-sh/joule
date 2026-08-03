@@ -684,7 +684,7 @@ mod tests {
         let plan = ClusterPlan {
             plan_id: Uuid::new_v4(),
             model: CLUSTER_MODEL.into(),
-            model_layers: 80,
+            model_layers: 93,
             pool_mem_mib: 8192,
             shards: vec![ShardAssignment {
                 node: seeder.clone(),

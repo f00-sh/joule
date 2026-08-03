@@ -164,7 +164,8 @@ pub struct ClusterPlan {
 }
 
 fn default_model_layers() -> u32 {
-    80
+    // Fail-safe default aligned with verified K3 meta pin (num_hidden_layers=93).
+    93
 }
 
 /// How joule presents the pool externally: **one logical device**.

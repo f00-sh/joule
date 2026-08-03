@@ -138,15 +138,19 @@ Mesh path (`RequestInfer`) and classic control path both take a lease, require m
 ### Plan types
 
 1. **Replica** — full quant on one node  
-2. **Pipeline** — layer ranges across N nodes  
+2. **Pipeline (geometry only)** — VRAM-proportional `layer_start`/`layer_end` labels across N nodes (`ShardRole::Pipeline`). **This is scheduling geometry**, not executed multi-node pipeline-parallelism, until intermediate shards perform real activation handoff. Infer today: **tail runs full `engine.infer`**; non-tail returns empty `InferDone` ACK only.  
 3. **Tensor** — TP ranks (later)  
 4. **Prefill/Decode split** — disagg (later)
+
+**Layer count:** placement total is pinned to verified Kimi-K3 meta (`text_config.num_hidden_layers` from sha256-verified `kimi-k3-meta` / `config.json`), not an ungrounded constant alone. MANIFEST `model_layers` must match that pin.
+
+**File weight shards ≠ transformer layers:** `kimi-k3-shards` / `PipelineShard` safetensors files are content-addressed **weight files**. They are **not** 1:1 with `layer_start`/`layer_end` ranges unless a separate design table maps `file_index ↔ layer_range` (none in v0). Do not market “true PP across donors” from geometry alone.
 
 ### Policy (v0)
 
 ```
 if prefer_pipeline && healthy_fit_nodes >= stages && stages > 1:
-    assign pipeline shards
+    assign pipeline shards  # geometry labels only until real PP
 else:
     assign single best replica (mem, then load)
 ```

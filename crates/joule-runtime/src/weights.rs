@@ -11,6 +11,69 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+/// True when a MANIFEST digest is a synthetic pin (not a real weight content hash).
+/// `kimi-k3-shards` uses `a100…00N` placeholders; those never unlock service digests.
+pub fn is_synthetic_placeholder_digest(hex: &str) -> bool {
+    let h = hex.trim().to_ascii_lowercase();
+    if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        return true;
+    }
+    // Product placeholder pattern for peer-only multi-hundred-GB pins.
+    if h.starts_with("a10000000000000000000000000000000000000000000000000000000000") {
+        return true;
+    }
+    // Degenerate all-identical nibble digests.
+    let mut cs = h.chars();
+    if let Some(first) = cs.next() {
+        if cs.all(|c| c == first) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Lab fixture quants that may unlock digests in CI (real repo:// content).
+pub fn is_lab_fixture_quant(quant: &QuantSpec) -> bool {
+    quant.id.starts_with("lab-")
+}
+
+/// Whether this quant is allowed to unlock public digests_verified / service_live honesty.
+/// Peer-only K3 shards and empty q-ladder quants cannot.
+pub fn quant_can_unlock_service_digests(quant: &QuantSpec) -> bool {
+    if quant.files.is_empty() {
+        return false;
+    }
+    if quant.id == "kimi-k3-shards" || quant.id.contains("k3-shards") {
+        return false;
+    }
+    if quant
+        .files
+        .iter()
+        .any(|f| is_synthetic_placeholder_digest(&f.sha256))
+    {
+        return false;
+    }
+    // peer:// multi-hundred-GB pins without a lab fixture id stay fail-closed for unlock.
+    if quant.files.iter().all(|f| {
+        let u = f.url.to_ascii_lowercase();
+        u.starts_with("peer://") && f.size_bytes >= 1_073_741_824
+    }) {
+        return false;
+    }
+    true
+}
+
+/// Shipped digest gate: content sha256 match **and** quant allowed to unlock service digests.
+pub fn digests_verified_for_quant(store: &WeightsStore, model: &str, quant: &QuantSpec) -> bool {
+    if !quant_can_unlock_service_digests(quant) {
+        return false;
+    }
+    if quant.files.is_empty() {
+        return false;
+    }
+    store.files_complete(model, quant)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareStatus {
     pub model: String,
@@ -74,11 +137,11 @@ impl WeightsStore {
 
     /// True when every MANIFEST-listed file for `quant` is present and sha256 matches.
     /// This is the content-addressed gate for `RuntimeFlags::digests_verified`.
+    ///
+    /// Fail closed for synthetic / non-content pins (`kimi-k3-shards` placeholders):
+    /// those digests never unlock service digests even if a matching blob exists.
     pub fn digests_verified(&self, model: &str, quant: &QuantSpec) -> bool {
-        if quant.files.is_empty() {
-            return false;
-        }
-        self.files_complete(model, quant)
+        digests_verified_for_quant(self, model, quant)
     }
 
     /// Required digests from a quant (sha256 list) for audit/readiness.
@@ -519,6 +582,7 @@ pub(crate) mod test_env {
 mod tests {
     use super::*;
     use crate::manifest::ManifestFile;
+    use uuid::Uuid;
 
     #[test]
     fn lab_tiny_from_repo_no_external() {
@@ -562,6 +626,42 @@ mod tests {
         assert!(!q.files.is_empty(), "got {}", q.id);
         // 8192 MiB: largest loadable fixture is lab-large (multi-MiB), not meta/K3 peer pins.
         assert_eq!(q.id, "lab-large", "got {}", q.id);
+    }
+
+    #[test]
+    fn kimi_k3_shards_never_unlock_digests_without_content_path() {
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.model("kimi-open").unwrap();
+        let k3 = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "kimi-k3-shards")
+            .expect("kimi-k3-shards");
+        assert!(!quant_can_unlock_service_digests(k3));
+        assert!(k3
+            .files
+            .iter()
+            .all(|f| is_synthetic_placeholder_digest(&f.sha256)));
+        let dir = std::env::temp_dir().join(format!("joule-k3-empty-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WeightsStore::new(&dir);
+        assert!(
+            !digests_verified_for_quant(&store, &spec.id, k3),
+            "empty cache: k3-shards digests must stay false"
+        );
+        // Even if placeholder digests somehow appear complete, unlock is refused.
+        assert!(!store.digests_verified(&spec.id, k3));
+        let lab = spec.pick_quant(256).expect("lab-tiny");
+        assert!(is_lab_fixture_quant(lab));
+        assert!(quant_can_unlock_service_digests(lab));
+        eprintln!(
+            "OBSERVE k3-fail-closed: quant={} unlock={} digests_verified={}",
+            k3.id,
+            quant_can_unlock_service_digests(k3),
+            store.digests_verified(&spec.id, k3)
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
