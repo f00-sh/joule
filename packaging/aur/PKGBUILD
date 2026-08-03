@@ -1,10 +1,4 @@
 # Maintainer: William Theesfeld <william@theesfeld.net>
-# Contributor: f00-sh
-#
-# Prebuilt binary from GitHub Releases (f00-sh/joule).
-#   yay -S joule-bin
-#   https://aur.archlinux.org/packages/joule-bin
-
 pkgname=joule-bin
 pkgver=0.1.11
 pkgrel=1
@@ -12,27 +6,15 @@ pkgdesc="Donate idle compute, earn millijoules, use open-weight AI (prebuilt bin
 arch=('x86_64' 'aarch64')
 url="https://joule.f00.sh/"
 license=('MIT')
-depends=()
 provides=('joule')
 conflicts=('joule')
 options=('!strip')
 source_x86_64=("https://github.com/f00-sh/joule/releases/download/v${pkgver}/joule-${pkgver}-linux-x86_64.tar.gz")
 source_aarch64=("https://github.com/f00-sh/joule/releases/download/v${pkgver}/joule-${pkgver}-linux-aarch64.tar.gz")
-# Checksums filled from GitHub Release .sha256 assets after tag CI.
-sha256sums_x86_64=('UPDATE_FROM_RELEASE')
-sha256sums_aarch64=('UPDATE_FROM_RELEASE')
-
+sha256sums_x86_64=('f556eac53b3a29dd6972deddd3e099e10cb21038cff45f83aaadbfffe62e5d2a')
+sha256sums_aarch64=('3565e29a474152c90ae7c840ccf77c86365943252cf81a4801393f06bd2ea516')
 package() {
   cd "${srcdir}"
-  local root
   root="$(find . -maxdepth 2 -type f -name joule | head -1 | xargs dirname)"
   install -Dm755 "${root}/joule" "${pkgdir}/usr/bin/joule"
-  if [[ -f "${root}/man/joule.1" ]]; then
-    install -Dm644 "${root}/man/joule.1" "${pkgdir}/usr/share/man/man1/joule.1"
-  elif [[ -f "${root}/man/joule.1.md" ]]; then
-    install -Dm644 "${root}/man/joule.1.md" "${pkgdir}/usr/share/doc/joule/joule.1.md"
-  fi
-  if [[ -f "${root}/LICENSE" ]]; then
-    install -Dm644 "${root}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
-  fi
 }
