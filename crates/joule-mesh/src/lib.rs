@@ -1868,6 +1868,159 @@ mod tests {
         );
     }
 
+    /// Multi-donor mesh PP with **weight-resident ClusterEngine**: sequential chain
+    /// emits **JST3** non-tail activations (parity with control e2e), non-empty upstream
+    /// into tail, exactly one tail dispatch.
+    #[tokio::test]
+    async fn multi_donor_pipeline_sequential_jst3_weight_resident() {
+        use joule_runtime::{ClusterEngine, LoadedModel, MATMUL_DIM};
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        fn f32_diag_model(scale: f32) -> LoadedModel {
+            let need = MATMUL_DIM * MATMUL_DIM + MATMUL_DIM;
+            let mut w = vec![0.0f32; need];
+            for i in 0..MATMUL_DIM {
+                w[i * MATMUL_DIM + i] = scale;
+                w[MATMUL_DIM * MATMUL_DIM + i] = 0.01 * (i as f32);
+            }
+            let mut bytes = Vec::with_capacity(need * 4);
+            for v in &w {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let mut tensors = HashMap::new();
+            tensors.insert("blk.0.weight".into(), bytes);
+            let mut sources = HashMap::new();
+            sources.insert("blk.0.weight".into(), "model.safetensors".into());
+            LoadedModel {
+                model_id: CLUSTER_MODEL.into(),
+                quant: "f32-diag".into(),
+                source_dir: std::path::PathBuf::from("/tmp/joule-mesh-f32-diag"),
+                tensors,
+                tensor_info: vec![],
+                bytes_resident: (need * 4) as u64,
+                loaded_at_unix: 0,
+                loaded_file_basenames: vec!["model.safetensors".into()],
+                tensor_sources: sources,
+            }
+        }
+
+        struct CountJst3 {
+            inner: ClusterEngine,
+            non_tail: AtomicUsize,
+            tail: AtomicUsize,
+            jst3: AtomicUsize,
+            last_upstream: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl Engine for CountJst3 {
+            async fn load_plan(
+                &self,
+                plan: &ClusterPlan,
+            ) -> Result<(), joule_runtime::RuntimeError> {
+                self.inner.load_plan(plan).await
+            }
+            async fn infer(
+                &self,
+                req: InferRequest,
+            ) -> Result<joule_runtime::InferResponse, joule_runtime::RuntimeError> {
+                self.inner.infer(req).await
+            }
+            async fn stage_layers(
+                &self,
+                req: joule_runtime::StageRequest,
+            ) -> Result<joule_runtime::StageOutput, joule_runtime::RuntimeError> {
+                if req.is_tail {
+                    self.tail.fetch_add(1, Ordering::SeqCst);
+                    self.last_upstream
+                        .store(req.upstream.len(), Ordering::SeqCst);
+                } else {
+                    self.non_tail.fetch_add(1, Ordering::SeqCst);
+                }
+                let out = self.inner.stage_layers(req).await?;
+                if out.activation.starts_with(b"JST3") {
+                    self.jst3.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(out)
+            }
+        }
+
+        let donors = donors_n(3);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        let eng = ClusterEngine::new();
+        eng.install_loaded(f32_diag_model(1.0));
+        let eng = Arc::new(CountJst3 {
+            inner: eng,
+            non_tail: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            jst3: AtomicUsize::new(0),
+            last_upstream: AtomicUsize::new(0),
+        });
+        let mut rxs = Vec::new();
+        for (id, mem) in &donors {
+            let (tx, rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+            rxs.push((id.clone(), rx));
+        }
+        for (id, rx) in rxs {
+            let b = bus.clone();
+            let eng = eng.clone();
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while let Some(env) = rx.recv().await {
+                    let _ = b.handle_envelope(&id, env, eng.as_ref()).await;
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let rid = bus
+            .request_infer("alice", "user: mesh-jst3-pp", 16)
+            .await
+            .expect("request");
+        let text = bus
+            .wait_completion(rid, Duration::from_secs(5))
+            .await
+            .expect("completion");
+        let n_tail_dispatch = bus.tail_dispatch_count(rid).await;
+        let n_tail_stage = eng.tail.load(Ordering::SeqCst);
+        let n_non_tail = eng.non_tail.load(Ordering::SeqCst);
+        let jst3 = eng.jst3.load(Ordering::SeqCst);
+        let up = eng.last_upstream.load(Ordering::SeqCst);
+        assert_eq!(n_tail_dispatch, 1, "exactly one tail dispatch");
+        assert_eq!(n_tail_stage, 1, "exactly one tail stage");
+        assert!(
+            n_non_tail >= 2,
+            "need ≥2 non-tails in 3-shard chain, got {n_non_tail}"
+        );
+        assert!(
+            jst3 >= 2,
+            "non-tail stages must emit JST3, got jst3={jst3} non_tail={n_non_tail}"
+        );
+        assert!(up > 0, "tail must see non-empty upstream, got {up}");
+        assert!(
+            text.contains("joule-decode")
+                || text.contains("matmul")
+                || text.contains("upstream_bytes=")
+                || text.contains("mesh-jst3-pp"),
+            "tail completion path: {text}"
+        );
+        eprintln!(
+            "OBSERVE mesh-jst3: tail_dispatch={n_tail_dispatch} non_tail={n_non_tail} jst3={jst3} upstream_bytes={up} text_len={}",
+            text.len()
+        );
+    }
+
     /// Multi-donor mesh PP: non-tails emit JST1 payloads; **exactly one** tail InferRequest
     /// is dispatched; tail stage consumes non-empty upstream (pipeline-stage text).
     #[tokio::test]

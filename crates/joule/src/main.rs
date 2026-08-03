@@ -26,9 +26,9 @@ use joule_proto::{
     NodeId, OperatorKind, SignedEnvelope, CLUSTER_MODEL,
 };
 use joule_runtime::{
-    apply_staged, load_model, match_target, parse_software_update, prepare_and_install, read_stage,
-    readiness_for_pool_ex, stage_blob, ClusterEngine, Engine, InferRequest, ManifestFile,
-    RuntimeFlags, SoftwareTarget, StubEngine, WeightsStore,
+    apply_staged, load_model, match_target, parse_software_update, prepare_and_install,
+    prepare_and_install_for_band, read_stage, readiness_for_pool_ex, stage_blob, ClusterEngine,
+    Engine, InferRequest, ManifestFile, RuntimeFlags, SoftwareTarget, StubEngine, WeightsStore,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1772,6 +1772,50 @@ async fn run_agent(
                             },
                         );
                         writer.write_all(&encode_line(&acc)?).await?;
+                        // Per-shard band-only load: when we own a layer band, prefer
+                        // prepare_and_install_for_band (preferred files only) over full quant.
+                        if accepted {
+                            if let Some(shard) = plan.shards.iter().find(|s| s.node == node_id) {
+                                if let (Some(ls), Some(le)) = (shard.layer_start, shard.layer_end) {
+                                    if let Ok(m) = ManifestFile::load_default() {
+                                        if let Some(spec) = m.model(CLUSTER_MODEL) {
+                                            if let Some(q) = spec.pick_quant(mem_mib.max(256)) {
+                                                match prepare_and_install_for_band(
+                                                    &store,
+                                                    engine.as_ref(),
+                                                    spec,
+                                                    q,
+                                                    ls,
+                                                    le,
+                                                ) {
+                                                    Ok(report) => {
+                                                        info!(
+                                                            layers = %format!("{ls}-{le}"),
+                                                            tensors = report.tensors,
+                                                            bytes = report.bytes_resident,
+                                                            "band-only weights installed for plan shard"
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        // Fall back to full prepare if band path incomplete.
+                                                        info!(
+                                                            error = %e,
+                                                            "band-only prepare deferred; keeping resident load"
+                                                        );
+                                                        let _ = prepare_and_install(
+                                                            &store,
+                                                            engine.as_ref(),
+                                                            spec,
+                                                            q,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     Message::PlanAccept {
                         plan_id,

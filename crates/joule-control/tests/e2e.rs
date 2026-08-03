@@ -2692,12 +2692,13 @@ async fn control_e2e_three_agents_prepare_sequential_jst3_lease_audit() {
         !content.contains("joule-stub"),
         "must not be StubEngine path: {content}"
     );
-    // Tail stage text carries pure-Rust matmul / pipeline markers (JST3 path).
+    // Tail stage text: activation+embedding decode and/or matmul meta (JST3 path).
     assert!(
-        content.contains("matmul")
+        content.contains("joule-decode")
+            || content.contains("matmul")
             || content.contains("joule-pipeline-stage")
             || content.contains("upstream_bytes="),
-        "tail must show matmul/pipeline stage markers (JST3 chain), content={content}"
+        "tail must show decode/matmul/pipeline markers (JST3 chain), content={content}"
     );
 
     // Non-tail stages recorded JST3 magics on the wire (production sequential handoff).
@@ -2710,13 +2711,14 @@ async fn control_e2e_three_agents_prepare_sequential_jst3_lease_audit() {
     );
     let tail_ok = magics.iter().any(|m| {
         m.starts_with("tail:")
-            && (m.contains("matmul")
+            && (m.contains("joule-decode")
+                || m.contains("matmul")
                 || m.contains("joule-pipeline-stage")
                 || m.contains("upstream_bytes="))
     });
     assert!(
         tail_ok,
-        "tail stage must record matmul/pipeline text, magics={magics:?}"
+        "tail stage must record decode/matmul/pipeline text, magics={magics:?}"
     );
 
     let sched_after: serde_json::Value = client

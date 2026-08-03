@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- **Per-shard band-only prepare/install:** `prepare_for_band` / `prepare_and_install_for_band` stage and load only preferred weight files for a layer band (not the whole multi-file quant per donor); fail closed if preferred files missing
+- **Mesh sequential JST3 parity:** PeerBus multi-donor path with weight-resident ClusterEngine emits JST3 non-tail activations (e2e `multi_donor_pipeline_sequential_jst3_weight_resident`)
+- **Tail activation decode:** multi-shard tail text from activation state + embedding rows (`joule-decode`), not stage-tag prompt echo alone; lab-tiny first
+- **ADR 0001:** GPU/FFI engine gate (pure-Rust default; FFI only with ADR + AGENTS note)
+
+### Changed
+- Control 3-agent e2e remains green (prepare + sequential JST3 + lease audit)
+
 ## [0.1.12] — 2026-08-03
 
 Close-out of pure-Rust band weight stage track: integrated sequential PP + JST3 matmul.

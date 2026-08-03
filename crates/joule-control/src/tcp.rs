@@ -2413,8 +2413,17 @@ mod tests {
             .msg
         {
             Message::InferDone { text, .. } => {
-                assert!(text.contains("joule-pipeline-stage"));
-                assert!(text.contains("matmul") || text.contains("upstream_bytes="));
+                assert!(
+                    text.contains("joule-decode")
+                        || text.contains("matmul")
+                        || text.contains("upstream_bytes=")
+                        || text.contains("joule-pipeline-stage"),
+                    "tail text={text}"
+                );
+                assert!(
+                    text.contains("matmul") || text.contains("upstream_bytes="),
+                    "tail={text}"
+                );
                 eprintln!(
                     "OBSERVE full-jst3-chain: shards=3 tail_ok text_len={}",
                     text.len()

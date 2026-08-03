@@ -14,7 +14,9 @@ mod stage;
 mod stage_matmul;
 mod weights;
 
-pub use decode::generate as generate_from_loaded;
+pub use decode::{
+    generate as generate_from_loaded, generate_from_activation_state, generate_tail_from_stage,
+};
 pub use k3_meta::{
     config_sha256_hex, manifest_k3_config_digest, num_hidden_layers_from_config_json,
     placement_model_layers, verified_k3_model_layers, verified_k3_model_layers_from,
@@ -226,6 +228,42 @@ pub fn prepare_and_install(
         ));
     }
     let lm = load_model(store, spec, quant).map_err(|e| e.to_string())?;
+    let report = lm.report();
+    engine.install_loaded(lm);
+    Ok(report)
+}
+
+/// Per-shard donor path: stage + install **only** preferred weight files for
+/// layer band `[layer_start, layer_end]` (file↔layer map). Does not require
+/// quant files outside the preferred set.
+///
+/// Fail closed if preferred files are missing. Resident basenames ⊆ preferred.
+pub fn prepare_and_install_for_band(
+    store: &WeightsStore,
+    engine: &ClusterEngine,
+    spec: &ModelSpec,
+    quant: &QuantSpec,
+    layer_start: u32,
+    layer_end: u32,
+) -> Result<LoadReport, String> {
+    let preferred = WeightsStore::required_weight_files_for_band(quant, layer_start, layer_end)?;
+    let st = store.prepare_for_band(spec, quant, layer_start, layer_end)?;
+    if !st.files_complete {
+        return Err(format!(
+            "band prepare incomplete for {}/{} L{}-{}: {}",
+            spec.id, quant.id, layer_start, layer_end, st.message
+        ));
+    }
+    let lm = load_model_for_band(store, spec, quant, layer_start, layer_end)
+        .map_err(|e| e.to_string())?;
+    // Invariant: only preferred (required) basenames are resident.
+    for b in &lm.loaded_file_basenames {
+        if !preferred.iter().any(|p| p == b) {
+            return Err(format!(
+                "band install leaked non-preferred file {b} (preferred={preferred:?})"
+            ));
+        }
+    }
     let report = lm.report();
     engine.install_loaded(lm);
     Ok(report)
@@ -651,6 +689,132 @@ mod tests {
             "OBSERVE weight-stage-prepare: magic={:?} len={} require_band_weights=true",
             std::str::from_utf8(&out.activation[..4]).unwrap_or("????"),
             out.activation.len()
+        );
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
+    }
+
+    /// Per-shard band-only prepare/install: only preferred files resident; other band fails closed.
+    #[tokio::test]
+    async fn prepare_and_install_for_band_only_preferred_files() {
+        use crate::load::write_tiny_safetensors_fixture;
+        use crate::manifest::WeightFile;
+        use sha2::{Digest, Sha256};
+
+        let dir = std::env::temp_dir().join(format!("joule-band-only-{}", Uuid::new_v4()));
+        let blob = std::env::temp_dir().join(format!("joule-band-only-b-{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
+        std::env::set_var("JOULE_BLOBS_DIR", &blob);
+        let store = WeightsStore::new(&dir);
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.model("kimi-open").unwrap();
+
+        // Multi-file K3-named stand-ins (not whole quant on every donor).
+        let model_dir = store.model_dir(&spec.id, "kimi-k3-band-only");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        let f1 = model_dir.join("model-00001-of-00016.safetensors");
+        let f2 = model_dir.join("model-00002-of-00016.safetensors");
+        write_tiny_safetensors_fixture(&f1).unwrap();
+        // Distinct payload so file2 is not restored from file1's content-addressed blob.
+        {
+            use safetensors::tensor::{serialize, TensorView};
+            use safetensors::Dtype;
+            use std::collections::BTreeMap;
+            let mut floats = vec![1.0f32; 16];
+            floats[0] = std::f32::consts::PI;
+            let mut data = Vec::with_capacity(64);
+            for f in &floats {
+                data.extend_from_slice(&f.to_le_bytes());
+            }
+            let tensor = TensorView::new(Dtype::F32, vec![4, 4], &data).unwrap();
+            let mut map: BTreeMap<String, TensorView<'_>> = BTreeMap::new();
+            map.insert("demo.weight".into(), tensor);
+            std::fs::write(&f2, serialize(&map, &None).unwrap()).unwrap();
+        }
+        let h1 = hex::encode(Sha256::digest(std::fs::read(&f1).unwrap()));
+        let h2 = hex::encode(Sha256::digest(std::fs::read(&f2).unwrap()));
+        assert_ne!(
+            h1, h2,
+            "fixtures must differ so blob store cannot substitute file2"
+        );
+        let quant = QuantSpec {
+            id: "kimi-k3-band-only".into(),
+            min_node_vram_mib: 256,
+            approx_file_mib: 1,
+            files: vec![
+                WeightFile {
+                    path: "model-00001-of-00016.safetensors".into(),
+                    sha256: h1.clone(),
+                    url: format!("peer://k3/{h1}"),
+                    size_bytes: std::fs::metadata(&f1).unwrap().len(),
+                },
+                WeightFile {
+                    path: "model-00002-of-00016.safetensors".into(),
+                    sha256: h2.clone(),
+                    url: format!("peer://k3/{h2}"),
+                    size_bytes: std::fs::metadata(&f2).unwrap().len(),
+                },
+            ],
+        };
+
+        // Only file1 on disk initially → band 0–5 ok; band 6–11 fail closed.
+        std::fs::remove_file(&f2).unwrap();
+        let eng = ClusterEngine::new();
+        eng.load_plan(&demo_plan()).await.unwrap();
+        let report = prepare_and_install_for_band(&store, &eng, spec, &quant, 0, 5)
+            .expect("band 0-5 install");
+        let basenames = eng
+            .loaded_report()
+            .map(|r| {
+                // LoadReport may not expose basenames — re-read via install invariant in report.message
+                r.message.clone()
+            })
+            .unwrap_or_default();
+        let lm_names = {
+            // Re-load to assert basenames ⊆ preferred
+            let lm = load_model_for_band(&store, spec, &quant, 0, 5).unwrap();
+            lm.loaded_file_basenames.clone()
+        };
+        assert_eq!(
+            lm_names,
+            vec!["model-00001-of-00016.safetensors".to_string()]
+        );
+        assert!(
+            !lm_names
+                .iter()
+                .any(|b| b == "model-00002-of-00016.safetensors"),
+            "must not load file2 for band 0-5"
+        );
+        let out = eng
+            .stage_layers(StageRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "band-only".into(),
+                layer_start: 0,
+                layer_end: 5,
+                upstream: vec![],
+                is_tail: false,
+                require_upstream: false,
+                require_band_weights: true,
+                required_weight_files: WeightsStore::required_weight_files_for_band(&quant, 0, 5)
+                    .unwrap(),
+            })
+            .await
+            .expect("stage with band-only weights");
+        assert!(
+            out.activation.starts_with(b"JST3") || out.activation.starts_with(b"JST2"),
+            "magic={:?}",
+            &out.activation[..4.min(out.activation.len())]
+        );
+        assert!(
+            prepare_and_install_for_band(&store, &eng, spec, &quant, 6, 11).is_err(),
+            "band 6-11 must fail closed without file2"
+        );
+        eprintln!(
+            "OBSERVE band-only-load: basenames={lm_names:?} bytes={} stage_magic={:?} msg={basenames}",
+            report.bytes_resident,
+            std::str::from_utf8(&out.activation[..4]).unwrap_or("????"),
         );
         std::env::remove_var("JOULE_BLOBS_DIR");
         let _ = std::fs::remove_dir_all(&dir);

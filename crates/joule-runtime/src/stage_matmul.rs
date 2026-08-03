@@ -84,7 +84,7 @@ pub fn stage_activation_matmul_scoped(
         applied = applied.saturating_add(1);
     }
 
-    pack_jst3(req, &state, applied, selected.len() as u32)
+    pack_jst3(req, &state, applied, selected.len() as u32, &selected)
 }
 
 /// Filter tensors to those whose source file is in `preferred_files`.
@@ -230,6 +230,7 @@ fn pack_jst3(
     state: &[f32],
     layers_applied: u32,
     tensors_used: u32,
+    tensors: &HashMap<String, Vec<u8>>,
 ) -> Result<StageOutput, String> {
     let mut out = Vec::with_capacity(64 + state.len() * 4);
     out.extend_from_slice(b"JST3");
@@ -248,17 +249,37 @@ fn pack_jst3(
         return Err("matmul activation too small".into());
     }
     let text = if req.is_tail {
-        let digest = activation_commitment_hex(&out);
-        Some(format!(
-            "[joule-pipeline-stage:{}:L{}-{}:upstream_bytes={}:act={}:matmul:stack={}] {}",
-            req.model,
-            req.layer_start,
-            req.layer_end,
-            req.upstream.len(),
-            &digest[..16],
-            layers_applied,
-            req.prompt.trim()
-        ))
+        // Prefer real decode from activation state + embeddings when present.
+        if let Some(decoded) = crate::decode::generate_from_activation_state(
+            &req.model,
+            "band",
+            tensors,
+            None,
+            state,
+            &req.prompt,
+            24,
+        ) {
+            let digest = activation_commitment_hex(&out);
+            // Annotate with stage meta but body is activation+embedding tokens.
+            Some(format!(
+                "{decoded} [L{}-{}:upstream_bytes={}:act={}:matmul:stack={}]",
+                req.layer_start,
+                req.layer_end,
+                req.upstream.len(),
+                &digest[..16],
+                layers_applied,
+            ))
+        } else {
+            let digest = activation_commitment_hex(&out);
+            // No embedding matrix: still surface matmul state commitment (not prompt-only).
+            Some(format!(
+                "[joule-decode-act:{}/matmul stack={} act={}] {}",
+                req.model,
+                layers_applied,
+                &digest[..16],
+                req.prompt.trim()
+            ))
+        }
     } else {
         None
     };

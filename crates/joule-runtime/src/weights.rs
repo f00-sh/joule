@@ -252,6 +252,36 @@ impl WeightsStore {
     /// Order: local/blob store → repo:// (git checkout only) → optional external
     /// (`JOULE_ALLOW_EXTERNAL_FETCH=1`). Never requires f00 to serve files.
     pub fn prepare(&self, spec: &ModelSpec, quant: &QuantSpec) -> Result<PrepareStatus, String> {
+        self.prepare_files(spec, quant, None)
+    }
+
+    /// Prepare **only** preferred weight files for layer band `[layer_start, layer_end]`.
+    ///
+    /// Does not stage quant files outside the preferred set for that band (per-shard
+    /// donor path). Missing preferred files → `files_complete=false` fail-closed for install.
+    pub fn prepare_for_band(
+        &self,
+        spec: &ModelSpec,
+        quant: &QuantSpec,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Result<PrepareStatus, String> {
+        let required = Self::required_weight_files_for_band(quant, layer_start, layer_end)?;
+        if required.is_empty() {
+            return Err(format!(
+                "prepare_for_band: empty preferred set for layers {layer_start}-{layer_end}"
+            ));
+        }
+        self.prepare_files(spec, quant, Some(&required))
+    }
+
+    /// Shared prepare: when `only_basenames` is Some, stage only those basenames.
+    fn prepare_files(
+        &self,
+        spec: &ModelSpec,
+        quant: &QuantSpec,
+        only_basenames: Option<&[String]>,
+    ) -> Result<PrepareStatus, String> {
         let dir = self.model_dir(&spec.id, &quant.id);
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let _ = fs::create_dir_all(Self::blob_root());
@@ -262,11 +292,22 @@ impl WeightsStore {
 
         let external = external_fetch_allowed();
         let mut missing = Vec::new();
+        let mut staged = 0usize;
         for file in &quant.files {
+            let base = path_basename(&file.path);
+            if let Some(only) = only_basenames {
+                if !only.iter().any(|b| b == &base) {
+                    continue;
+                }
+            }
             match self.ensure_file(&dir, file, external) {
-                Ok(()) => {}
+                Ok(()) => staged += 1,
                 Err(e) => missing.push(format!("{}: {e}", file.path)),
             }
+        }
+
+        if only_basenames.is_some() && staged == 0 && missing.is_empty() {
+            return Err("prepare_for_band: no quant files matched preferred basenames".into());
         }
 
         if !missing.is_empty() {
@@ -287,13 +328,19 @@ impl WeightsStore {
 
         let marker = self.armed_marker(&spec.id, &quant.id);
         let mut f = fs::File::create(&marker).map_err(|e| e.to_string())?;
+        let n_files = only_basenames.map(|b| b.len()).unwrap_or(quant.files.len());
         writeln!(
             f,
-            "model={}\nquant={}\npublished=true\nfiles={}\narmed_at_unix={}\ndistribution=peer-seeded",
+            "model={}\nquant={}\npublished=true\nfiles={}\narmed_at_unix={}\ndistribution=peer-seeded{}",
             spec.id,
             quant.id,
-            quant.files.len(),
+            n_files,
             unix_now(),
+            if only_basenames.is_some() {
+                "\nband_only=true"
+            } else {
+                ""
+            },
         )
         .map_err(|e| e.to_string())?;
 
@@ -304,8 +351,13 @@ impl WeightsStore {
             files_complete: true,
             cache_dir: dir.display().to_string(),
             message: format!(
-                "weights ready ({} files, content-addressed) for {}/{}",
-                quant.files.len(),
+                "weights ready ({} files{}, content-addressed) for {}/{}",
+                staged,
+                if only_basenames.is_some() {
+                    " band-only"
+                } else {
+                    ""
+                },
                 spec.id,
                 quant.id
             ),

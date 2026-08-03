@@ -33,8 +33,11 @@
 
 - Declared language: **Rust**. Style: `~/.grok/references/coding-standards/rust.md`.
 - Protocol, cluster, ledger, CLI: pure Rust + crates.io Rust deps only.
-- Inference backends implement `joule_runtime::Engine`. Prefer pure-Rust engines.
+- Inference backends implement `joule_runtime::Engine`. Prefer pure-Rust engines
+  (`StubEngine`, `ClusterEngine`, pure-Rust stage/decode).
 - **Any FFI / non-Rust runtime** requires an ADR under `docs/adr/` and an explicit note here before merge.
+- **GPU/FFI engine gate:** [docs/adr/0001-gpu-ffi-engine.md](docs/adr/0001-gpu-ffi-engine.md)
+  — pure-Rust default; no GPU/FFI backend ships without a follow-on ADR + this note updated.
 
 ## Workspace
 

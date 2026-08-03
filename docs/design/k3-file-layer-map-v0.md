@@ -46,7 +46,9 @@ Even partition of 93 layers across 16 files (last file absorbs remainder):
 - **Placement** still assigns donors by **verified VRAM** to continuous layer bands (may cross file boundaries).  
 - **Fetch preference:** a donor owning layers `[Ls, Le]` prefers files whose map intersects that interval (`preferred_weight_files` / `order_digests_for_layer_fetch` on model_update).  
 - **Band weight gate:** `stage_layers` with `require_band_weights` fails closed unless preferred files for `[Ls, Le]` are staged/loaded (`load_model_for_band` / ClusterEngine). Lab/stub paths may leave the gate off.  
-- **Weight-backed stage:** ClusterEngine with a `LoadedModel` prefers **JST3** pure-Rust band matmul (`stage_activation_matmul_scoped`): only tensors from preferred files for `[Ls,Le]` when `tensor_sources` is known; stack depth = layer span (capped). Falls back to **JST2** if no usable f32 matrix. Stub/lab without load stays **JST1**.
+- **Per-shard prepare/load:** `WeightsStore::prepare_for_band` + `prepare_and_install_for_band` stage and install **only** preferred basenames for `[Ls, Le]` — not the whole multi-file quant on every donor. Missing preferred files fail closed; resident basenames ⊆ preferred.  
+- **Weight-backed stage:** ClusterEngine with a `LoadedModel` prefers **JST3** pure-Rust band matmul (`stage_activation_matmul_scoped`): only tensors from preferred files for `[Ls,Le]` when `tensor_sources` is known; stack depth = layer span (capped). Falls back to **JST2** if no usable f32 matrix. Stub/lab without load stays **JST1**.  
+- **Tail text:** JST3 tail prefers activation+embedding decode (`joule-decode`, lab-tiny embeddings first), not prompt-echo stage tags alone.
 
 ## Real content path
 
