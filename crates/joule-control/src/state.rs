@@ -204,8 +204,8 @@ pub struct ControlState {
     pub dht: DhtStore,
     /// Operator-signed messages (deduped); peers flood these.
     pub broadcasts: BroadcastLog,
-    /// In-flight blob transfers: request_id → (requester, sha256, started).
-    pub pending_blob_xfers: HashMap<Uuid, (NodeId, String, Instant)>,
+    /// In-flight blob transfers (seeder-attributed book for backpressure).
+    pub pending_blob_xfers: crate::seeder_rank::BlobXferBook,
     /// Active model chunks from last model_update (for rebalance).
     pub active_chunks: Vec<joule_cluster::ModelChunk>,
     pub active_replica_factor: u32,
@@ -256,7 +256,7 @@ impl ControlState {
             mesh: MeshDirectory::new(),
             dht: DhtStore::new(),
             broadcasts: BroadcastLog::new(256),
-            pending_blob_xfers: HashMap::new(),
+            pending_blob_xfers: crate::seeder_rank::BlobXferBook::new(),
             active_chunks: Vec::new(),
             active_replica_factor: joule_cluster::DEFAULT_REPLICA_FACTOR,
             last_rebalance: None,
@@ -604,7 +604,7 @@ impl ControlState {
         }
         // Drop stuck control-relayed blob transfers (lab path).
         self.pending_blob_xfers
-            .retain(|_, (_, _, started)| now.duration_since(*started) < Duration::from_secs(120));
+            .retain_fresh(Duration::from_secs(120));
         self.mesh.prune_stale(Duration::from_secs(180));
         // Expire stale stream leases so cancel/disconnect cannot strand slots forever.
         let unix = std::time::SystemTime::now()

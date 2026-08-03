@@ -124,49 +124,26 @@ impl BlobDirectory {
         })
     }
 
-    /// Rank-aware pick using multiaddrs/health/load/backpressure (see seeder_rank).
+    /// Rank-aware pick from fully built candidates (must come from
+    /// [`crate::seeder_rank::seeder_candidates_from`] + [`BlobXferBook`] — never invent zeros).
     pub fn pick_seeder_ranked(
         &self,
         sha256: &str,
         exclude: &NodeId,
-        hints: &[(NodeId, crate::seeder_rank::SeederCandidate)],
+        candidates: &[crate::seeder_rank::SeederCandidate],
     ) -> Option<(NodeId, BlobMeta)> {
         let peers = self.peers_for(sha256);
         if peers.is_empty() {
             return None;
         }
-        let mut cands = Vec::new();
-        for (n, meta) in &peers {
-            if n == exclude {
-                continue;
-            }
-            if let Some((_, hint)) = hints.iter().find(|(id, _)| id == n) {
-                let mut c = hint.clone();
-                c.node = n.clone();
-                if c.multiaddrs.is_empty() {
-                    c.multiaddrs = meta.multiaddrs.clone();
-                }
-                cands.push((c, meta.clone()));
-            } else {
-                cands.push((
-                    crate::seeder_rank::SeederCandidate {
-                        node: n.clone(),
-                        multiaddrs: meta.multiaddrs.clone(),
-                        healthy: true,
-                        load: 0.2,
-                        active_transfers: 0,
-                        pool_stream_slots_free: 1,
-                    },
-                    meta.clone(),
-                ));
-            }
-        }
-        let only: Vec<_> = cands.iter().map(|(c, _)| c.clone()).collect();
-        let best = crate::seeder_rank::pick_ranked_seeder(&only)?;
-        cands
-            .into_iter()
-            .find(|(c, _)| c.node == best.node)
-            .map(|(c, m)| (c.node, m))
+        // Only candidates that actually announce this hash and are not the requester.
+        let eligible: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.node != *exclude && peers.iter().any(|(n, _)| n == &c.node))
+            .cloned()
+            .collect();
+        let best = crate::seeder_rank::pick_ranked_seeder(&eligible)?;
+        peers.into_iter().find(|(n, _)| n == &best.node)
     }
 
     /// Nodes that do not currently announce this hash (candidates to pull a replica).
@@ -230,5 +207,69 @@ mod tests {
         d.remove_node(&a);
         assert_eq!(d.seeder_count(h1), 1);
         assert_eq!(d.seeder_count(h2), 0);
+    }
+
+    /// BlobWant path projection: book.begin(seeder, …) → candidates_from → pick_seeder_ranked.
+    /// Overload seeder A (≥8 seeder-side xfers); pick must refuse A and choose B.
+    #[test]
+    fn blobwant_path_refuses_busy_seeder_via_xfer_book() {
+        use crate::seeder_rank::{
+            seeder_candidates_from, seeder_score, BlobXferBook, SeederPresence,
+        };
+
+        let seeder_a = NodeId::new();
+        let seeder_b = NodeId::new();
+        let leech = NodeId::new();
+        let hash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+        let mut dir = BlobDirectory::new();
+        let mut meta_a = meta(hash);
+        meta_a.multiaddrs = vec!["tcp://10.0.0.1:9".into()];
+        let mut meta_b = meta(hash);
+        meta_b.multiaddrs = vec!["tcp://127.0.0.1:9".into()];
+        dir.announce(seeder_a.clone(), vec![meta_a]);
+        dir.announce_add(seeder_b.clone(), vec![meta_b]);
+
+        let mut book = BlobXferBook::new();
+        // Simulate prior BlobProvide begin() calls on A (seeder-attributed).
+        for _ in 0..8 {
+            book.begin(seeder_a.clone(), leech.clone(), hash);
+        }
+        assert_eq!(book.active_for_seeder(&seeder_a), 8);
+        assert_eq!(book.active_for_seeder(&seeder_b), 0);
+
+        // Same construction as tcp BlobWant (presence + seeder_candidates_from).
+        let presence = vec![
+            SeederPresence {
+                node: seeder_a.clone(),
+                multiaddrs: vec!["tcp://10.0.0.1:9".into()],
+                healthy: true,
+                load: 0.1, // agent-constant load must NOT save overloaded seeder
+            },
+            SeederPresence {
+                node: seeder_b.clone(),
+                multiaddrs: vec!["tcp://127.0.0.1:9".into()],
+                healthy: true,
+                load: 0.1,
+            },
+        ];
+        let cands = seeder_candidates_from(&presence, &book, 4);
+        let score_a = seeder_score(cands.iter().find(|c| c.node == seeder_a).unwrap());
+        assert!(score_a < 0, "busy seeder score={score_a}");
+        let picked = dir
+            .pick_seeder_ranked(hash, &leech, &cands)
+            .expect("idle seeder B must be pickable");
+        assert_eq!(
+            picked.0, seeder_b,
+            "BlobWant path must deprioritize/refuse busy seeder A"
+        );
+        // begin on B like the real handler
+        let rid = book.begin(picked.0.clone(), leech.clone(), hash);
+        assert_eq!(book.active_for_seeder(&seeder_b), 1);
+        book.end(&rid);
+        assert_eq!(book.active_for_seeder(&seeder_b), 0);
+        eprintln!(
+            "OBSERVE BlobWant-path: seeder_a xfers=8 refused score_a={score_a}; picked seeder_b"
+        );
     }
 }

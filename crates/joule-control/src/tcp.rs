@@ -324,43 +324,33 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 let mut peer_ids = Vec::new();
                 let mut sizes = Vec::new();
                 let mut multiaddrs = Vec::new();
+                let mut presence = Vec::new();
+                let mesh_list = g.mesh.list();
                 for (n, m) in peers {
                     let addrs = if m.multiaddrs.is_empty() {
                         g.mesh.multiaddrs_for(&n)
                     } else {
                         m.multiaddrs.clone()
                     };
+                    let mesh_h = mesh_list.iter().find(|p| p.node == n);
+                    presence.push(crate::seeder_rank::SeederPresence {
+                        node: n.clone(),
+                        multiaddrs: addrs.clone(),
+                        healthy: mesh_h.map(|p| p.healthy).unwrap_or(true),
+                        load: mesh_h.map(|p| p.load).unwrap_or(0.1),
+                    });
                     peer_ids.push(n);
                     sizes.push(m.size);
                     multiaddrs.push(addrs);
                 }
-                // Rank seeders by locality/health/load/backpressure (not arbitrary first).
+                // Candidates only via book projection (seeder-side active_transfers).
                 let free = g.cluster.scheduler_snapshot().stream_slots_free;
-                let mesh_list = g.mesh.list();
-                let hints: Vec<_> = peer_ids
-                    .iter()
-                    .zip(multiaddrs.iter())
-                    .map(|(n, addrs)| {
-                        let mesh_h = mesh_list.iter().find(|p| &p.node == n);
-                        (
-                            n.clone(),
-                            crate::seeder_rank::SeederCandidate {
-                                node: n.clone(),
-                                multiaddrs: addrs.clone(),
-                                healthy: mesh_h.map(|p| p.healthy).unwrap_or(true),
-                                load: mesh_h.map(|p| p.load).unwrap_or(0.1),
-                                active_transfers: g
-                                    .pending_blob_xfers
-                                    .values()
-                                    .filter(|(req, _, _)| req == n)
-                                    .count()
-                                    as u32,
-                                pool_stream_slots_free: free,
-                            },
-                        )
-                    })
-                    .collect();
-                let seeder = g.blobs.pick_seeder_ranked(&hash, &requester, &hints);
+                let candidates = crate::seeder_rank::seeder_candidates_from(
+                    &presence,
+                    &g.pending_blob_xfers,
+                    free,
+                );
+                let seeder = g.blobs.pick_seeder_ranked(&hash, &requester, &candidates);
                 drop(g);
 
                 let locate = Envelope::new(
@@ -376,19 +366,20 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
 
                 // Orchestrate transfer: ask seeder to push chunks to control → requester.
                 if let Some((seeder_id, _meta)) = seeder {
-                    let request_id = Uuid::new_v4();
-                    {
+                    let request_id = {
                         let mut g = app.state.write().await;
                         // Cap concurrent control-relayed transfers (lab path).
                         if g.pending_blob_xfers.len() >= 64 {
                             warn!("BlobWant: too many in-flight transfers");
                             continue;
                         }
-                        g.pending_blob_xfers.insert(
-                            request_id,
-                            (requester.clone(), hash.clone(), std::time::Instant::now()),
-                        );
-                    }
+                        // Attribute load to **seeder**, not requester.
+                        g.pending_blob_xfers.begin(
+                            seeder_id.clone(),
+                            requester.clone(),
+                            hash.clone(),
+                        )
+                    };
                     let routes = app.routes.lock().await;
                     if let Some(stx) = routes.get(&seeder_id) {
                         let provide = Envelope::new(
@@ -416,9 +407,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 // Forward chunk from seeder to requester.
                 let dest = {
                     let g = app.state.read().await;
-                    g.pending_blob_xfers
-                        .get(&request_id)
-                        .map(|(n, h, _)| (n.clone(), h.clone()))
+                    g.pending_blob_xfers.requester_and_hash(&request_id)
                 };
                 if let Some((to, want_hash)) = dest {
                     let got = sha256.to_lowercase();
@@ -441,7 +430,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                         }
                         if done {
                             let mut g = app.state.write().await;
-                            g.pending_blob_xfers.remove(&request_id);
+                            g.pending_blob_xfers.end(&request_id);
                         }
                     }
                 }
