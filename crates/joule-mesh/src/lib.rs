@@ -97,6 +97,8 @@ pub struct InflightRequest {
     pub lease_held: bool,
     /// Abort reason (invalid confirm, reject, pool full) — no InferDone success.
     pub aborted: Option<String>,
+    /// Exactly-once latch: multi-donor pipeline has already dispatched tail InferRequest.
+    pub tail_dispatched: bool,
 }
 
 /// Peer-only mesh bus: nodes exchange envelopes without control.
@@ -127,6 +129,8 @@ struct PeerBusInner {
         Uuid,
         std::collections::HashMap<NodeId, joule_proto::ShardActivation>,
     >,
+    /// How many times we dispatched `is_tail` InferRequest per request (must stay ≤1).
+    tail_dispatch_counts: HashMap<Uuid, u32>,
 }
 
 impl PeerBus {
@@ -144,8 +148,20 @@ impl PeerBus {
                 leases: LeaseBook::default(),
                 device_keys: std::collections::HashMap::new(),
                 pipeline_activations: std::collections::HashMap::new(),
+                tail_dispatch_counts: HashMap::new(),
             })),
         }
+    }
+
+    /// Test/audit: how many times a multi-donor tail InferRequest was dispatched for `rid`.
+    pub async fn tail_dispatch_count(&self, rid: Uuid) -> u32 {
+        self.inner
+            .lock()
+            .await
+            .tail_dispatch_counts
+            .get(&rid)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Active stream leases + scheduler free/used (for tests / audit).
@@ -276,6 +292,7 @@ impl PeerBus {
                     attempt: 0,
                     lease_held: false,
                     aborted: None,
+                    tail_dispatched: false,
                 },
             );
         }
@@ -370,6 +387,7 @@ impl PeerBus {
                                         attempt: 1,
                                         lease_held: false,
                                         aborted: Some(e),
+                                        tail_dispatched: false,
                                     },
                                 );
                             }
@@ -384,6 +402,9 @@ impl PeerBus {
                         inf.attempt += 1;
                         inf.lease_held = true;
                         inf.aborted = None;
+                        // Replan restarts pipeline collection.
+                        inf.tail_dispatched = false;
+                        g.pipeline_activations.remove(&request_id);
                     } else {
                         g.inflight.insert(
                             request_id,
@@ -400,6 +421,7 @@ impl PeerBus {
                                 attempt: 1,
                                 lease_held: true,
                                 aborted: None,
+                                tail_dispatched: false,
                             },
                         );
                     }
@@ -899,81 +921,9 @@ impl PeerBus {
                         activation_payload_b64: act_payload.clone(),
                     },
                 );
+                // Non-tail: only broadcast InferDone. Collection + exactly-once tail
+                // dispatch happens on the InferDone path (single collector latch).
                 self.broadcast(done, None).await;
-                // Coordinator collects non-tail activations then dispatches tail.
-                // Clone plan/prompt first so we never hold inflight get_mut while
-                // mutating pipeline_activations (borrowck).
-                if !is_tail && !act_payload.is_empty() {
-                    let maybe_tail = {
-                        let mut g = self.inner.lock().await;
-                        let meta = g.inflight.get(&request_id).and_then(|inf| {
-                            inf.plan.as_ref().map(|plan| {
-                                (
-                                    plan.clone(),
-                                    inf.prompt.clone(),
-                                    inf.max_tokens,
-                                    plan.shards.last().map(|s| s.node.clone()),
-                                )
-                            })
-                        });
-                        if let Some((plan, prompt, max_tokens, tail)) = meta {
-                            g.pipeline_activations
-                                .entry(request_id)
-                                .or_default()
-                                .insert(
-                                    local.clone(),
-                                    joule_proto::ShardActivation {
-                                        node: local.clone(),
-                                        layer_start: act_ls.unwrap_or(0),
-                                        layer_end: act_le.unwrap_or(0),
-                                        activation_hex: act_hex,
-                                        payload_b64: act_payload,
-                                    },
-                                );
-                            let need = joule_cluster::non_tail_nodes(
-                                &plan,
-                                tail.as_ref().unwrap_or(local),
-                            );
-                            let got = g
-                                .pipeline_activations
-                                .get(&request_id)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
-                            if got >= need.len() && !need.is_empty() {
-                                let upstream: Vec<_> = need
-                                    .iter()
-                                    .filter_map(|n| {
-                                        g.pipeline_activations
-                                            .get(&request_id)
-                                            .and_then(|m| m.get(n).cloned())
-                                    })
-                                    .collect();
-                                Some((tail, plan, prompt, max_tokens, model.clone(), upstream))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    };
-                    if let Some((Some(tail), plan, prompt, max_tokens, model, upstream)) =
-                        maybe_tail
-                    {
-                        let ir = Envelope::new(
-                            local.clone(),
-                            Message::InferRequest {
-                                request_id,
-                                model,
-                                prompt,
-                                max_tokens,
-                                plan,
-                                is_tail: true,
-                                upstream_activations: upstream,
-                            },
-                        );
-                        let _ = self.send_to(&tail, ir).await;
-                    }
-                }
                 if is_tail && !text.is_empty() {
                     let mut g = self.inner.lock().await;
                     let dead = |id: &NodeId| {
@@ -999,64 +949,21 @@ impl PeerBus {
                 activation_payload_b64,
                 ..
             } => {
-                // Non-tail: collect real stage tensor activation, dispatch tail when ready.
+                // Non-tail: collect stage tensor; exactly-once latch dispatches tail.
                 if text.is_empty() && !activation_payload_b64.is_empty() {
                     let from = env.from.clone();
+                    let act = joule_proto::ShardActivation {
+                        node: from,
+                        layer_start: activation_layer_start.unwrap_or(0),
+                        layer_end: activation_layer_end.unwrap_or(0),
+                        activation_hex,
+                        payload_b64: activation_payload_b64,
+                    };
                     let maybe_tail = {
                         let mut g = self.inner.lock().await;
-                        let meta = g.inflight.get(&request_id).and_then(|inf| {
-                            inf.plan.as_ref().map(|plan| {
-                                (
-                                    plan.clone(),
-                                    inf.prompt.clone(),
-                                    inf.max_tokens,
-                                    plan.shards.last().map(|s| s.node.clone()),
-                                    inf.model.clone(),
-                                )
-                            })
-                        });
-                        if let Some((plan, prompt, max_tokens, tail, model)) = meta {
-                            g.pipeline_activations
-                                .entry(request_id)
-                                .or_default()
-                                .insert(
-                                    from.clone(),
-                                    joule_proto::ShardActivation {
-                                        node: from,
-                                        layer_start: activation_layer_start.unwrap_or(0),
-                                        layer_end: activation_layer_end.unwrap_or(0),
-                                        activation_hex,
-                                        payload_b64: activation_payload_b64,
-                                    },
-                                );
-                            let need_tail =
-                                tail.clone().unwrap_or_else(|| plan.shards[0].node.clone());
-                            let need = joule_cluster::non_tail_nodes(&plan, &need_tail);
-                            let got = g
-                                .pipeline_activations
-                                .get(&request_id)
-                                .map(|m| m.len())
-                                .unwrap_or(0);
-                            if got >= need.len() && !need.is_empty() {
-                                let upstream: Vec<_> = need
-                                    .iter()
-                                    .filter_map(|n| {
-                                        g.pipeline_activations
-                                            .get(&request_id)
-                                            .and_then(|m| m.get(n).cloned())
-                                    })
-                                    .collect();
-                                Some((tail, plan, prompt, max_tokens, model, upstream))
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
+                        try_claim_pipeline_tail(&mut g, request_id, act)
                     };
-                    if let Some((Some(tail), plan, prompt, max_tokens, model, upstream)) =
-                        maybe_tail
-                    {
+                    if let Some((tail, plan, prompt, max_tokens, model, upstream)) = maybe_tail {
                         let ir = Envelope::new(
                             local.clone(),
                             Message::InferRequest {
@@ -1370,6 +1277,85 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Record a non-tail activation and claim the **exactly-once** multi-donor tail dispatch.
+///
+/// Returns dispatch material only the first time all non-tail activations are present
+/// and `InflightRequest.tail_dispatched` was still false (sets the latch).
+fn try_claim_pipeline_tail(
+    g: &mut PeerBusInner,
+    request_id: Uuid,
+    act: joule_proto::ShardActivation,
+) -> Option<(
+    NodeId,
+    ClusterPlan,
+    String,
+    u32,
+    String,
+    Vec<joule_proto::ShardActivation>,
+)> {
+    // Fail closed if already dispatched or no agreed plan.
+    {
+        let inf = g.inflight.get(&request_id)?;
+        if inf.tail_dispatched || inf.plan.is_none() {
+            return None;
+        }
+    }
+    g.pipeline_activations
+        .entry(request_id)
+        .or_default()
+        .insert(act.node.clone(), act);
+
+    let (plan, prompt, max_tokens, model, tail) = {
+        let inf = g.inflight.get(&request_id)?;
+        let plan = inf.plan.as_ref()?.clone();
+        let tail = plan.shards.last()?.node.clone();
+        (
+            plan,
+            inf.prompt.clone(),
+            inf.max_tokens,
+            inf.model.clone(),
+            tail,
+        )
+    };
+    let need = joule_cluster::non_tail_nodes(&plan, &tail);
+    if need.is_empty() {
+        return None;
+    }
+    let got = g
+        .pipeline_activations
+        .get(&request_id)
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if got < need.len() {
+        return None;
+    }
+    // Claim latch before building upstream (serializes concurrent InferDone handlers).
+    {
+        let inf = g.inflight.get_mut(&request_id)?;
+        if inf.tail_dispatched {
+            return None;
+        }
+        inf.tail_dispatched = true;
+    }
+    let upstream: Vec<_> = need
+        .iter()
+        .filter_map(|n| {
+            g.pipeline_activations
+                .get(&request_id)
+                .and_then(|m| m.get(n).cloned())
+        })
+        .collect();
+    if upstream.len() != need.len() {
+        // Incomplete set despite count — un-claim so a later complete set can retry.
+        if let Some(inf) = g.inflight.get_mut(&request_id) {
+            inf.tail_dispatched = false;
+        }
+        return None;
+    }
+    *g.tail_dispatch_counts.entry(request_id).or_insert(0) += 1;
+    Some((tail, plan, prompt, max_tokens, model, upstream))
+}
+
 /// Mirror mesh donors into the local Cluster for stream-slot accounting.
 fn sync_mesh_capacity(inner: &mut PeerBusInner) {
     for d in inner.donors.values() {
@@ -1570,6 +1556,7 @@ mod tests {
             attempt: 1,
             lease_held: true,
             aborted: None,
+            tail_dispatched: false,
         };
         let dead_none = |_: &NodeId| false;
         assert!(accept_infer_done(&inf, &dead_none));
@@ -1767,6 +1754,130 @@ mod tests {
         assert!(
             text.contains("peer-only-hello") || text.len() > 4,
             "text={text}"
+        );
+    }
+
+    /// Multi-donor mesh PP: non-tails emit JST1 payloads; **exactly one** tail InferRequest
+    /// is dispatched; tail stage consumes non-empty upstream (pipeline-stage text).
+    #[tokio::test]
+    async fn multi_donor_pipeline_exactly_one_tail_dispatch() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingEngine {
+            inner: StubEngine,
+            non_tail: AtomicUsize,
+            tail: AtomicUsize,
+            last_upstream: AtomicUsize,
+            last_act_magic: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl Engine for CountingEngine {
+            async fn load_plan(
+                &self,
+                plan: &ClusterPlan,
+            ) -> Result<(), joule_runtime::RuntimeError> {
+                self.inner.load_plan(plan).await
+            }
+            async fn infer(
+                &self,
+                req: InferRequest,
+            ) -> Result<joule_runtime::InferResponse, joule_runtime::RuntimeError> {
+                self.inner.infer(req).await
+            }
+            async fn stage_layers(
+                &self,
+                req: joule_runtime::StageRequest,
+            ) -> Result<joule_runtime::StageOutput, joule_runtime::RuntimeError> {
+                if req.is_tail {
+                    self.tail.fetch_add(1, Ordering::SeqCst);
+                    self.last_upstream
+                        .store(req.upstream.len(), Ordering::SeqCst);
+                } else {
+                    self.non_tail.fetch_add(1, Ordering::SeqCst);
+                }
+                let out = self.inner.stage_layers(req).await?;
+                if out.activation.starts_with(b"JST1") {
+                    self.last_act_magic.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(out)
+            }
+        }
+
+        let donors = donors_n(3);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        let eng = Arc::new(CountingEngine {
+            inner: StubEngine::new(),
+            non_tail: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+            last_upstream: AtomicUsize::new(0),
+            last_act_magic: AtomicUsize::new(0),
+        });
+        let mut rxs = Vec::new();
+        for (id, mem) in &donors {
+            let (tx, rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+            rxs.push((id.clone(), rx));
+        }
+        for (id, rx) in rxs {
+            let b = bus.clone();
+            let eng = eng.clone();
+            tokio::spawn(async move {
+                let mut rx = rx;
+                while let Some(env) = rx.recv().await {
+                    let _ = b.handle_envelope(&id, env, eng.as_ref()).await;
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let rid = bus
+            .request_infer("alice", "user: mesh-pp-once", 16)
+            .await
+            .expect("request");
+        let text = bus
+            .wait_completion(rid, Duration::from_secs(5))
+            .await
+            .expect("completion");
+        let n_tail_dispatch = bus.tail_dispatch_count(rid).await;
+        let n_tail_stage = eng.tail.load(Ordering::SeqCst);
+        let n_non_tail = eng.non_tail.load(Ordering::SeqCst);
+        let up = eng.last_upstream.load(Ordering::SeqCst);
+        let jst1 = eng.last_act_magic.load(Ordering::SeqCst);
+        assert_eq!(
+            n_tail_dispatch, 1,
+            "exactly one is_tail InferRequest dispatch, got {n_tail_dispatch}"
+        );
+        assert_eq!(
+            n_tail_stage, 1,
+            "exactly one tail stage_layers, got {n_tail_stage}"
+        );
+        assert!(
+            n_non_tail >= 1,
+            "at least one non-tail stage, got {n_non_tail}"
+        );
+        assert!(up > 0, "tail must see non-empty upstream bytes, got {up}");
+        assert!(jst1 >= 1, "non-tail must emit JST1 activation tensors");
+        assert!(
+            text.contains("joule-pipeline-stage") && text.contains("upstream_bytes="),
+            "tail completion must be pipeline-stage path: {text}"
+        );
+        assert!(
+            text.contains("mesh-pp-once"),
+            "prompt must round-trip: {text}"
+        );
+        eprintln!(
+            "OBSERVE mesh-pp-once: tail_dispatch={n_tail_dispatch} tail_stage={n_tail_stage} non_tail={n_non_tail} upstream_bytes={up} jst1={jst1} text_len={}",
+            text.len()
         );
     }
 
