@@ -11,6 +11,7 @@ mod load;
 mod manifest;
 mod software;
 mod stage;
+mod stage_matmul;
 mod weights;
 
 pub use decode::generate as generate_from_loaded;
@@ -37,6 +38,7 @@ pub use stage::{
     activation_commitment_hex, lab_stage_activation, stage_activation,
     stage_activation_with_weights, weight_material_from_tensors, StageOutput, StageRequest,
 };
+pub use stage_matmul::{stage_activation_matmul, MATMUL_DIM};
 pub use weights::{
     digests_verified_for_quant, is_lab_fixture_quant, is_synthetic_placeholder_digest,
     quant_can_unlock_service_digests, BlobAnnounce, PrepareStatus, WeightsStore,
@@ -286,18 +288,24 @@ impl Engine for ClusterEngine {
                 }
             }
         }
-        // Consume loaded weight bytes in the activation (JST2), not gate-only theater.
+        // Pure-Rust band matmul (JST3) when LoadedModel has f32 weight matrices.
+        // Falls back to JST2 weight-hash path if tensors are not matmul-shaped.
         if let Some(lm) = loaded {
-            let material = weight_material_from_tensors(&lm.tensors);
-            if material.is_empty() {
-                if req.require_band_weights {
-                    return Err(RuntimeError::Infer(
-                        "missing band weights: loaded model has no tensor material".into(),
-                    ));
+            match stage_activation_matmul(&req, &lm.tensors) {
+                Ok(out) => return Ok(out),
+                Err(e) => {
+                    let material = weight_material_from_tensors(&lm.tensors);
+                    if material.is_empty() {
+                        if req.require_band_weights {
+                            return Err(RuntimeError::Infer(format!("missing band weights: {e}")));
+                        }
+                        return lab_stage_activation(&req).map_err(RuntimeError::Infer);
+                    }
+                    // JST2 hash path still depends on weight bytes if matmul cannot run.
+                    return stage_activation_with_weights(&req, &material)
+                        .map_err(RuntimeError::Infer);
                 }
-                return lab_stage_activation(&req).map_err(RuntimeError::Infer);
             }
-            return stage_activation_with_weights(&req, &material).map_err(RuntimeError::Infer);
         }
         if req.require_band_weights {
             return Err(RuntimeError::Infer(
@@ -533,11 +541,12 @@ mod tests {
             .await
             .expect("stage with weights");
         assert!(
-            out.activation.starts_with(b"JST2"),
-            "ClusterEngine with loaded weights must emit weight-backed JST2"
+            out.activation.starts_with(b"JST3"),
+            "ClusterEngine with f32 weights must emit matmul JST3, got {:?}",
+            &out.activation[..4.min(out.activation.len())]
         );
         assert!(!out.activation.is_empty());
-        // Mutate staged file content + reload → activation must change.
+        // Mutate staged file content + reload → matmul activation must change.
         let path2 = md.join("model-00001-of-00016.safetensors");
         {
             use safetensors::tensor::{serialize, TensorView};
@@ -568,13 +577,13 @@ mod tests {
             .stage_layers(req)
             .await
             .expect("stage after weight change");
-        assert!(out2.activation.starts_with(b"JST2"));
+        assert!(out2.activation.starts_with(b"JST3"));
         assert_ne!(
             out.activation, out2.activation,
-            "different loaded weight bytes must change stage activation"
+            "different loaded weight bytes must change matmul activation"
         );
         eprintln!(
-            "OBSERVE stage-weight-consume: jst2_a={} jst2_b={} fail_closed_then_ok",
+            "OBSERVE stage-matmul: jst3_a={} jst3_b={} fail_closed_then_ok",
             out.activation.len(),
             out2.activation.len()
         );
@@ -615,11 +624,12 @@ mod tests {
             .await
             .expect("lab prepare + gate");
         assert!(
-            out.activation.starts_with(b"JST2"),
-            "prepared ClusterEngine stage must consume weight bytes (JST2)"
+            out.activation.starts_with(b"JST3") || out.activation.starts_with(b"JST2"),
+            "prepared ClusterEngine stage must consume weights (JST3 matmul or JST2 fallback)"
         );
         eprintln!(
-            "OBSERVE weight-stage-prepare: jst2_len={} require_band_weights=true",
+            "OBSERVE weight-stage-prepare: magic={:?} len={} require_band_weights=true",
+            std::str::from_utf8(&out.activation[..4]).unwrap_or("????"),
             out.activation.len()
         );
         std::env::remove_var("JOULE_BLOBS_DIR");

@@ -46,7 +46,7 @@ Even partition of 93 layers across 16 files (last file absorbs remainder):
 - **Placement** still assigns donors by **verified VRAM** to continuous layer bands (may cross file boundaries).  
 - **Fetch preference:** a donor owning layers `[Ls, Le]` prefers files whose map intersects that interval (`preferred_weight_files` / `order_digests_for_layer_fetch` on model_update).  
 - **Band weight gate:** `stage_layers` with `require_band_weights` fails closed unless preferred files for `[Ls, Le]` are staged/loaded (`load_model_for_band` / ClusterEngine). Lab/stub paths may leave the gate off.  
-- **Weight-backed stage:** ClusterEngine with a `LoadedModel` emits **JST2** activations that hash/sample resident tensor bytes (`weight_material_from_tensors` + `stage_activation_with_weights`). Different staged weights change the activation. Stub/lab without load stays **JST1**.
+- **Weight-backed stage:** ClusterEngine with a `LoadedModel` prefers **JST3** pure-Rust band matmul (`stage_activation_matmul`: f32 `W·x+b` over loaded tensors). Falls back to **JST2** hash/sample path if no usable f32 matrix. Stub/lab without load stays **JST1**.
 
 ## Real content path
 
