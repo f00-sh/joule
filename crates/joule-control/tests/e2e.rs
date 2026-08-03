@@ -438,9 +438,20 @@ async fn service_live_flips_when_mesh_loaded() {
     }
 }
 
-/// Forged ModelLoaded (tensors/bytes) must NOT set digests_verified without MANIFEST evidence.
+/// BlobsHave inventory of MANIFEST digests + forged ModelLoaded must NOT set digests.
+/// Catalog/seeder announce is not content proof (WeightsStore sha256 only).
 #[tokio::test]
 async fn forged_model_loaded_does_not_set_digests_or_live() {
+    // Isolate blob store so primary lab digests are not accidentally present.
+    let dir = std::env::temp_dir().join(format!(
+        "joule-e2e-forge-digests-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("JOULE_BLOBS_DIR", &dir);
+
     let app = load_or_init_app(None).expect("app");
     let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
     let node_id = NodeId::new();
@@ -464,7 +475,37 @@ async fn forged_model_loaded_does_not_set_digests_or_live() {
         .await
         .unwrap();
     let _ = lines.next_line().await.unwrap();
-    // Self-report complete prepare + big ModelLoaded without real digests.
+
+    // Announce MANIFEST digests via BlobsHave (inventory only — no file content).
+    let mut fake_blobs = Vec::new();
+    if let Ok(m) = joule_runtime::ManifestFile::load_default() {
+        if let Some(spec) = m.primary() {
+            if let Some(q) = spec
+                .pick_quant(8192)
+                .or_else(|| spec.weights.quants.first())
+            {
+                for f in &q.files {
+                    fake_blobs.push(joule_proto::BlobMeta {
+                        sha256: f.sha256.to_lowercase(),
+                        size: f.size_bytes,
+                        kind: "weight".into(),
+                        name: f.path.clone(),
+                        multiaddrs: vec!["tcp://127.0.0.1:9".into()],
+                    });
+                }
+            }
+        }
+    }
+    assert!(
+        !fake_blobs.is_empty(),
+        "MANIFEST must list digests for forge inventory test"
+    );
+    let have = Envelope::new(node_id.clone(), Message::BlobsHave { blobs: fake_blobs });
+    writer
+        .write_all(&encode_line(&have).unwrap())
+        .await
+        .unwrap();
+    // Self-report complete prepare + big ModelLoaded without real content.
     let prep = Envelope::new(
         node_id.clone(),
         Message::PrepareOk {
@@ -493,42 +534,39 @@ async fn forged_model_loaded_does_not_set_digests_or_live() {
         .write_all(&encode_line(&loaded).unwrap())
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     {
         let g = app.state.read().await;
-        // Without real MANIFEST blob evidence in empty store/catalog, digests stay false.
-        // (If lab fixtures happen to be present in JOULE_BLOBS_DIR, skip this assertion path.)
-        if !g.catalog_covers_primary_digests()
-            && !joule_runtime::digests_verified_for_primary_lab(&joule_runtime::WeightsStore::new(
-                joule_runtime::WeightsStore::default_root(),
-            ))
-            .unwrap_or(false)
-        {
-            assert!(
-                !g.digests_verified,
-                "forged ModelLoaded must not set digests_verified"
-            );
-            assert!(!g.service_live_public());
-            eprintln!(
-                "OBSERVE forged ModelLoaded: digests_verified=false service_live_public=false"
-            );
-        } else {
-            eprintln!("OBSERVE skip forge assert: environment already has MANIFEST digests");
-        }
+        // Catalog may show seeders, but digests_verified requires WeightsStore sha256.
+        assert!(
+            !g.digests_verified,
+            "BlobsHave+ModelLoaded without content must leave digests_verified=false"
+        );
+        assert!(!g.service_live_public());
+        eprintln!(
+            "OBSERVE BlobsHave+forged ModelLoaded: digests_verified=false service_live_public=false catalog_seeders_ok_but_not_content"
+        );
     }
     let client = reqwest::Client::new();
-    let op: serde_json::Value = client
-        .get(format!("http://{http_addr}/v1/operator/status"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    // If digests weren't corroborated, public live must be false.
-    if op["digests_verified"] == false {
-        assert_eq!(op["service_live"], false, "op={op}");
+    for path in [
+        format!("http://{http_addr}/healthz"),
+        format!("http://{http_addr}/v1/operator/status"),
+    ] {
+        let v: serde_json::Value = client
+            .get(&path)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(v["service_live"], false, "{path} must stay false: {v}");
+        if v.get("digests_verified").is_some() {
+            assert_eq!(v["digests_verified"], false, "{path} digests: {v}");
+        }
     }
+    std::env::remove_var("JOULE_BLOBS_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Fail-closed: operator force live without digests; HTTP surfaces stay false.

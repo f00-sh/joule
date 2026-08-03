@@ -746,30 +746,37 @@ impl PeerBus {
                 // Deliver completion to all (client listens on any)
                 self.broadcast(done, None).await;
                 if is_tail && !text.is_empty() {
-                    self.inner.lock().await.completions.insert(request_id, text);
+                    let mut g = self.inner.lock().await;
+                    let dead = |id: &NodeId| {
+                        g.dead_coordinators.contains(id)
+                            || g.donors.get(id).is_some_and(|d| !d.healthy)
+                    };
+                    if g.inflight
+                        .get(&request_id)
+                        .is_some_and(|i| accept_infer_done(i, &dead))
+                    {
+                        g.completions.insert(request_id, text);
+                    } else {
+                        warn!(%request_id, "ignore tail InferDone; mid-replan or not agreed");
+                    }
                 }
             }
             Message::InferDone {
                 request_id, text, ..
             } if !text.is_empty() => {
                 let mut g = self.inner.lock().await;
-                if g.inflight
-                    .get(&request_id)
-                    .and_then(|i| i.aborted.as_ref())
-                    .is_some()
-                {
-                    // Never complete after aborted agreement.
-                    return Ok(());
-                }
-                // Reject InferDone for a plan that still includes a dead confirmed shard.
                 let dead = |id: &NodeId| {
                     g.dead_coordinators.contains(id) || g.donors.get(id).is_some_and(|d| !d.healthy)
                 };
-                if g.inflight
+                let ok = g
+                    .inflight
                     .get(&request_id)
-                    .is_some_and(|i| inflight_needs_replan(i, &dead))
-                {
-                    warn!(%request_id, "ignore InferDone; confirmed shard dead — replan required");
+                    .is_some_and(|i| accept_infer_done(i, &dead));
+                if !ok {
+                    warn!(
+                        %request_id,
+                        "ignore InferDone; plan None / not agreed / dead shard — replan required"
+                    );
                     return Ok(());
                 }
                 g.completions.insert(request_id, text);
@@ -985,6 +992,24 @@ fn inflight_needs_replan(inf: &InflightRequest, dead: &dyn Fn(&NodeId) -> bool) 
         }
     }
     false
+}
+
+/// Pure InferDone gate: accept only with a live plan, not mid-replan, not dead-shard.
+///
+/// While `plan is None` (replan_request cleared geometry until re-agree), always reject.
+/// Does not require local `accepts` (only the coordinator tracks full quorum).
+pub(crate) fn accept_infer_done(inf: &InflightRequest, dead: &dyn Fn(&NodeId) -> bool) -> bool {
+    if inf.aborted.is_some() {
+        return false;
+    }
+    // Mid-replan: replan_request sets plan=None until new PlanOffer settles.
+    if inf.plan.is_none() {
+        return false;
+    }
+    if inflight_needs_replan(inf, dead) {
+        return false;
+    }
+    true
 }
 
 /// Drop completions/leases for inflight work that depended on a just-dead node.
@@ -1212,6 +1237,145 @@ mod tests {
             },
         ];
         assert_eq!(elect_coordinator(&d).unwrap(), b);
+    }
+
+    #[test]
+    fn accept_infer_done_rejects_mid_replan_and_dead_shard() {
+        let coord = NodeId::new();
+        let victim = NodeId::new();
+        let plan =
+            joule_cluster::plan_from_mesh_donors(&[(coord.clone(), 8192), (victim.clone(), 8192)])
+                .expect("plan");
+        let mut inf = InflightRequest {
+            request_id: Uuid::new_v4(),
+            account: "t".into(),
+            model: CLUSTER_MODEL.into(),
+            prompt: "p".into(),
+            max_tokens: 8,
+            coordinator: coord.clone(),
+            plan: Some(plan.clone()),
+            plan_hash_hex: joule_cluster::plan_hash_hex(&plan),
+            accepts: [coord.clone(), victim.clone()].into_iter().collect(),
+            attempt: 1,
+            lease_held: true,
+            aborted: None,
+        };
+        let dead_none = |_: &NodeId| false;
+        assert!(accept_infer_done(&inf, &dead_none));
+        // Mid-replan: plan cleared.
+        inf.plan = None;
+        inf.accepts.clear();
+        assert!(!accept_infer_done(&inf, &dead_none));
+        // Restored plan but victim dead.
+        inf.plan = Some(plan);
+        inf.accepts.insert(coord.clone());
+        inf.accepts.insert(victim.clone());
+        let dead_v = |id: &NodeId| id == &victim;
+        assert!(!accept_infer_done(&inf, &dead_v));
+        eprintln!("OBSERVE accept_infer_done: mid-replan + dead-shard rejected");
+    }
+
+    /// After mark_shard_dead + replan clears plan, delayed InferDone must not complete.
+    #[tokio::test]
+    async fn infer_done_ignored_while_plan_none_after_replan() {
+        let donors = donors_n(3);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        bus.set_coord_timeout(Duration::from_millis(80)).await;
+        let mut rxs = Vec::new();
+        for (id, mem) in &donors {
+            let (tx, rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+            rxs.push((id.clone(), rx));
+        }
+        for (id, rx) in rxs {
+            let b = bus.clone();
+            tokio::spawn(async move {
+                run_peer_actor(b, id, rx).await;
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let rid = bus
+            .request_infer("inj", "user: inject-done-mid-replan", 16)
+            .await
+            .expect("request");
+        for _ in 0..40 {
+            let g = bus.inner.lock().await;
+            if g.inflight
+                .get(&rid)
+                .is_some_and(|i| !i.accepts.is_empty() && i.plan.is_some())
+            {
+                break;
+            }
+            drop(g);
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        // Force replan path: mark a confirmed shard dead → wait_completion will replan.
+        let victim = {
+            let g = bus.inner.lock().await;
+            let inf = g.inflight.get(&rid).expect("inflight");
+            inf.plan
+                .as_ref()
+                .and_then(|p| {
+                    p.shards
+                        .iter()
+                        .map(|s| s.node.clone())
+                        .find(|n| n != &inf.coordinator)
+                })
+                .expect("non-coord shard")
+        };
+        bus.mark_shard_dead(&victim).await;
+        // Explicit replan clears plan=None (same as wait_completion).
+        let _ = bus.replan_request(rid).await;
+        {
+            let g = bus.inner.lock().await;
+            let inf = g.inflight.get(&rid).expect("inflight");
+            assert!(inf.plan.is_none(), "replan must clear plan");
+        }
+        // Inject delayed InferDone as if from old plan tail.
+        let poison = Envelope::new(
+            victim.clone(),
+            Message::InferDone {
+                request_id: rid,
+                text: "POISON-OLD-PLAN-DONE".into(),
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                shard_ok: true,
+            },
+        );
+        let engine = StubEngine::new();
+        bus.handle_envelope(&client_id, poison, &engine)
+            .await
+            .expect("handle");
+        {
+            let g = bus.inner.lock().await;
+            assert!(
+                !g.completions
+                    .get(&rid)
+                    .is_some_and(|t| t.contains("POISON")),
+                "mid-replan InferDone must not complete: {:?}",
+                g.completions.get(&rid)
+            );
+        }
+        // Real completion after re-agree still works.
+        let text = bus
+            .wait_completion(rid, Duration::from_secs(6))
+            .await
+            .expect("completion after replan");
+        assert!(!text.contains("POISON"));
+        assert!(!text.is_empty());
+        eprintln!(
+            "OBSERVE InferDone mid-replan ignored; later completion ok text_len={}",
+            text.len()
+        );
     }
 
     /// PlanOffer signed with a key not bound to env.from device_keys must be rejected.

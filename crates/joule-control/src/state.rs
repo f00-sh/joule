@@ -504,43 +504,17 @@ impl ControlState {
         }
     }
 
-    /// Corroborate digests from **content evidence only**:
-    /// local WeightsStore MANIFEST sha256, or blob catalog covering all required digests.
-    /// Never trusts PrepareOk/ModelLoaded self-report alone.
+    /// **Only** digests SoT: assign `digests_verified` from WeightsStore MANIFEST sha256
+    /// (`digests_verified_for_primary_lab`). Never BlobsHave catalog, PrepareOk, or ModelLoaded.
+    /// Assigns the pure result (not sticky-or-true).
     pub fn refresh_digests_from_evidence(&mut self) -> bool {
         let store = joule_runtime::WeightsStore::new(joule_runtime::WeightsStore::default_root());
-        if joule_runtime::digests_verified_for_primary_lab(&store).unwrap_or(false) {
-            self.set_digests_verified(true);
+        let ok = joule_runtime::digests_verified_for_primary_lab(&store).unwrap_or(false);
+        self.set_digests_verified(ok);
+        if ok {
             info!("digests_verified from WeightsStore MANIFEST sha256");
-            return true;
         }
-        if self.catalog_covers_primary_digests() {
-            self.set_digests_verified(true);
-            info!("digests_verified from blob catalog MANIFEST coverage");
-            return true;
-        }
-        false
-    }
-
-    /// True when every MANIFEST primary-quant digest has ≥1 seeder in the blob directory.
-    pub fn catalog_covers_primary_digests(&self) -> bool {
-        let Ok(m) = joule_runtime::ManifestFile::load_default() else {
-            return false;
-        };
-        let Some(spec) = m.primary() else {
-            return false;
-        };
-        let Some(quant) = spec
-            .pick_quant(8192)
-            .or_else(|| spec.weights.quants.first())
-        else {
-            return false;
-        };
-        let digests = joule_runtime::WeightsStore::required_digests(quant);
-        if digests.is_empty() {
-            return false;
-        }
-        digests.iter().all(|h| self.blobs.seeder_count(h) > 0)
+        ok
     }
 
     pub fn set_node_device_pubkey(&mut self, id: &NodeId, pubkey_hex: &str) {
