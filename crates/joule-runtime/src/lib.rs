@@ -33,7 +33,10 @@ pub use software::{
     apply_staged, current_arch, current_os, match_target, parse_software_update, read_stage,
     stage_blob, SoftwareTarget, SoftwareUpdateBody, StageStatus,
 };
-pub use stage::{activation_commitment_hex, lab_stage_activation, StageOutput, StageRequest};
+pub use stage::{
+    activation_commitment_hex, lab_stage_activation, stage_activation,
+    stage_activation_with_weights, weight_material_from_tensors, StageOutput, StageRequest,
+};
 pub use weights::{
     digests_verified_for_quant, is_lab_fixture_quant, is_synthetic_placeholder_digest,
     quant_can_unlock_service_digests, BlobAnnounce, PrepareStatus, WeightsStore,
@@ -240,8 +243,8 @@ impl Engine for ClusterEngine {
     }
 
     async fn stage_layers(&self, req: StageRequest) -> Result<StageOutput, RuntimeError> {
-        // Weight gate: only when require_band_weights (production / tests).
-        // required_weight_files is the explicit list; empty → map preferred basenames.
+        // Weight gate + weight-backed activation when LoadedModel is resident.
+        let loaded = self.loaded.lock().expect("lock").clone();
         if req.require_band_weights {
             let need = if !req.required_weight_files.is_empty() {
                 req.required_weight_files.clone()
@@ -249,8 +252,7 @@ impl Engine for ClusterEngine {
                 joule_cluster::preferred_weight_files(req.layer_start, req.layer_end)
                     .map_err(RuntimeError::Infer)?
             };
-            let loaded = self.loaded.lock().expect("lock").clone();
-            let Some(lm) = loaded else {
+            let Some(lm) = loaded.as_ref() else {
                 return Err(RuntimeError::Infer(format!(
                     "missing band weights: model not loaded (need layers {}-{} files {need:?})",
                     req.layer_start, req.layer_end
@@ -266,15 +268,12 @@ impl Engine for ClusterEngine {
             if all_need {
                 // K3/band-exact load satisfied.
             } else if any_need {
-                // Partial preferred set → fail closed (missing sibling shard file).
                 let missing: Vec<_> = need.iter().filter(|f| !match_one(f)).cloned().collect();
                 return Err(RuntimeError::Infer(format!(
                     "missing band weights: incomplete preferred set for layers {}-{} missing={missing:?} have={:?}",
                     req.layer_start, req.layer_end, lm.loaded_file_basenames
                 )));
             } else {
-                // Preferred names are K3-class but engine holds lab quant files after prepare:
-                // require real resident weights (not armed-only marker).
                 let real = lm
                     .loaded_file_basenames
                     .iter()
@@ -286,6 +285,24 @@ impl Engine for ClusterEngine {
                     )));
                 }
             }
+        }
+        // Consume loaded weight bytes in the activation (JST2), not gate-only theater.
+        if let Some(lm) = loaded {
+            let material = weight_material_from_tensors(&lm.tensors);
+            if material.is_empty() {
+                if req.require_band_weights {
+                    return Err(RuntimeError::Infer(
+                        "missing band weights: loaded model has no tensor material".into(),
+                    ));
+                }
+                return lab_stage_activation(&req).map_err(RuntimeError::Infer);
+            }
+            return stage_activation_with_weights(&req, &material).map_err(RuntimeError::Infer);
+        }
+        if req.require_band_weights {
+            return Err(RuntimeError::Infer(
+                "missing band weights: model not loaded".into(),
+            ));
         }
         lab_stage_activation(&req).map_err(RuntimeError::Infer)
     }
@@ -511,14 +528,103 @@ mod tests {
         };
         let lm = load_model_for_band(&store, spec, &quant, 0, 5).unwrap();
         eng.install_loaded(lm);
-        let out = eng.stage_layers(req).await.expect("stage with weights");
-        assert!(out.activation.starts_with(b"JST1"));
+        let out = eng
+            .stage_layers(req.clone())
+            .await
+            .expect("stage with weights");
+        assert!(
+            out.activation.starts_with(b"JST2"),
+            "ClusterEngine with loaded weights must emit weight-backed JST2"
+        );
         assert!(!out.activation.is_empty());
+        // Mutate staged file content + reload → activation must change.
+        let path2 = md.join("model-00001-of-00016.safetensors");
+        {
+            use safetensors::tensor::{serialize, TensorView};
+            use safetensors::Dtype;
+            use std::collections::BTreeMap;
+            let data: Vec<u8> = vec![1u8; 64]; // different payload
+            let tensor = TensorView::new(Dtype::F32, vec![4, 4], &data).unwrap();
+            let mut map: BTreeMap<String, TensorView<'_>> = BTreeMap::new();
+            map.insert("demo.weight".into(), tensor);
+            let bytes = serialize(&map, &None).unwrap();
+            std::fs::write(&path2, &bytes).unwrap();
+            let hash = hex::encode(Sha256::digest(&bytes));
+            let quant2 = QuantSpec {
+                id: "kimi-k3-ce-band".into(),
+                min_node_vram_mib: 256,
+                approx_file_mib: 1,
+                files: vec![WeightFile {
+                    path: "model-00001-of-00016.safetensors".into(),
+                    sha256: hash,
+                    url: "peer://1".into(),
+                    size_bytes: bytes.len() as u64,
+                }],
+            };
+            let lm2 = load_model_for_band(&store, spec, &quant2, 0, 5).unwrap();
+            eng.install_loaded(lm2);
+        }
+        let out2 = eng
+            .stage_layers(req)
+            .await
+            .expect("stage after weight change");
+        assert!(out2.activation.starts_with(b"JST2"));
+        assert_ne!(
+            out.activation, out2.activation,
+            "different loaded weight bytes must change stage activation"
+        );
         eprintln!(
-            "OBSERVE stage-weight-gate: fail_closed then ok act_len={}",
-            out.activation.len()
+            "OBSERVE stage-weight-consume: jst2_a={} jst2_b={} fail_closed_then_ok",
+            out.activation.len(),
+            out2.activation.len()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn cluster_engine_prepare_stage_is_weight_backed() {
+        let dir = std::env::temp_dir().join(format!("joule-ce-prep-{}", Uuid::new_v4()));
+        let blob = std::env::temp_dir().join(format!("joule-ce-prep-b-{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
+        std::env::set_var("JOULE_BLOBS_DIR", &blob);
+        let store = WeightsStore::new(&dir);
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.model("kimi-open").unwrap();
+        let lab = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "lab-tiny")
+            .unwrap();
+        let eng = ClusterEngine::new();
+        eng.load_plan(&demo_plan()).await.unwrap();
+        prepare_and_install(&store, &eng, spec, lab).unwrap();
+        let out = eng
+            .stage_layers(StageRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "prep-stage".into(),
+                layer_start: 0,
+                layer_end: 5,
+                upstream: vec![],
+                is_tail: false,
+                require_upstream: false,
+                require_band_weights: true,
+                required_weight_files: vec![],
+            })
+            .await
+            .expect("lab prepare + gate");
+        assert!(
+            out.activation.starts_with(b"JST2"),
+            "prepared ClusterEngine stage must consume weight bytes (JST2)"
+        );
+        eprintln!(
+            "OBSERVE weight-stage-prepare: jst2_len={} require_band_weights=true",
+            out.activation.len()
+        );
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
     }
 
     #[test]
