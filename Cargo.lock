@@ -2198,6 +2198,7 @@ version = "0.1.9"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
+ "hex",
  "joule-cluster",
  "joule-proto",
  "joule-runtime",

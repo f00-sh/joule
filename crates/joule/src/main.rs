@@ -1372,7 +1372,9 @@ async fn run_agent(
     let caps = NodeCaps::for_cluster(device, claim_mib, throughput_class);
     let mem_mib = claim_mib;
 
-    // Peer listen for direct mesh dial (decentral Phase A/C).
+    // Shared engine for control agent path + peer-direct InferRequest.
+    let shared_engine = std::sync::Arc::new(ClusterEngine::new());
+    // Peer listen for direct mesh dial (decentral Phase A/C) + peer-direct Infer*.
     let local_mesh: peer_net::SharedMesh =
         std::sync::Arc::new(tokio::sync::Mutex::new(peer_net::LocalMesh::new()));
     let mut multiaddrs: Vec<String> = Vec::new();
@@ -1402,8 +1404,9 @@ async fn run_agent(
         }
         let nid = node_id.clone();
         let mesh = local_mesh.clone();
+        let eng = shared_engine.clone();
         tokio::spawn(async move {
-            if let Err(e) = peer_net::run_peer_listener(listener, nid, mesh).await {
+            if let Err(e) = peer_net::run_peer_listener(listener, nid, mesh, eng).await {
                 warn!(error = %e, "peer listener exited");
             }
         });
@@ -1471,8 +1474,8 @@ async fn run_agent(
     let hello = Envelope::new(node_id.clone(), hello_msg);
     writer.write_all(&encode_line(&hello)?).await?;
 
-    // Tensor-backed when weights load; stub-style text until then.
-    let engine = ClusterEngine::new();
+    // Tensor-backed when weights load; stub-style text until then (shared with peer listen).
+    let engine = shared_engine;
     let store = WeightsStore::new(WeightsStore::default_root());
     store.ensure_root().ok();
     let mut last_armed = false;
@@ -1481,6 +1484,8 @@ async fn run_agent(
     let mut pending_software: Option<(String, SoftwareTarget)> = None;
     // Unique mesh neighbors seen via gossip (Phase A).
     let mut mesh_seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    // Pool PlanOffer verifying key from Welcome (fail-closed admit).
+    let mut pool_offer_pubkey: Option<String> = None;
     // Agents never self-attest verified capacity on PeerAlive (always 0).
     // Control cluster verified is the only mint/placement authority for weighted geometry.
     let mut heartbeat = tokio::time::interval(Duration::from_secs(heartbeat_secs.max(1)));
@@ -1536,8 +1541,15 @@ async fn run_agent(
                 }
                 let env = decode_line(line.as_bytes()).context("decode control line")?;
                 match env.msg {
-                    Message::Welcome { account: acc, api_key: key, pool_pubkey_hex: _ } => {
+                    Message::Welcome { account: acc, api_key: key, pool_pubkey_hex } => {
                         println!("joined pool · account {acc}");
+                        if !pool_pubkey_hex.is_empty() {
+                            pool_offer_pubkey = Some(pool_pubkey_hex.to_ascii_lowercase());
+                            info!(
+                                pool_pk = %pool_pubkey_hex.chars().take(16).collect::<String>(),
+                                "pool PlanOffer pubkey pinned from Welcome"
+                            );
+                        }
                         if let Some(ref ip) = identity_path {
                             if let Err(e) = identity::remember_api_key(ip, &key) {
                                 warn!(error = %e, "could not cache api_key on identity");
@@ -1660,7 +1672,9 @@ async fn run_agent(
                     Message::PlanOffer {
                         plan,
                         request_id: plan_req_id,
-                        plan_hash_hex, .. } => {
+                        plan_hash_hex,
+                        auth,
+                    } => {
                         info!(
                             plan_id = %plan.plan_id,
                             %plan_req_id,
@@ -1668,6 +1682,53 @@ async fn run_agent(
                             pool_mem = plan.pool_mem_mib,
                             "received PlanOffer"
                         );
+                        // Fail closed: PlanOffer must be signed by pool (Welcome pin) or mesh coordinator.
+                        let offer_hash = if plan_hash_hex.is_empty() {
+                            joule_cluster::plan_hash_hex(&plan)
+                        } else {
+                            plan_hash_hex.clone()
+                        };
+                        let offer_ok = if let Some(ref pool_pk) = pool_offer_pubkey {
+                            let signer = auth.signer_pubkey_hex.trim().to_ascii_lowercase();
+                            if signer != *pool_pk {
+                                warn!(
+                                    "PlanOffer rejected: signer not pool pubkey from Welcome"
+                                );
+                                false
+                            } else if let Err(e) = joule_cluster::verify_plan_offer_sig(
+                                &env.from,
+                                plan.plan_id,
+                                plan_req_id,
+                                &offer_hash,
+                                &auth.signer_pubkey_hex,
+                                &auth.sig_hex,
+                                auth.signed_at_unix_ms,
+                            ) {
+                                warn!(error = %e, "PlanOffer signature rejected");
+                                false
+                            } else {
+                                true
+                            }
+                        } else if auth.signer_pubkey_hex.is_empty() || auth.sig_hex.is_empty() {
+                            warn!("PlanOffer rejected: missing auth (no pool pin yet)");
+                            false
+                        } else if let Err(e) = joule_cluster::verify_plan_offer_sig(
+                            &env.from,
+                            plan.plan_id,
+                            plan_req_id,
+                            &offer_hash,
+                            &auth.signer_pubkey_hex,
+                            &auth.sig_hex,
+                            auth.signed_at_unix_ms,
+                        ) {
+                            warn!(error = %e, "PlanOffer signature rejected");
+                            false
+                        } else {
+                            true
+                        };
+                        if !offer_ok {
+                            continue;
+                        }
                         let accepted = plan.shards.iter().any(|s| s.node == node_id);
                         let (ph, confirm) = joule_cluster::plan_accept_fields(
                             &plan,
@@ -1885,7 +1946,7 @@ async fn run_agent(
                                             Err(e) => warn!(error = %e, "prepare failed"),
                                         }
                                         // Shared load path (same as peer-seed completion).
-                                        match prepare_and_install(&store, &engine, spec, q) {
+                                        match prepare_and_install(&store, engine.as_ref(), spec, q) {
                                             Ok(report) => {
                                                 last_armed = true;
                                                 println!("loaded: {}", report.message);
@@ -1913,7 +1974,7 @@ async fn run_agent(
                         }
                     }
                     Message::InferRequest { .. } => {
-                        let reply = joule_control::agent_handle_infer(&env, &engine)
+                        let reply = joule_control::agent_handle_infer(&env, engine.as_ref())
                             .await
                             .context("handle infer")?;
                         let reply = Envelope::new(node_id.clone(), reply.msg);
@@ -1923,7 +1984,8 @@ async fn run_agent(
                         // Solve capacity proof only. Do **not** self-increment verified or
                         // advertise unlock on PeerAlive — only control cluster attestation
                         // after settle_challenge_result raises verified for mint/placement.
-                        let reply = joule_control::agent_handle_challenge(&env, &engine)
+                        let reply =
+                            joule_control::agent_handle_challenge(&env, engine.as_ref())
                             .await
                             .context("handle challenge")?;
                         let reply = Envelope::new(node_id.clone(), reply.msg);
@@ -2234,7 +2296,7 @@ async fn run_agent(
                                     // If a weight digest landed, try prepare/load for primary quant.
                                     try_load_after_blob(
                                         &store,
-                                        &engine,
+                                        engine.as_ref(),
                                         &mut writer,
                                         &node_id,
                                         &finished.sha256,

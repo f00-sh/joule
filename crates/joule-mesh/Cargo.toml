@@ -19,6 +19,7 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 rand = "0.8"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }

@@ -1,13 +1,14 @@
-//! Agent peer listen + direct blob transfer (decentral Phase A/B/C).
+//! Agent peer listen + direct blob transfer + peer-direct Infer* (decentral Phase A/B/C).
 //!
 //! Dial strings use `tcp://host:port`. Same NDJSON envelopes as the control agent port.
-//! Peer sessions accept BlobWant (seed), PeerAlive + BlobsHave (local DHT), no control required.
+//! Peer sessions accept BlobWant (seed), PeerAlive + BlobsHave (local DHT), and
+//! InferRequest → InferDone (no control relay required for the infer hop).
 
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use joule_dht::{DhtStore, PeerRecord};
 use joule_proto::{decode_line, encode_line, BlobMeta, Envelope, Message, NodeId};
-use joule_runtime::WeightsStore;
+use joule_runtime::{ClusterEngine, WeightsStore};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -174,25 +175,32 @@ pub fn format_tcp_multiaddr(addr: SocketAddr) -> String {
     format!("tcp://{addr}")
 }
 
-/// Serve peer NDJSON: BlobWant → BlobChunk; PeerAlive/BlobsHave update local DHT.
+/// Serve peer NDJSON: BlobWant → BlobChunk; PeerAlive/BlobsHave; InferRequest → InferDone.
 pub async fn run_peer_listener(
     listener: TcpListener,
     node_id: NodeId,
     mesh: SharedMesh,
+    engine: Arc<ClusterEngine>,
 ) -> Result<()> {
     loop {
         let (sock, peer) = listener.accept().await?;
         let node_id = node_id.clone();
         let mesh = mesh.clone();
+        let engine = engine.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_peer_session(sock, node_id, mesh).await {
+            if let Err(e) = handle_peer_session(sock, node_id, mesh, engine).await {
                 warn!(%peer, error = %e, "peer session ended");
             }
         });
     }
 }
 
-async fn handle_peer_session(sock: TcpStream, node_id: NodeId, mesh: SharedMesh) -> Result<()> {
+async fn handle_peer_session(
+    sock: TcpStream,
+    node_id: NodeId,
+    mesh: SharedMesh,
+    engine: Arc<ClusterEngine>,
+) -> Result<()> {
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
     while let Some(line) = lines.next_line().await? {
@@ -201,6 +209,15 @@ async fn handle_peer_session(sock: TcpStream, node_id: NodeId, mesh: SharedMesh)
         }
         let env: Envelope = decode_line(line.as_bytes())?;
         match env.msg {
+            Message::InferRequest { .. } => {
+                // Peer-direct infer hop: run shard Engine and reply InferDone on this socket.
+                let reply = joule_control::agent_handle_infer(&env, engine.as_ref())
+                    .await
+                    .context("peer InferRequest")?;
+                let reply = Envelope::new(node_id.clone(), reply.msg);
+                writer.write_all(&encode_line(&reply)?).await?;
+                info!(from = %env.from, "peer InferRequest → InferDone");
+            }
             Message::BlobWant { sha256 } => {
                 let hash = sha256.to_lowercase();
                 match WeightsStore::read_blob(&hash) {
@@ -602,8 +619,9 @@ mod tests {
         let seeder = NodeId::new();
         let mesh = Arc::new(Mutex::new(LocalMesh::new()));
         let mesh2 = mesh.clone();
+        let eng = Arc::new(ClusterEngine::new());
         tokio::spawn(async move {
-            let _ = run_peer_listener(listener, seeder, mesh2).await;
+            let _ = run_peer_listener(listener, seeder, mesh2, eng).await;
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
 
@@ -642,5 +660,86 @@ mod tests {
 
         std::env::remove_var("JOULE_BLOBS_DIR");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P3: dial peer multiaddr, send InferRequest, receive InferDone (no control relay).
+    #[tokio::test]
+    async fn peer_direct_infer_request_infer_done_roundtrip() {
+        use joule_proto::{ClusterPlan, ShardAssignment, ShardRole, CLUSTER_MODEL};
+        use uuid::Uuid;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let multi = format_tcp_multiaddr(addr);
+        let seeder = NodeId::new();
+        let mesh = Arc::new(Mutex::new(LocalMesh::new()));
+        let eng = Arc::new(ClusterEngine::new());
+        let seeder2 = seeder.clone();
+        tokio::spawn(async move {
+            let _ = run_peer_listener(listener, seeder2, mesh, eng).await;
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let request_id = Uuid::new_v4();
+        let plan = ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            model_layers: 80,
+            pool_mem_mib: 8192,
+            shards: vec![ShardAssignment {
+                node: seeder.clone(),
+                layer_start: Some(0),
+                layer_end: Some(79),
+                mem_share_mib: 8192,
+                mem_fraction_ppm: 1_000_000,
+                role: ShardRole::Replica,
+                tp_rank: None,
+                tp_world: None,
+            }],
+        };
+        let req = Envelope::new(
+            seeder.clone(),
+            Message::InferRequest {
+                request_id,
+                model: CLUSTER_MODEL.into(),
+                prompt: "user: peer-direct-p3".into(),
+                max_tokens: 16,
+                plan,
+                is_tail: true,
+            },
+        );
+        let sock = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr))
+            .await
+            .expect("connect timeout")
+            .expect("connect");
+        let (reader, mut writer) = sock.into_split();
+        writer
+            .write_all(&encode_line(&req).unwrap())
+            .await
+            .expect("write InferRequest");
+        let mut lines = BufReader::new(reader).lines();
+        let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("read timeout")
+            .expect("read")
+            .expect("line");
+        let reply: Envelope = decode_line(line.as_bytes()).expect("decode InferDone");
+        match reply.msg {
+            Message::InferDone {
+                request_id: rid,
+                text,
+                shard_ok,
+                ..
+            } => {
+                assert_eq!(rid, request_id);
+                assert!(shard_ok);
+                assert!(
+                    !text.is_empty() && text.contains("peer-direct-p3"),
+                    "peer InferDone text={text}"
+                );
+                eprintln!("OBSERVE peer-direct InferRequest→InferDone multi={multi} text={text}");
+            }
+            other => panic!("expected InferDone, got {other:?}"),
+        }
     }
 }

@@ -567,17 +567,33 @@ impl PeerBus {
                         .map(|p| p.shards.iter().map(|s| s.node.clone()).collect())
                         .unwrap_or_default();
                     if expected.contains(&env.from) {
-                        if let Err(e) = joule_cluster::verify_plan_accept_sig(
-                            &env.from,
-                            plan_id,
-                            request_id,
-                            accepted,
-                            &plan_hash_hex,
-                            &confirm_hex,
-                            &auth.signer_pubkey_hex,
-                            &auth.sig_hex,
-                            auth.signed_at_unix_ms,
-                        ) {
+                        // Bind signer pubkey to registered device key for env.from
+                        // (forgeable NodeId alone cannot spoof accept).
+                        let reg_pk = g
+                            .device_keys
+                            .get(&env.from)
+                            .map(|sk| hex::encode(sk.verifying_key().as_bytes()));
+                        let bind_err = match reg_pk {
+                            None => Some("no device key registered for accept from".to_string()),
+                            Some(pk)
+                                if pk != auth.signer_pubkey_hex.trim().to_ascii_lowercase() =>
+                            {
+                                Some("plan accept pubkey not bound to registered device key".into())
+                            }
+                            Some(_) => joule_cluster::verify_plan_accept_sig(
+                                &env.from,
+                                plan_id,
+                                request_id,
+                                accepted,
+                                &plan_hash_hex,
+                                &confirm_hex,
+                                &auth.signer_pubkey_hex,
+                                &auth.sig_hex,
+                                auth.signed_at_unix_ms,
+                            )
+                            .err(),
+                        };
+                        if let Some(e) = bind_err {
                             drop(g);
                             let mut g = self.inner.lock().await;
                             abort_inflight_and_release(

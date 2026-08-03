@@ -11,6 +11,16 @@ use uuid::Uuid;
 pub const DOMAIN_PLAN_OFFER_SIG: &[u8] = b"joule-plan-offer-sig-v1";
 pub const DOMAIN_PLAN_ACCEPT_SIG: &[u8] = b"joule-plan-accept-sig-v1";
 
+/// Stable NodeId for control-pool PlanOffer signatures (bound to `pool_id`, not shards).
+///
+/// Recipients verify PlanOffer against Welcome `pool_pubkey_hex` with this `from` in the preimage.
+pub fn pool_offerer_node_id(pool_id: &str) -> NodeId {
+    let dig = Sha256::digest(format!("joule-pool-offerer-v1|{pool_id}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&dig[..16]);
+    NodeId(Uuid::from_bytes(bytes))
+}
+
 /// Preimage for PlanOffer signature.
 pub fn plan_offer_sign_preimage(
     from: &NodeId,
@@ -168,5 +178,26 @@ mod tests {
             verify_plan_accept_sig(&from, plan_id, rid, false, &ph, &confirm, &pk2, &sig2, ts)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn pool_offerer_id_stable_and_signs_as_offerer() {
+        let a = pool_offerer_node_id("joule-default");
+        let b = pool_offerer_node_id("joule-default");
+        let c = pool_offerer_node_id("other-pool");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        // Control signs over pool offerer id (not a shard node id).
+        let sk = lab_signing_key_for_node(&a);
+        let plan_id = Uuid::new_v4();
+        let rid = Uuid::new_v4();
+        let ph = "ef".repeat(32);
+        let ts = 42u64;
+        let pre = plan_offer_sign_preimage(&a, plan_id, rid, &ph, ts);
+        let (pk, sig) = sign_preimage(&sk, &pre);
+        assert!(verify_plan_offer_sig(&a, plan_id, rid, &ph, &pk, &sig, ts).is_ok());
+        // Wrong from (shard spoof) fails.
+        let shard = NodeId::new();
+        assert!(verify_plan_offer_sig(&shard, plan_id, rid, &ph, &pk, &sig, ts).is_err());
     }
 }

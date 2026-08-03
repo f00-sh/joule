@@ -16,25 +16,31 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+/// PlanOffer auth: signed by **pool identity** over preimage `from=pool_offerer_node_id`.
+/// Envelope.from must be the same offerer id so recipients bind sig ↔ offerer device.
 fn control_plan_offer_auth(
     app: &App,
-    from: &NodeId,
     plan_id: uuid::Uuid,
     request_id: uuid::Uuid,
     plan_hash_hex: &str,
-) -> joule_proto::PlanAuth {
+) -> (NodeId, joule_proto::PlanAuth) {
+    let offerer = joule_cluster::pool_offerer_node_id(&app.identity.pool_id);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let pre = joule_cluster::plan_offer_sign_preimage(from, plan_id, request_id, plan_hash_hex, ts);
+    let pre =
+        joule_cluster::plan_offer_sign_preimage(&offerer, plan_id, request_id, plan_hash_hex, ts);
     let pk = app.identity.public_info().verifying_key_hex;
     let sig = app.identity.sign_bytes(pre.as_bytes());
-    joule_proto::PlanAuth {
-        signer_pubkey_hex: pk,
-        sig_hex: sig,
-        signed_at_unix_ms: ts,
-    }
+    (
+        offerer,
+        joule_proto::PlanAuth {
+            signer_pubkey_hex: pk,
+            sig_hex: sig,
+            signed_at_unix_ms: ts,
+        },
+    )
 }
 
 pub async fn run_agent_listener(app: App, listener: TcpListener) -> Result<()> {
@@ -609,24 +615,40 @@ async fn send_to_agent(routes: &AgentRoutes, node: &NodeId, env: Envelope) -> bo
     }
 }
 
-/// Dial a donor multiaddr and write one NDJSON InferRequest (peer-direct path).
-/// Returns true when the TCP write completes; false falls back to control relay.
-async fn send_infer_peer_direct(multiaddr: &str, env: &Envelope) -> bool {
-    let Ok(bytes) = encode_line(env) else {
-        return false;
-    };
-    let Some(addr) = parse_tcp_multiaddr_local(multiaddr) else {
-        return false;
-    };
-    match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
-        Ok(Ok(mut stream)) => {
-            if stream.write_all(&bytes).await.is_err() {
-                return false;
-            }
-            let _ = stream.flush().await;
-            true
+/// Dial a donor multiaddr, send InferRequest, read InferDone (peer-direct path).
+/// Returns InferDone envelope on success; None falls back to control relay.
+async fn send_infer_peer_direct(multiaddr: &str, env: &Envelope) -> Option<Envelope> {
+    let bytes = encode_line(env).ok()?;
+    let addr = parse_tcp_multiaddr_local(multiaddr)?;
+    let sock = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+    let (reader, mut writer) = sock.into_split();
+    writer.write_all(&bytes).await.ok()?;
+    let _ = writer.flush().await;
+    let mut lines = BufReader::new(reader).lines();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if tokio::time::Instant::now() > deadline {
+            return None;
         }
-        _ => false,
+        let line = match tokio::time::timeout(Duration::from_secs(10), lines.next_line()).await {
+            Ok(Ok(Some(l))) => l,
+            _ => return None,
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let reply: Envelope = decode_line(line.as_bytes()).ok()?;
+        match &reply.msg {
+            Message::InferDone { .. } => return Some(reply),
+            Message::Error { error } => {
+                warn!(%error, %multiaddr, "peer-direct Infer error");
+                return None;
+            }
+            _ => continue,
+        }
     }
 }
 
@@ -784,19 +806,15 @@ pub async fn dispatch_mesh_infer(
     }
 
     for shard in &plan.shards {
+        let (offerer, auth) =
+            control_plan_offer_auth(app, plan.plan_id, request_id, &plan_hash_hex);
         let env = Envelope::new(
-            shard.node.clone(),
+            offerer,
             Message::PlanOffer {
                 plan: plan.clone(),
                 request_id,
                 plan_hash_hex: plan_hash_hex.clone(),
-                auth: control_plan_offer_auth(
-                    app,
-                    &shard.node,
-                    plan.plan_id,
-                    request_id,
-                    &plan_hash_hex,
-                ),
+                auth,
             },
         );
         if !send_to_agent(&app.routes, &shard.node, env).await {
@@ -888,19 +906,15 @@ async fn dispatch_control_stream(
         );
     }
     for shard in &plan.shards {
+        let (offerer, auth) =
+            control_plan_offer_auth(app, plan.plan_id, request_id, &plan_hash_hex);
         let env = Envelope::new(
-            shard.node.clone(),
+            offerer,
             Message::PlanOffer {
                 plan: plan.clone(),
                 request_id,
                 plan_hash_hex: plan_hash_hex.clone(),
-                auth: control_plan_offer_auth(
-                    app,
-                    &shard.node,
-                    plan.plan_id,
-                    request_id,
-                    &plan_hash_hex,
-                ),
+                auth,
             },
         );
         if !send_to_agent(&app.routes, &shard.node, env).await {
@@ -1029,6 +1043,7 @@ async fn fanout_infer(
     info!(peer_direct, shards = plan.shards.len(), "infer fanout path");
 
     let mut sent = 0usize;
+    let mut peer_direct_settled_tail = false;
     for (i, shard) in plan.shards.iter().enumerate() {
         let is_tail = shard.node == tail;
         let env = Envelope::new(
@@ -1045,10 +1060,31 @@ async fn fanout_infer(
         let mut delivered = false;
         if peer_direct {
             if let Some(addr) = shard_addrs.get(i).and_then(|a| a.first()) {
-                // Peer-direct hop: dial donor multiaddr (no control as byte path).
-                delivered = send_infer_peer_direct(addr, &env).await;
-                if delivered {
-                    info!(node = %shard.node, %addr, "InferRequest peer-direct");
+                // Peer-direct hop: dial donor multiaddr, read InferDone (no control relay).
+                if let Some(done) = send_infer_peer_direct(addr, &env).await {
+                    delivered = true;
+                    info!(node = %shard.node, %addr, "InferRequest peer-direct + InferDone");
+                    if let Message::InferDone {
+                        request_id: rid,
+                        text,
+                        prompt_tokens,
+                        completion_tokens,
+                        ..
+                    } = done.msg
+                    {
+                        let mut g = app.state.write().await;
+                        g.settle_shard_success(
+                            rid,
+                            text,
+                            prompt_tokens,
+                            completion_tokens,
+                            &shard.node,
+                            is_tail,
+                        );
+                        if is_tail {
+                            peer_direct_settled_tail = true;
+                        }
+                    }
                 }
             }
         }
@@ -1061,6 +1097,7 @@ async fn fanout_infer(
             warn!(node = %shard.node, "shard agent not connected");
         }
     }
+    let _ = peer_direct_settled_tail;
 
     if sent == 0 {
         let mut g = app.state.write().await;
