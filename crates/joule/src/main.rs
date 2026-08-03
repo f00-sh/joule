@@ -1654,8 +1654,7 @@ async fn run_agent(
                     Message::PlanOffer {
                         plan,
                         request_id: plan_req_id,
-                        plan_hash_hex,
-                    } => {
+                        plan_hash_hex, .. } => {
                         info!(
                             plan_id = %plan.plan_id,
                             %plan_req_id,
@@ -1671,6 +1670,21 @@ async fn run_agent(
                             accepted,
                             Some(plan_hash_hex.as_str()).filter(|s| !s.is_empty()),
                         );
+                        let ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        let sk = joule_cluster::lab_signing_key_for_node(&node_id);
+                        let pre = joule_cluster::plan_accept_sign_preimage(
+                            &node_id,
+                            plan.plan_id,
+                            plan_req_id,
+                            accepted,
+                            &ph,
+                            &confirm,
+                            ts,
+                        );
+                        let (pk, sig) = joule_cluster::sign_preimage(&sk, &pre);
                         let acc = Envelope::new(
                             node_id.clone(),
                             Message::PlanAccept {
@@ -1684,6 +1698,11 @@ async fn run_agent(
                                 },
                                 plan_hash_hex: ph,
                                 confirm_hex: confirm,
+                                auth: joule_proto::PlanAuth {
+                                    signer_pubkey_hex: pk,
+                                    sig_hex: sig,
+                                    signed_at_unix_ms: ts,
+                                },
                             },
                         );
                         writer.write_all(&encode_line(&acc)?).await?;

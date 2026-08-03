@@ -8,6 +8,7 @@ mod chunks;
 mod erasure;
 mod lease;
 mod plan_agree;
+mod plan_sign;
 mod scheduler;
 
 pub use capacity_challenge::{
@@ -29,6 +30,11 @@ pub use lease::{
     DOMAIN_LEASE, DOMAIN_PLAN,
 };
 pub use plan_agree::{on_accept, PlanAcceptEffect, PlanAgreeView};
+pub use plan_sign::{
+    lab_signing_key_for_node, plan_accept_sign_preimage, plan_offer_sign_preimage, sign_preimage,
+    verify_plan_accept_sig, verify_plan_offer_sig, verify_sig, DOMAIN_PLAN_ACCEPT_SIG,
+    DOMAIN_PLAN_OFFER_SIG,
+};
 pub use scheduler::{
     compute_state, free_slots, free_stream_slots, max_slots, max_streams, pool_max_streams,
     ComputeState, NodeSchedule, SchedulerSnapshot, DEFAULT_MODEL_LAYERS, STREAM_BUDGET_MIB,

@@ -222,6 +222,25 @@ pub struct ClusterCapacity {
     pub logical_device: Option<LogicalDevice>,
 }
 
+/// Ed25519 device authenticity for PlanOffer / PlanAccept.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlanAuth {
+    /// Ed25519 public key (64 hex chars). Empty = unsigned (rejected when required).
+    #[serde(default)]
+    pub signer_pubkey_hex: String,
+    /// Ed25519 signature (128 hex chars).
+    #[serde(default)]
+    pub sig_hex: String,
+    #[serde(default)]
+    pub signed_at_unix_ms: u64,
+}
+
+impl PlanAuth {
+    pub fn is_signed(&self) -> bool {
+        !self.signer_pubkey_hex.is_empty() && !self.sig_hex.is_empty()
+    }
+}
+
 /// Envelope for control ↔ agent messages (newline-delimited JSON on the wire).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
@@ -310,6 +329,9 @@ pub enum Message {
         /// Canonical plan body hash (hex). Empty = legacy offer (lab only).
         #[serde(default)]
         plan_hash_hex: String,
+        /// Device ed25519 authenticity (fail closed when required).
+        #[serde(default)]
+        auth: PlanAuth,
     },
     CapacitySnapshot {
         capacity: ClusterCapacity,
@@ -413,6 +435,9 @@ pub enum Message {
         /// Domain-separated accept confirmation hash (see lease module).
         #[serde(default)]
         confirm_hex: String,
+        /// Device ed25519 authenticity (fail closed when required).
+        #[serde(default)]
+        auth: PlanAuth,
     },
     /// Coordinator → shards: hashed plan body for agreement (optional; PlanOffer still carries full plan).
     PlanHash {

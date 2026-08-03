@@ -124,6 +124,51 @@ impl BlobDirectory {
         })
     }
 
+    /// Rank-aware pick using multiaddrs/health/load/backpressure (see seeder_rank).
+    pub fn pick_seeder_ranked(
+        &self,
+        sha256: &str,
+        exclude: &NodeId,
+        hints: &[(NodeId, crate::seeder_rank::SeederCandidate)],
+    ) -> Option<(NodeId, BlobMeta)> {
+        let peers = self.peers_for(sha256);
+        if peers.is_empty() {
+            return None;
+        }
+        let mut cands = Vec::new();
+        for (n, meta) in &peers {
+            if n == exclude {
+                continue;
+            }
+            if let Some((_, hint)) = hints.iter().find(|(id, _)| id == n) {
+                let mut c = hint.clone();
+                c.node = n.clone();
+                if c.multiaddrs.is_empty() {
+                    c.multiaddrs = meta.multiaddrs.clone();
+                }
+                cands.push((c, meta.clone()));
+            } else {
+                cands.push((
+                    crate::seeder_rank::SeederCandidate {
+                        node: n.clone(),
+                        multiaddrs: meta.multiaddrs.clone(),
+                        healthy: true,
+                        load: 0.2,
+                        active_transfers: 0,
+                        pool_stream_slots_free: 1,
+                    },
+                    meta.clone(),
+                ));
+            }
+        }
+        let only: Vec<_> = cands.iter().map(|(c, _)| c.clone()).collect();
+        let best = crate::seeder_rank::pick_ranked_seeder(&only)?;
+        cands
+            .into_iter()
+            .find(|(c, _)| c.node == best.node)
+            .map(|(c, m)| (c.node, m))
+    }
+
     /// Nodes that do not currently announce this hash (candidates to pull a replica).
     pub fn non_seeders(&self, sha256: &str, all_nodes: &[NodeId]) -> Vec<NodeId> {
         let h = sha256.to_lowercase();

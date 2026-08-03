@@ -6,6 +6,7 @@
 mod account_auth;
 mod app;
 mod blobs;
+mod seeder_rank;
 mod broadcast;
 mod edge;
 mod http;

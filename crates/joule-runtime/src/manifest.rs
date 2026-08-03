@@ -132,6 +132,9 @@ pub enum InferenceMode {
 pub struct RuntimeFlags {
     pub model_loaded: bool,
     pub service_live: bool,
+    /// Required MANIFEST digests staged and sha256-verified (content-addressed).
+    /// Without this, `service_live` must stay false and can_begin_service is false.
+    pub digests_verified: bool,
 }
 
 impl ManifestFile {
@@ -281,12 +284,24 @@ impl ModelSpec {
         };
 
         let can_load_model = pool_ready && self.weights.published;
-        let can_begin_service = can_load_model && flags.model_loaded;
+        // Live path requires verified content digests — not model_loaded flag alone.
+        let can_begin_service =
+            can_load_model && flags.model_loaded && flags.digests_verified;
+        // Honor digests even if operator flips service_live early.
+        let service_live_honest = flags.service_live && flags.digests_verified && flags.model_loaded;
 
-        let (inference_mode, message) = if flags.service_live {
+        let (inference_mode, message) = if service_live_honest {
             (
                 InferenceMode::ServiceLive,
                 format!("{} is live on the joule logical device.", self.id),
+            )
+        } else if flags.model_loaded && !flags.digests_verified {
+            (
+                InferenceMode::LoadingWeights,
+                format!(
+                    "{}: model flag set but required digests not sha256-verified — not service_live.",
+                    self.id
+                ),
             )
         } else if flags.model_loaded {
             (
@@ -342,7 +357,7 @@ impl ModelSpec {
             pool_ready,
             weights_published: self.weights.published,
             model_loaded: flags.model_loaded,
-            service_live: flags.service_live,
+            service_live: service_live_honest,
             pool_progress_pct,
             inference_mode,
             message,
@@ -390,5 +405,21 @@ mod tests {
             .any(|x| x.id == "kimi-eligible" && x.reached));
         assert!(r2.weights_published);
         assert!(r2.can_load_model); // weights published + pool ready
+        assert!(!r2.can_begin_service, "needs digests_verified + model_loaded");
+
+        // Missing digests: service_live flag alone cannot claim live.
+        let mut flags = RuntimeFlags {
+            model_loaded: true,
+            service_live: true,
+            digests_verified: false,
+        };
+        let r3 = kimi.readiness(72 * 1024, 5, flags, None);
+        assert!(!r3.service_live);
+        assert!(!r3.can_begin_service);
+
+        flags.digests_verified = true;
+        let r4 = kimi.readiness(72 * 1024, 5, flags, None);
+        assert!(r4.can_begin_service);
+        assert!(r4.service_live);
     }
 }

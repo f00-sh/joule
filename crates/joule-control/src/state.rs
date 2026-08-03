@@ -216,6 +216,8 @@ pub struct ControlState {
     pub notary_secret_keys: HashMap<String, [u8; 32]>,
     /// Stream leases for chat admission (free/used truth + audit trail).
     pub leases: joule_cluster::LeaseBook,
+    /// MANIFEST digests staged + sha256 verified (content-addressed).
+    pub digests_verified: bool,
     dirty: bool,
 }
 
@@ -258,6 +260,7 @@ impl ControlState {
             last_rebalance: None,
             notary_secret_keys: HashMap::new(),
             leases: joule_cluster::LeaseBook::default(),
+            digests_verified: false,
             dirty: false,
         }
     }
@@ -442,12 +445,13 @@ impl ControlState {
         joule_runtime::RuntimeFlags {
             model_loaded: !self.nodes_model_loaded.is_empty(),
             service_live: self.service_live,
+            digests_verified: self.digests_verified,
         }
     }
 
     pub fn mark_node_loaded(&mut self, id: NodeId) {
         self.nodes_model_loaded.insert(id);
-        // Auto service-live when enough of the mesh has loaded and pool gate ok.
+        // Auto service-live only when digests verified + pool gate + enough loaders.
         let backends = self.cluster.pool_size() as u32;
         let vram = self.cluster.capacity().mem_mib_healthy;
         if let Ok(r) = joule_runtime::readiness_for_pool_ex(
@@ -456,11 +460,23 @@ impl ControlState {
             self.runtime_flags(),
             self.vram_growth_mib_per_sec(),
         ) {
-            if r.can_begin_service && self.nodes_model_loaded.len() >= r.required_backends as usize
+            if r.can_begin_service
+                && self.digests_verified
+                && self.nodes_model_loaded.len() >= r.required_backends as usize
             {
                 self.service_live = true;
-                info!("service marked live — model loaded on mesh");
+                info!("service marked live — digests verified + model loaded on mesh");
+            } else if !self.digests_verified {
+                self.service_live = false;
             }
+        }
+    }
+
+    /// Set digests gate from content-addressed verify (prepare/stage path).
+    pub fn set_digests_verified(&mut self, ok: bool) {
+        self.digests_verified = ok;
+        if !ok {
+            self.service_live = false;
         }
     }
 
@@ -978,6 +994,8 @@ impl ControlState {
     /// Record PlanAccept for a mesh-coordinated request; completes wait when all expected accept.
     ///
     /// Policy is pure [`joule_cluster::on_accept`] (membership → plan_id → verify → record).
+    /// Device ed25519 signature is verified first for expected shards (fail closed).
+    #[allow(clippy::too_many_arguments)]
     pub fn settle_plan_accept(
         &mut self,
         request_id: Uuid,
@@ -986,7 +1004,47 @@ impl ControlState {
         accepted: bool,
         plan_hash_hex: &str,
         confirm_hex: &str,
+        signer_pubkey_hex: &str,
+        sig_hex: &str,
+        signed_at_unix_ms: u64,
     ) {
+        // Expected shards must present a valid device signature (outsiders ignored later).
+        if self
+            .pending_plan_accepts
+            .get(&request_id)
+            .is_some_and(|p| p.expected.contains(from))
+        {
+            if let Err(e) = joule_cluster::verify_plan_accept_sig(
+                from,
+                plan_id,
+                request_id,
+                accepted,
+                plan_hash_hex,
+                confirm_hex,
+                signer_pubkey_hex,
+                sig_hex,
+                signed_at_unix_ms,
+            ) {
+                let want_hash = self
+                    .pending_plan_accepts
+                    .get(&request_id)
+                    .map(|p| p.plan_hash_hex.clone())
+                    .unwrap_or_default();
+                if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
+                    if let Some(tx) = p.tx.take() {
+                        let _ = tx.send(Err(format!("plan accept sig from {from}: {e}")));
+                    }
+                }
+                self.leases.record_accepts(
+                    request_id,
+                    &[],
+                    "plan_accept_sig_invalid",
+                    &format!("{from}: {e}"),
+                    Some(&want_hash),
+                );
+                return;
+            }
+        }
         let effect = {
             let pending = self.pending_plan_accepts.get(&request_id);
             let view = pending.map(|p| joule_cluster::PlanAgreeView {

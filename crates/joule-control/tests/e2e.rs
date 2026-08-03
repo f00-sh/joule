@@ -13,6 +13,31 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+fn e2e_plan_auth(
+    node: &NodeId,
+    plan_id: Uuid,
+    request_id: Uuid,
+    accepted: bool,
+    plan_hash_hex: &str,
+    confirm_hex: &str,
+) -> joule_proto::PlanAuth {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let sk = joule_cluster::lab_signing_key_for_node(node);
+    let pre = joule_cluster::plan_accept_sign_preimage(
+        node, plan_id, request_id, accepted, plan_hash_hex, confirm_hex, ts,
+    );
+    let (pk, sig) = joule_cluster::sign_preimage(&sk, &pre);
+    joule_proto::PlanAuth {
+        signer_pubkey_hex: pk,
+        sig_hex: sig,
+        signed_at_unix_ms: ts,
+    }
+}
+
+
 async fn operator_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| AsyncMutex::new(())).lock().await
@@ -111,8 +136,7 @@ async fn spawn_agent(
                         Message::PlanOffer {
                             plan,
                             request_id,
-                            plan_hash_hex,
-                        } => {
+                            plan_hash_hex, .. } => {
                             let accepted = plan.shards.iter().any(|s| s.node == node_id);
                             let (ph, confirm) = joule_cluster::plan_accept_fields(
                                 plan,
@@ -132,9 +156,10 @@ async fn spawn_agent(
                                     } else {
                                         "not in plan".into()
                                     },
+                                    auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
                                     plan_hash_hex: ph,
                                     confirm_hex: confirm,
-                                },
+                    },
                             );
                             if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
                                 break;
@@ -352,8 +377,16 @@ async fn service_live_flips_when_mesh_loaded() {
             g.mark_node_loaded(id.clone());
         }
         assert!(
+            !g.service_live,
+            "without digests_verified, service_live must stay false"
+        );
+        g.set_digests_verified(true);
+        for id in &node_ids {
+            g.mark_node_loaded(id.clone());
+        }
+        assert!(
             g.service_live,
-            "service_live must flip true when pool+mesh loaded"
+            "service_live must flip true when digests verified + pool+mesh loaded"
         );
     }
     let client = reqwest::Client::new();
@@ -700,8 +733,7 @@ async fn local_pool_lab_mid_tensor_infer() {
                             Message::PlanOffer {
                                 plan,
                                 request_id,
-                                plan_hash_hex,
-                            } => {
+                                plan_hash_hex, .. } => {
                                 let accepted = plan.shards.iter().any(|s| s.node == node_id);
                                 let (ph, confirm) = joule_cluster::plan_accept_fields(
                                     plan,
@@ -721,9 +753,10 @@ async fn local_pool_lab_mid_tensor_infer() {
                                         } else {
                                             "not in plan".into()
                                         },
+                                        auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
                                         plan_hash_hex: ph,
                                         confirm_hex: confirm,
-                                    },
+                    },
                                 );
                                 let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
                             }
@@ -2347,8 +2380,7 @@ async fn spawn_agent_hang_infer(
                         Message::PlanOffer {
                             plan,
                             request_id,
-                            plan_hash_hex,
-                        } => {
+                            plan_hash_hex, .. } => {
                             let accepted = plan.shards.iter().any(|s| s.node == node_id);
                             let (ph, confirm) = joule_cluster::plan_accept_fields(
                                 plan,
@@ -2364,9 +2396,10 @@ async fn spawn_agent_hang_infer(
                                     request_id: *request_id,
                                     accepted,
                                     reason: "hang-agent accept".into(),
+                                    auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
                                     plan_hash_hex: ph,
                                     confirm_hex: confirm,
-                                },
+                    },
                             );
                             if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
                                 break;
@@ -2484,8 +2517,7 @@ async fn spawn_agent_bad_accept(
                         Message::PlanOffer {
                             plan,
                             request_id,
-                            plan_hash_hex,
-                        } => {
+                            plan_hash_hex, .. } => {
                             let reply = Envelope::new(
                                 node_id.clone(),
                                 Message::PlanAccept {
@@ -2495,7 +2527,8 @@ async fn spawn_agent_bad_accept(
                                     reason: "bad confirm".into(),
                                     plan_hash_hex: plan_hash_hex.clone(),
                                     confirm_hex: "deadbeef".into(),
-                                },
+                                    auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, true, plan_hash_hex, "deadbeef"),
+                    },
                             );
                             if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
                                 break;
@@ -2744,6 +2777,7 @@ async fn spawn_agent_poison_request_infer(
                                         request_id: *request_id,
                                         accepted: true,
                                         reason: "poison local mesh coordinator".into(),
+                                        auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, true, &ph, &confirm),
                                         plan_hash_hex: ph2,
                                         confirm_hex: confirm,
                                     },
@@ -2756,8 +2790,7 @@ async fn spawn_agent_poison_request_infer(
                         Message::PlanOffer {
                             plan,
                             request_id,
-                            plan_hash_hex,
-                        } => {
+                            plan_hash_hex, .. } => {
                             let accepted = plan.shards.iter().any(|s| s.node == node_id);
                             let (ph, confirm) = joule_cluster::plan_accept_fields(
                                 plan,
@@ -2773,9 +2806,10 @@ async fn spawn_agent_poison_request_infer(
                                     request_id: *request_id,
                                     accepted,
                                     reason: "poison-agent later offer".into(),
+                                    auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
                                     plan_hash_hex: ph,
                                     confirm_hex: confirm,
-                                },
+                    },
                             );
                             if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
                                 break;

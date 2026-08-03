@@ -28,6 +28,18 @@ pub use software::{
 };
 pub use weights::{BlobAnnounce, PrepareStatus, WeightsStore};
 
+/// Gate: digests verified for the primary quant of the default manifest model.
+/// Used by control `service_live` honesty and readiness flags.
+pub fn digests_verified_for_primary_lab(store: &WeightsStore) -> Result<bool, String> {
+    let m = ManifestFile::load_default()?;
+    let spec = m.primary().ok_or_else(|| "no primary model".to_string())?;
+    let quant = spec
+        .pick_quant(8192)
+        .or_else(|| spec.weights.quants.first())
+        .ok_or_else(|| "no quant".to_string())?;
+    Ok(store.digests_verified(&spec.id, quant))
+}
+
 use async_trait::async_trait;
 use joule_proto::ClusterPlan;
 use std::sync::{Arc, Mutex};
@@ -334,6 +346,60 @@ mod tests {
             pool_mem_mib: 1024,
             model_layers: 1,
         }
+    }
+
+    #[test]
+    fn digests_gate_service_live_honesty() {
+        let dir = std::env::temp_dir().join(format!("joule-digests-{}", Uuid::new_v4()));
+        let blob = std::env::temp_dir().join(format!("joule-digests-blobs-{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
+        // Isolate blob root so parallel tests do not race shared HOME store.
+        std::env::set_var("JOULE_BLOBS_DIR", &blob);
+        let store = WeightsStore::new(&dir);
+        assert!(!store.digests_verified(
+            "kimi-open",
+            ManifestFile::load_default()
+                .unwrap()
+                .primary()
+                .unwrap()
+                .pick_quant(8192)
+                .unwrap()
+        ));
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.primary().unwrap();
+        let quant = spec.pick_quant(8192).unwrap();
+        let eng = ClusterEngine::new();
+        let report = prepare_and_install(&store, &eng, spec, quant).expect("install");
+        assert!(report.tensors > 0 || report.bytes_resident > 0);
+        assert!(
+            store.digests_verified(&spec.id, quant),
+            "sha256-verified digests required"
+        );
+        // Non-stub infer path when tensors installed.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            eng.load_plan(&demo_plan()).await.unwrap();
+            let out = eng
+                .infer(InferRequest {
+                    model: CLUSTER_MODEL.into(),
+                    prompt: "digest-live".into(),
+                    max_tokens: 8,
+                })
+                .await
+                .unwrap();
+            assert!(
+                !out.text.contains("[joule-stub:"),
+                "tensor path must not be stub echo: {}",
+                out.text
+            );
+        });
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
     }
 
     /// Shipped path: prepare lab-tiny → load_model → ClusterEngine::install_loaded → infer.

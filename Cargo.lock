@@ -2129,6 +2129,7 @@ dependencies = [
 name = "joule-cluster"
 version = "0.1.9"
 dependencies = [
+ "ed25519-dalek",
  "hex",
  "joule-proto",
  "serde",

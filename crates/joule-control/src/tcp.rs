@@ -431,6 +431,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 reason,
                 plan_hash_hex,
                 confirm_hex,
+                auth,
             } => {
                 tracing::debug!(
                     %plan_id,
@@ -447,6 +448,9 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     accepted,
                     &plan_hash_hex,
                     &confirm_hex,
+                    &auth.signer_pubkey_hex,
+                    &auth.sig_hex,
+                    auth.signed_at_unix_ms,
                 );
             }
             Message::InferDone {
@@ -698,7 +702,8 @@ pub async fn dispatch_mesh_infer(
                 plan: plan.clone(),
                 request_id,
                 plan_hash_hex: plan_hash_hex.clone(),
-            },
+                            auth: joule_proto::PlanAuth::default(),
+},
         );
         if !send_to_agent(&app.routes, &shard.node, env).await {
             let mut g = app.state.write().await;
@@ -797,7 +802,8 @@ async fn dispatch_control_stream(
                 plan: plan.clone(),
                 request_id,
                 plan_hash_hex: plan_hash_hex.clone(),
-            },
+                            auth: joule_proto::PlanAuth::default(),
+},
         );
         if !send_to_agent(&app.routes, &shard.node, env).await {
             let mut g = app.state.write().await;

@@ -72,6 +72,20 @@ impl WeightsStore {
         })
     }
 
+    /// True when every MANIFEST-listed file for `quant` is present and sha256 matches.
+    /// This is the content-addressed gate for `RuntimeFlags::digests_verified`.
+    pub fn digests_verified(&self, model: &str, quant: &QuantSpec) -> bool {
+        if quant.files.is_empty() {
+            return false;
+        }
+        self.files_complete(model, quant)
+    }
+
+    /// Required digests from a quant (sha256 list) for audit/readiness.
+    pub fn required_digests(quant: &QuantSpec) -> Vec<String> {
+        quant.files.iter().map(|f| f.sha256.to_lowercase()).collect()
+    }
+
     /// Inventory of complete weight files as content-addressed blob metas (for seeding).
     pub fn local_blob_metas(&self, model: &str, quant: &QuantSpec) -> Vec<BlobAnnounce> {
         let dir = self.model_dir(model, &quant.id);
