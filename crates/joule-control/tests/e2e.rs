@@ -438,6 +438,99 @@ async fn service_live_flips_when_mesh_loaded() {
     }
 }
 
+/// Forged ModelLoaded (tensors/bytes) must NOT set digests_verified without MANIFEST evidence.
+#[tokio::test]
+async fn forged_model_loaded_does_not_set_digests_or_live() {
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let node_id = NodeId::new();
+    let sock = TcpStream::connect(agent_addr).await.expect("connect");
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+    let device_sk = e2e_device_key();
+    let device_pk = hex::encode(device_sk.verifying_key().as_bytes());
+    let hello = Envelope::new(
+        node_id.clone(),
+        Message::Hello {
+            account: "forge-loaded".into(),
+            caps: NodeCaps::for_cluster(DeviceClass::Gpu, 24_576, 40),
+            pubkey_hex: device_pk,
+            sig_hex: String::new(),
+            signed_at_unix_ms: 0,
+        },
+    );
+    writer
+        .write_all(&encode_line(&hello).unwrap())
+        .await
+        .unwrap();
+    let _ = lines.next_line().await.unwrap();
+    // Self-report complete prepare + big ModelLoaded without real digests.
+    let prep = Envelope::new(
+        node_id.clone(),
+        Message::PrepareOk {
+            model: CLUSTER_MODEL.into(),
+            quant: "lab-tiny".into(),
+            armed: true,
+            files_complete: true,
+            message: "forged prepare".into(),
+        },
+    );
+    writer
+        .write_all(&encode_line(&prep).unwrap())
+        .await
+        .unwrap();
+    let loaded = Envelope::new(
+        node_id.clone(),
+        Message::ModelLoaded {
+            model: CLUSTER_MODEL.into(),
+            quant: "lab-tiny".into(),
+            bytes_resident: 9_999_999,
+            tensors: 999,
+            message: "forged load".into(),
+        },
+    );
+    writer
+        .write_all(&encode_line(&loaded).unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let g = app.state.read().await;
+        // Without real MANIFEST blob evidence in empty store/catalog, digests stay false.
+        // (If lab fixtures happen to be present in JOULE_BLOBS_DIR, skip this assertion path.)
+        if !g.catalog_covers_primary_digests()
+            && !joule_runtime::digests_verified_for_primary_lab(&joule_runtime::WeightsStore::new(
+                joule_runtime::WeightsStore::default_root(),
+            ))
+            .unwrap_or(false)
+        {
+            assert!(
+                !g.digests_verified,
+                "forged ModelLoaded must not set digests_verified"
+            );
+            assert!(!g.service_live_public());
+            eprintln!(
+                "OBSERVE forged ModelLoaded: digests_verified=false service_live_public=false"
+            );
+        } else {
+            eprintln!("OBSERVE skip forge assert: environment already has MANIFEST digests");
+        }
+    }
+    let client = reqwest::Client::new();
+    let op: serde_json::Value = client
+        .get(format!("http://{http_addr}/v1/operator/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // If digests weren't corroborated, public live must be false.
+    if op["digests_verified"] == false {
+        assert_eq!(op["service_live"], false, "op={op}");
+    }
+}
+
 /// Fail-closed: operator force live without digests; HTTP surfaces stay false.
 /// Persist-restore of live intent without digests cannot claim public live.
 #[tokio::test]

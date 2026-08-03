@@ -553,10 +553,14 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     from = %env.from,
                     "{message}"
                 );
+                // Agent files_complete is untrusted alone — corroborate MANIFEST/blob evidence.
                 if files_complete {
                     let mut g = app.state.write().await;
-                    g.set_digests_verified(true);
-                    info!("digests_verified from PrepareOk (files_complete)");
+                    if g.refresh_digests_from_evidence() {
+                        info!("PrepareOk: digests corroborated (store or catalog)");
+                    } else {
+                        info!("PrepareOk: files_complete ignored without MANIFEST/blob evidence");
+                    }
                 }
             }
             Message::ModelLoaded {
@@ -575,9 +579,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     "{message}"
                 );
                 let mut g = app.state.write().await;
-                if tensors > 0 && bytes_resident > 0 {
-                    g.set_digests_verified(true);
-                }
+                // Never set digests from tensors/bytes self-report — content evidence only.
+                let _ = g.refresh_digests_from_evidence();
                 g.mark_node_loaded(env.from.clone());
             }
             other => {

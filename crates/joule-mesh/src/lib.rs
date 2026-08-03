@@ -447,23 +447,39 @@ impl PeerBus {
                 plan_hash_hex,
                 auth,
             } => {
-                // Fail closed: PlanOffer must be signed (coordinator device key).
+                // Fail closed: PlanOffer must be signed by **registered** device key for env.from
+                // (same bind as PlanAccept — forgeable NodeId alone cannot spoof offers).
                 let offer_hash = if plan_hash_hex.is_empty() {
                     joule_cluster::plan_hash_hex(&plan)
                 } else {
                     plan_hash_hex.clone()
                 };
-                if let Err(e) = joule_cluster::verify_plan_offer_sig(
-                    &env.from,
-                    plan.plan_id,
-                    request_id,
-                    &offer_hash,
-                    &auth.signer_pubkey_hex,
-                    &auth.sig_hex,
-                    auth.signed_at_unix_ms,
-                ) {
-                    warn!(error = %e, "PlanOffer signature rejected");
-                    return Ok(());
+                {
+                    let g = self.inner.lock().await;
+                    let reg_pk = g
+                        .device_keys
+                        .get(&env.from)
+                        .map(|sk| hex::encode(sk.verifying_key().as_bytes()));
+                    let offer_err = match reg_pk {
+                        None => Some("no device key registered for PlanOffer from".to_string()),
+                        Some(pk) if pk != auth.signer_pubkey_hex.trim().to_ascii_lowercase() => {
+                            Some("plan offer pubkey not bound to registered device key".into())
+                        }
+                        Some(_) => joule_cluster::verify_plan_offer_sig(
+                            &env.from,
+                            plan.plan_id,
+                            request_id,
+                            &offer_hash,
+                            &auth.signer_pubkey_hex,
+                            &auth.sig_hex,
+                            auth.signed_at_unix_ms,
+                        )
+                        .err(),
+                    };
+                    if let Some(e) = offer_err {
+                        warn!(error = %e, "PlanOffer signature rejected");
+                        return Ok(());
+                    }
                 }
                 let accepted = plan.shards.iter().any(|s| &s.node == local);
                 let ph = if plan_hash_hex.is_empty() {
@@ -1198,6 +1214,69 @@ mod tests {
         assert_eq!(elect_coordinator(&d).unwrap(), b);
     }
 
+    /// PlanOffer signed with a key not bound to env.from device_keys must be rejected.
+    #[tokio::test]
+    async fn plan_offer_wrong_device_key_fail_closed() {
+        let donors = donors_n(2);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        for (id, mem) in &donors {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+        }
+        let high = donors.iter().max_by_key(|(_, m)| *m).unwrap().0.clone();
+        let low = donors.iter().min_by_key(|(_, m)| *m).unwrap().0.clone();
+
+        // Forged offer: env.from = high, but signed with a random key ≠ device_keys[high].
+        let plan =
+            joule_cluster::plan_from_mesh_donors(&[(high.clone(), 16384), (low.clone(), 8192)])
+                .expect("plan");
+        let rid = Uuid::new_v4();
+        let ph = joule_cluster::plan_hash_hex(&plan);
+        let ts = 1u64;
+        let forge_sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let pre = joule_cluster::plan_offer_sign_preimage(&high, plan.plan_id, rid, &ph, ts);
+        let (pk, sig) = joule_cluster::sign_preimage(&forge_sk, &pre);
+        let offer = Envelope::new(
+            high.clone(),
+            Message::PlanOffer {
+                plan: plan.clone(),
+                request_id: rid,
+                plan_hash_hex: ph,
+                auth: joule_proto::PlanAuth {
+                    signer_pubkey_hex: pk,
+                    sig_hex: sig,
+                    signed_at_unix_ms: ts,
+                },
+            },
+        );
+        let engine = StubEngine::new();
+        bus.handle_envelope(&low, offer, &engine)
+            .await
+            .expect("handle returns ok");
+        let g = bus.inner.lock().await;
+        assert!(
+            !g.inflight.contains_key(&rid)
+                || g.inflight
+                    .get(&rid)
+                    .is_some_and(|i| i.plan.is_none() && i.accepts.is_empty()),
+            "wrong-key PlanOffer must not establish plan/accepts"
+        );
+        let reg = g.device_keys.get(&high).expect("high registered");
+        let reg_pk = hex::encode(reg.verifying_key().as_bytes());
+        let forge_pk = hex::encode(forge_sk.verifying_key().as_bytes());
+        assert_ne!(reg_pk, forge_pk);
+        eprintln!("OBSERVE plan_offer wrong-key fail-closed forge_pk≠reg_pk");
+    }
+
     #[tokio::test]
     async fn peer_only_chat_completes_without_control() {
         let d = donors_n(3);
@@ -1740,10 +1819,27 @@ mod tests {
         );
         let trail = g.leases.audit_trail();
         assert!(
-            trail
-                .iter()
-                .any(|e| e.event == "lease_released" || e.event == "lease_granted"),
-            "lease lifecycle on replan: {trail:?}"
+            trail.iter().any(|e| e.event == "lease_granted"),
+            "must grant lease: {trail:?}"
+        );
+        assert!(
+            trail.iter().any(|e| e.event == "lease_released"),
+            "must release lease on replan/complete: {trail:?}"
+        );
+        assert_eq!(
+            g.leases.active_count(),
+            0,
+            "no active leases after completion"
+        );
+        let snap = g.cluster.scheduler_snapshot();
+        assert_eq!(
+            snap.stream_slots_used, 0,
+            "used must restore free after replan+complete used={} free={}",
+            snap.stream_slots_used, snap.stream_slots_free
+        );
+        assert_eq!(
+            snap.stream_slots_free, snap.stream_slots_total,
+            "free==total after replan free-used-free"
         );
         assert!(
             !g.donors.get(&victim).map(|d| d.healthy).unwrap_or(true),

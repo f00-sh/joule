@@ -94,6 +94,9 @@ impl LeaseBook {
     }
 
     /// Acquire one stream lease against the cluster (fail closed if full).
+    ///
+    /// If `request_id` already holds an active lease, **release it first** so
+    /// re-admit cannot orphan slots / double-book the same request.
     pub fn try_admit(
         &mut self,
         cluster: &mut Cluster,
@@ -101,6 +104,14 @@ impl LeaseBook {
         request_id: Uuid,
         ttl: Duration,
     ) -> Result<StreamLease, String> {
+        if self.by_request.contains_key(&request_id) {
+            let _ = self.release_by_request(
+                cluster,
+                request_id,
+                "lease_released",
+                "supersede prior lease on re-admit same request_id",
+            );
+        }
         let plan = cluster
             .try_acquire_stream()
             .ok_or_else(|| "pool full: no free stream slots".to_string())?;
@@ -384,6 +395,49 @@ mod tests {
         let trail = book.audit_for_request(rid);
         assert!(trail.iter().any(|e| e.event == "lease_granted"));
         assert!(trail.iter().any(|e| e.event == "lease_released"));
+    }
+
+    #[test]
+    fn readmit_same_request_id_releases_prior_keeps_one_active() {
+        let mut c = pool(2);
+        let free0 = c.scheduler_snapshot().stream_slots_free;
+        let mut book = LeaseBook::default();
+        let rid = Uuid::new_v4();
+        let first = book
+            .try_admit(&mut c, "alice", rid, Duration::from_secs(30))
+            .expect("first admit");
+        assert_eq!(book.active_count(), 1);
+        assert_eq!(c.scheduler_snapshot().stream_slots_free, free0 - 1);
+        let second = book
+            .try_admit(&mut c, "alice", rid, Duration::from_secs(30))
+            .expect("re-admit same rid");
+        // Prior lease released → still exactly one active; free slots not double-booked.
+        assert_eq!(book.active_count(), 1, "must not orphan prior lease");
+        assert_eq!(
+            c.scheduler_snapshot().stream_slots_free,
+            free0 - 1,
+            "re-admit must not double-book slots"
+        );
+        assert_ne!(first.lease_id, second.lease_id);
+        assert_eq!(book.get(&second.lease_id).map(|l| l.request_id), Some(rid));
+        assert!(
+            book.get(&first.lease_id).is_none(),
+            "prior lease must be gone"
+        );
+        let trail = book.audit_for_request(rid);
+        assert!(
+            trail
+                .iter()
+                .any(|e| e.event == "lease_released" && e.detail.contains("supersede")),
+            "trail={trail:?}"
+        );
+        assert_eq!(
+            trail.iter().filter(|e| e.event == "lease_granted").count(),
+            2
+        );
+        book.release_by_request(&mut c, rid, "lease_released", "done");
+        assert_eq!(book.active_count(), 0);
+        assert_eq!(c.scheduler_snapshot().stream_slots_free, free0);
     }
 
     #[test]
