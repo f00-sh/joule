@@ -736,23 +736,24 @@ impl PeerBus {
                                         },
                                     );
                                     let _ = self.send_to(&tail, ir).await;
-                                } else {
-                                    // Phase 1 only: non-tails run stage_layers; InferDone collects then tail.
-                                    for node in joule_cluster::non_tail_nodes(&plan, &tail) {
-                                        let ir = Envelope::new(
-                                            local.clone(),
-                                            Message::InferRequest {
-                                                request_id,
-                                                model: model.clone(),
-                                                prompt: prompt.clone(),
-                                                max_tokens,
-                                                plan: plan.clone(),
-                                                is_tail: false,
-                                                upstream_activations: vec![],
-                                            },
-                                        );
-                                        let _ = self.send_to(&node, ir).await;
-                                    }
+                                } else if let Some(first) =
+                                    joule_cluster::next_non_tail_node(&plan, &tail, 0)
+                                {
+                                    // Sequential chain: first non-tail only; InferDone
+                                    // dispatches next stage (with prior activations) or tail.
+                                    let ir = Envelope::new(
+                                        local.clone(),
+                                        Message::InferRequest {
+                                            request_id,
+                                            model: model.clone(),
+                                            prompt: prompt.clone(),
+                                            max_tokens,
+                                            plan: plan.clone(),
+                                            is_tail: false,
+                                            upstream_activations: vec![],
+                                        },
+                                    );
+                                    let _ = self.send_to(&first, ir).await;
                                 }
                             }
                         }
@@ -866,15 +867,34 @@ impl PeerBus {
                         }
                     }
                 } else {
+                    // Sequential mid-chain: prior activations arrive in upstream_activations.
+                    let require_up = !upstream_activations.is_empty();
+                    let up = if require_up {
+                        joule_cluster::concat_prior_payloads(&upstream_activations)
+                            .unwrap_or_default()
+                    } else {
+                        vec![]
+                    };
+                    if require_up && up.is_empty() {
+                        let err = Envelope::new(
+                            local.clone(),
+                            Message::InferError {
+                                request_id,
+                                error: "pipeline mid-chain: empty prior activation".into(),
+                            },
+                        );
+                        self.broadcast(err, None).await;
+                        return Ok(());
+                    }
                     match engine
                         .stage_layers(joule_runtime::StageRequest {
                             model: model.clone(),
                             prompt: prompt.clone(),
                             layer_start: ls,
                             layer_end: le,
-                            upstream: vec![],
+                            upstream: up,
                             is_tail: false,
-                            require_upstream: false,
+                            require_upstream: require_up,
                             require_band_weights: false,
                             required_weight_files: joule_cluster::preferred_weight_files(ls, le)
                                 .unwrap_or_default(),
@@ -959,7 +979,9 @@ impl PeerBus {
                 activation_payload_b64,
                 ..
             } => {
-                // Non-tail: collect stage tensor; exactly-once latch dispatches tail.
+                // Non-tail: collect stage tensor; sequential next stage or exactly-once tail.
+                // Only the elected coordinator advances the chain (shared PeerBus
+                // otherwise multi-dispatches next InferRequest).
                 if text.is_empty() && !activation_payload_b64.is_empty() {
                     let from = env.from.clone();
                     let act = joule_proto::ShardActivation {
@@ -969,24 +991,69 @@ impl PeerBus {
                         activation_hex,
                         payload_b64: activation_payload_b64,
                     };
-                    let maybe_tail = {
+                    let next = {
                         let mut g = self.inner.lock().await;
-                        try_claim_pipeline_tail(&mut g, request_id, act)
+                        let is_coord = g
+                            .inflight
+                            .get(&request_id)
+                            .is_some_and(|i| i.coordinator == *local);
+                        if !is_coord {
+                            // Still record activation for observability; only coord advances.
+                            g.pipeline_activations
+                                .entry(request_id)
+                                .or_default()
+                                .insert(act.node.clone(), act);
+                            PipelineAdvance::Wait
+                        } else {
+                            try_advance_pipeline_chain(&mut g, request_id, act)
+                        }
                     };
-                    if let Some((tail, plan, prompt, max_tokens, model, upstream)) = maybe_tail {
-                        let ir = Envelope::new(
-                            local.clone(),
-                            Message::InferRequest {
-                                request_id,
-                                model,
-                                prompt,
-                                max_tokens,
-                                plan,
-                                is_tail: true,
-                                upstream_activations: upstream,
-                            },
-                        );
-                        let _ = self.send_to(&tail, ir).await;
+                    match next {
+                        PipelineAdvance::NextNonTail {
+                            node,
+                            plan,
+                            prompt,
+                            max_tokens,
+                            model,
+                            upstream,
+                        } => {
+                            let ir = Envelope::new(
+                                local.clone(),
+                                Message::InferRequest {
+                                    request_id,
+                                    model,
+                                    prompt,
+                                    max_tokens,
+                                    plan,
+                                    is_tail: false,
+                                    upstream_activations: upstream,
+                                },
+                            );
+                            let _ = self.send_to(&node, ir).await;
+                        }
+                        PipelineAdvance::Tail {
+                            tail,
+                            plan,
+                            prompt,
+                            max_tokens,
+                            model,
+                            upstream,
+                        } => {
+                            let ir = Envelope::new(
+                                local.clone(),
+                                Message::InferRequest {
+                                    request_id,
+                                    model,
+                                    prompt,
+                                    max_tokens,
+                                    plan,
+                                    is_tail: true,
+                                    upstream_activations: upstream,
+                                },
+                            );
+                            let _ = self.send_to(&tail, ir).await;
+                        }
+                        PipelineAdvance::Wait => {}
                     }
                     return Ok(());
                 }
@@ -1287,27 +1354,42 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Record a non-tail activation and claim the **exactly-once** multi-donor tail dispatch.
-///
-/// Returns dispatch material only the first time all non-tail activations are present
-/// and `InflightRequest.tail_dispatched` was still false (sets the latch).
-fn try_claim_pipeline_tail(
+/// Result of advancing the sequential multi-stage pipeline after one non-tail InferDone.
+enum PipelineAdvance {
+    /// Wait for more stages (or duplicate InferDone).
+    Wait,
+    /// Dispatch the next non-tail with prior activations as upstream.
+    NextNonTail {
+        node: NodeId,
+        plan: ClusterPlan,
+        prompt: String,
+        max_tokens: u32,
+        model: String,
+        upstream: Vec<joule_proto::ShardActivation>,
+    },
+    /// Exactly-once tail dispatch with full upstream set.
+    Tail {
+        tail: NodeId,
+        plan: ClusterPlan,
+        prompt: String,
+        max_tokens: u32,
+        model: String,
+        upstream: Vec<joule_proto::ShardActivation>,
+    },
+}
+
+/// Record a non-tail activation; either dispatch the next sequential stage or the tail.
+fn try_advance_pipeline_chain(
     g: &mut PeerBusInner,
     request_id: Uuid,
     act: joule_proto::ShardActivation,
-) -> Option<(
-    NodeId,
-    ClusterPlan,
-    String,
-    u32,
-    String,
-    Vec<joule_proto::ShardActivation>,
-)> {
-    // Fail closed if already dispatched or no agreed plan.
+) -> PipelineAdvance {
     {
-        let inf = g.inflight.get(&request_id)?;
+        let Some(inf) = g.inflight.get(&request_id) else {
+            return PipelineAdvance::Wait;
+        };
         if inf.tail_dispatched || inf.plan.is_none() {
-            return None;
+            return PipelineAdvance::Wait;
         }
     }
     g.pipeline_activations
@@ -1316,11 +1398,17 @@ fn try_claim_pipeline_tail(
         .insert(act.node.clone(), act);
 
     let (plan, prompt, max_tokens, model, tail) = {
-        let inf = g.inflight.get(&request_id)?;
-        let plan = inf.plan.as_ref()?.clone();
-        let tail = plan.shards.last()?.node.clone();
+        let Some(inf) = g.inflight.get(&request_id) else {
+            return PipelineAdvance::Wait;
+        };
+        let Some(plan) = inf.plan.as_ref() else {
+            return PipelineAdvance::Wait;
+        };
+        let Some(tail) = plan.shards.last().map(|s| s.node.clone()) else {
+            return PipelineAdvance::Wait;
+        };
         (
-            plan,
+            plan.clone(),
             inf.prompt.clone(),
             inf.max_tokens,
             inf.model.clone(),
@@ -1329,41 +1417,54 @@ fn try_claim_pipeline_tail(
     };
     let need = joule_cluster::non_tail_nodes(&plan, &tail);
     if need.is_empty() {
-        return None;
+        return PipelineAdvance::Wait;
     }
-    let got = g
-        .pipeline_activations
-        .get(&request_id)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    if got < need.len() {
-        return None;
+    // Ordered prefix of completed activations.
+    let mut upstream: Vec<joule_proto::ShardActivation> = Vec::new();
+    for n in &need {
+        if let Some(a) = g
+            .pipeline_activations
+            .get(&request_id)
+            .and_then(|m| m.get(n).cloned())
+        {
+            upstream.push(a);
+        } else {
+            break;
+        }
     }
-    // Claim latch before building upstream (serializes concurrent InferDone handlers).
+    if upstream.len() < need.len() {
+        // Dispatch next sequential non-tail with prior activations.
+        if let Some(next) = joule_cluster::next_non_tail_node(&plan, &tail, upstream.len()) {
+            return PipelineAdvance::NextNonTail {
+                node: next,
+                plan,
+                prompt,
+                max_tokens,
+                model,
+                upstream,
+            };
+        }
+        return PipelineAdvance::Wait;
+    }
+    // All non-tails done → exactly-once tail.
     {
-        let inf = g.inflight.get_mut(&request_id)?;
+        let Some(inf) = g.inflight.get_mut(&request_id) else {
+            return PipelineAdvance::Wait;
+        };
         if inf.tail_dispatched {
-            return None;
+            return PipelineAdvance::Wait;
         }
         inf.tail_dispatched = true;
     }
-    let upstream: Vec<_> = need
-        .iter()
-        .filter_map(|n| {
-            g.pipeline_activations
-                .get(&request_id)
-                .and_then(|m| m.get(n).cloned())
-        })
-        .collect();
-    if upstream.len() != need.len() {
-        // Incomplete set despite count — un-claim so a later complete set can retry.
-        if let Some(inf) = g.inflight.get_mut(&request_id) {
-            inf.tail_dispatched = false;
-        }
-        return None;
-    }
     *g.tail_dispatch_counts.entry(request_id).or_insert(0) += 1;
-    Some((tail, plan, prompt, max_tokens, model, upstream))
+    PipelineAdvance::Tail {
+        tail,
+        plan,
+        prompt,
+        max_tokens,
+        model,
+        upstream,
+    }
 }
 
 /// Mirror mesh donors into the local Cluster for stream-slot accounting.

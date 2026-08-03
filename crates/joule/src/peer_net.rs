@@ -211,7 +211,10 @@ async fn handle_peer_session(
         match env.msg {
             Message::InferRequest { .. } => {
                 // Peer-direct infer hop: run shard Engine and reply InferDone on this socket.
-                let reply = joule_control::agent_handle_infer(&env, engine.as_ref())
+                let opts = joule_control::InferAgentOpts {
+                    require_band_weights: engine.has_resident_weights() || engine.is_model_loaded(),
+                };
+                let reply = joule_control::agent_handle_infer_with(&env, engine.as_ref(), opts)
                     .await
                     .context("peer InferRequest")?;
                 let reply = Envelope::new(node_id.clone(), reply.msg);

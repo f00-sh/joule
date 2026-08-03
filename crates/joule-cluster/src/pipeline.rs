@@ -153,6 +153,77 @@ pub fn concat_upstream_payloads(
     Ok(out)
 }
 
+/// Concatenate a **prefix** of pipeline activations (prior stages only).
+/// Used by sequential multi-stage dispatch for mid-chain non-tails.
+pub fn concat_prior_payloads(upstream: &[ShardActivation]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    for act in upstream {
+        let p = decode_payload(act)?;
+        if p.len() < 16 {
+            return Err(format!("prior stage tensor too small from {}", act.node));
+        }
+        out.extend(p);
+    }
+    Ok(out)
+}
+
+/// Verify that `upstream` is exactly the ordered prefix of non-tails of length `prefix_len`.
+pub fn verify_prefix_activations(
+    plan: &ClusterPlan,
+    tail: &NodeId,
+    upstream: &[ShardActivation],
+    prefix_len: usize,
+) -> Result<(), String> {
+    let expected = non_tail_nodes(plan, tail);
+    if prefix_len > expected.len() {
+        return Err(format!(
+            "prefix_len {prefix_len} > non-tail count {}",
+            expected.len()
+        ));
+    }
+    if upstream.len() != prefix_len {
+        return Err(format!(
+            "pipeline prefix count {} != expected {prefix_len}",
+            upstream.len()
+        ));
+    }
+    for (i, node) in expected.iter().take(prefix_len).enumerate() {
+        let got = upstream
+            .get(i)
+            .ok_or_else(|| format!("missing prefix activation index {i}"))?;
+        if &got.node != node {
+            return Err(format!(
+                "prefix order mismatch at {i}: got {} want {node}",
+                got.node
+            ));
+        }
+        let shard = plan
+            .shards
+            .iter()
+            .find(|s| &s.node == node)
+            .ok_or_else(|| format!("node {node} not in plan"))?;
+        let ls = shard.layer_start.unwrap_or(0);
+        let le = shard.layer_end.unwrap_or(ls);
+        if got.layer_start != ls || got.layer_end != le {
+            return Err(format!(
+                "prefix layer band mismatch for {node}: got {}-{} want {ls}-{le}",
+                got.layer_start, got.layer_end
+            ));
+        }
+        let payload = decode_payload(got)?;
+        if payload.len() < 16 {
+            return Err(format!("stage tensor too small from {node}"));
+        }
+    }
+    Ok(())
+}
+
+/// Next non-tail node after `completed` prior activations (sequential chain).
+pub fn next_non_tail_node(plan: &ClusterPlan, tail: &NodeId, completed: usize) -> Option<NodeId> {
+    let need = non_tail_nodes(plan, tail);
+    need.get(completed).cloned()
+}
+
 /// Verify every non-tail shard produced a real stage tensor + matching commitment.
 pub fn verify_upstream_activations(
     plan: &ClusterPlan,
@@ -283,6 +354,66 @@ mod tests {
             "OBSERVE real-pp: payload_len={} hex={}",
             payload.len(),
             &act.activation_hex[..16]
+        );
+    }
+
+    #[test]
+    fn sequential_prefix_and_next_non_tail() {
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let c = NodeId::new();
+        let plan = ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            pool_mem_mib: 12288,
+            model_layers: 93,
+            shards: vec![
+                ShardAssignment {
+                    node: a.clone(),
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(0),
+                    layer_end: Some(30),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 4096,
+                    mem_fraction_ppm: 333_333,
+                },
+                ShardAssignment {
+                    node: b.clone(),
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(31),
+                    layer_end: Some(60),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 4096,
+                    mem_fraction_ppm: 333_333,
+                },
+                ShardAssignment {
+                    node: c.clone(),
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(61),
+                    layer_end: Some(92),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 4096,
+                    mem_fraction_ppm: 333_334,
+                },
+            ],
+        };
+        let need = non_tail_nodes(&plan, &c);
+        assert_eq!(need, vec![a.clone(), b.clone()]);
+        assert_eq!(next_non_tail_node(&plan, &c, 0), Some(a.clone()));
+        assert_eq!(next_non_tail_node(&plan, &c, 1), Some(b.clone()));
+        assert_eq!(next_non_tail_node(&plan, &c, 2), None);
+        let p0 = b"JST1-stage0-payload-bytes-xxxxxx".to_vec();
+        let act0 = activation_from_payload(a, 0, 30, &p0).unwrap();
+        verify_prefix_activations(&plan, &c, std::slice::from_ref(&act0), 1).unwrap();
+        assert!(verify_prefix_activations(&plan, &c, std::slice::from_ref(&act0), 2).is_err());
+        let prior = concat_prior_payloads(std::slice::from_ref(&act0)).unwrap();
+        assert_eq!(prior, p0);
+        eprintln!(
+            "OBSERVE seq-chain: non_tails=2 next0={} next1_done prefix_ok",
+            need[0]
         );
     }
 }

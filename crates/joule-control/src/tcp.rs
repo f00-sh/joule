@@ -1072,11 +1072,25 @@ async fn fanout_infer(
     let peer_direct = joule_mesh::prefer_peer_direct_infer(&shard_addrs);
     info!(peer_direct, shards = plan.shards.len(), "infer fanout path");
 
-    // Phase 1: non-tail pipeline stages → real activation commitments (not empty ACK only).
+    // Sequential multi-stage chain: each non-tail (layer order) receives prior
+    // activations as upstream; first stage has empty upstream.
     let non_tails = joule_cluster::non_tail_nodes(&plan, &tail);
     let mut upstream: Vec<joule_proto::ShardActivation> = Vec::new();
     let mut sent = 0usize;
-    for node in &non_tails {
+    for (stage_i, node) in non_tails.iter().enumerate() {
+        if stage_i > 0 {
+            if let Err(e) =
+                joule_cluster::verify_prefix_activations(&plan, &tail, &upstream, stage_i)
+            {
+                let mut g = app.state.write().await;
+                g.pending.remove(&request_id);
+                if stream_reserved {
+                    g.cluster.release_stream(&plan);
+                    g.wake_scheduler();
+                }
+                return Err(format!("pipeline mid-chain handoff failed: {e}"));
+            }
+        }
         let env = Envelope::new(
             node.clone(),
             Message::InferRequest {
@@ -1086,7 +1100,8 @@ async fn fanout_infer(
                 max_tokens,
                 plan: plan.clone(),
                 is_tail: false,
-                upstream_activations: vec![],
+                // Prior stages only (sequential PP), not empty parallel fanout.
+                upstream_activations: upstream.clone(),
             },
         );
         let idx = plan.shards.iter().position(|s| &s.node == node);
@@ -1155,9 +1170,27 @@ async fn fanout_infer(
             sent += 1;
             if let Some(a) = got_act {
                 upstream.push(a);
+            } else {
+                let mut g = app.state.write().await;
+                g.pending.remove(&request_id);
+                if stream_reserved {
+                    g.cluster.release_stream(&plan);
+                    g.wake_scheduler();
+                }
+                return Err(format!(
+                    "pipeline sequential stage {stage_i} from {node}: missing activation payload"
+                ));
             }
         } else {
-            warn!(node = %node, "non-tail shard agent not connected");
+            let mut g = app.state.write().await;
+            g.pending.remove(&request_id);
+            if stream_reserved {
+                g.cluster.release_stream(&plan);
+                g.wake_scheduler();
+            }
+            return Err(format!(
+                "pipeline sequential stage {stage_i}: non-tail {node} not connected"
+            ));
         }
     }
     if !non_tails.is_empty() {
@@ -1174,7 +1207,7 @@ async fn fanout_infer(
         }
         info!(
             stages = upstream.len(),
-            "pipeline activations verified; dispatching tail"
+            "pipeline sequential activations verified; dispatching tail"
         );
     }
 
@@ -1449,11 +1482,27 @@ pub async fn challenge_loop(app: App) {
     }
 }
 
-/// Agent-side: run this node's **layer-band pipeline stage**.
-///
-/// Non-tail: `engine.stage_layers` → real activation tensor payload + commitment.
-/// Tail: verify upstream payloads, then stage with concatenated upstream (layer-sliced).
+/// Options for agent-side infer (production vs stub/lab fixtures).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InferAgentOpts {
+    /// When true, `stage_layers` requires preferred band weights loaded (ClusterEngine path).
+    pub require_band_weights: bool,
+}
+
+/// Agent-side: run this node's **layer-band pipeline stage** (stub-safe defaults).
 pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
+    agent_handle_infer_with(env, engine, InferAgentOpts::default()).await
+}
+
+/// Agent-side infer with production options (e.g. band-weight gate after prepare).
+///
+/// Non-tail: sequential chain — stage receives prior activations as upstream.
+/// Tail: verify full upstream set, then layer-sliced stage.
+pub async fn agent_handle_infer_with(
+    env: &Envelope,
+    engine: &impl Engine,
+    opts: InferAgentOpts,
+) -> Result<Envelope> {
     match &env.msg {
         Message::InferRequest {
             request_id,
@@ -1474,18 +1523,35 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
             let le = shard.layer_end.unwrap_or(ls);
             if !*is_tail {
                 let required = joule_cluster::preferred_weight_files(ls, le).unwrap_or_default();
+                // Mid-chain non-tails must see prior stage tensor payloads.
+                let require_up = !upstream_activations.is_empty();
+                if require_up {
+                    if let Err(e) = joule_cluster::concat_prior_payloads(upstream_activations) {
+                        return Ok(Envelope::new(
+                            env.from.clone(),
+                            Message::InferError {
+                                request_id: *request_id,
+                                error: format!("pipeline mid-chain activation: {e}"),
+                            },
+                        ));
+                    }
+                }
+                let upstream_bytes = if upstream_activations.is_empty() {
+                    vec![]
+                } else {
+                    joule_cluster::concat_prior_payloads(upstream_activations)
+                        .map_err(|e| anyhow::anyhow!(e))?
+                };
                 let stage = engine
                     .stage_layers(joule_runtime::StageRequest {
                         model: model.clone(),
                         prompt: prompt.clone(),
                         layer_start: ls,
                         layer_end: le,
-                        upstream: vec![],
+                        upstream: upstream_bytes,
                         is_tail: false,
-                        require_upstream: false,
-                        // Prefer files for this shard band always (call site).
-                        // Gate is off for StubEngine unit/e2e; ClusterEngine tests set true.
-                        require_band_weights: false,
+                        require_upstream: require_up,
+                        require_band_weights: opts.require_band_weights,
                         required_weight_files: required,
                     })
                     .await
@@ -1566,7 +1632,7 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
                     upstream: upstream_bytes,
                     is_tail: true,
                     require_upstream: true,
-                    require_band_weights: false,
+                    require_band_weights: opts.require_band_weights,
                     required_weight_files: required,
                 })
                 .await
@@ -1862,5 +1928,276 @@ mod tests {
             }
             other => panic!("expected InferError without upstream, got {other:?}"),
         }
+    }
+
+    fn demo_plan_3(layers: u32) -> ClusterPlan {
+        let a = NodeId::new();
+        let b = NodeId::new();
+        let c = NodeId::new();
+        ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            shards: vec![
+                ShardAssignment {
+                    node: a,
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(0),
+                    layer_end: Some(layers / 3),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 4096,
+                    mem_fraction_ppm: 333_333,
+                },
+                ShardAssignment {
+                    node: b,
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(layers / 3 + 1),
+                    layer_end: Some(2 * layers / 3),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 4096,
+                    mem_fraction_ppm: 333_333,
+                },
+                ShardAssignment {
+                    node: c,
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(2 * layers / 3 + 1),
+                    layer_end: Some(layers.saturating_sub(1)),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 4096,
+                    mem_fraction_ppm: 333_334,
+                },
+            ],
+            pool_mem_mib: 12288,
+            model_layers: layers,
+        }
+    }
+
+    /// ≥3 shards sequential: stage0 empty upstream; stage1 consumes stage0; tail full chain.
+    #[tokio::test]
+    async fn sequential_three_shard_chain_via_agent_handle_infer() {
+        let plan = demo_plan_3(joule_runtime::placement_model_layers());
+        let eng = StubEngine::new();
+        eng.load_plan(&plan).await.unwrap();
+        let rid = Uuid::new_v4();
+        let prompt = "seq-chain-3";
+
+        // Stage 0 (first non-tail): empty upstream.
+        let env0 = Envelope::new(
+            plan.shards[0].node.clone(),
+            Message::InferRequest {
+                request_id: rid,
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: false,
+                upstream_activations: vec![],
+            },
+        );
+        let r0 = agent_handle_infer(&env0, &eng).await.expect("stage0");
+        let act0 = match r0.msg {
+            Message::InferDone {
+                activation_hex,
+                activation_payload_b64,
+                activation_layer_start,
+                activation_layer_end,
+                ..
+            } => {
+                assert!(!activation_payload_b64.is_empty());
+                joule_proto::ShardActivation {
+                    node: plan.shards[0].node.clone(),
+                    layer_start: activation_layer_start.unwrap_or(0),
+                    layer_end: activation_layer_end.unwrap_or(0),
+                    activation_hex,
+                    payload_b64: activation_payload_b64,
+                }
+            }
+            other => panic!("stage0 InferDone expected: {other:?}"),
+        };
+        let up0 = joule_cluster::decode_payload(&act0).unwrap();
+        assert!(up0.starts_with(b"JST1"));
+        eprintln!(
+            "OBSERVE seq-multi-stage: stage0 upstream_in=0 act_len={}",
+            up0.len()
+        );
+
+        // Stage 1 (second non-tail): prior activation required.
+        let env1 = Envelope::new(
+            plan.shards[1].node.clone(),
+            Message::InferRequest {
+                request_id: rid,
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: false,
+                upstream_activations: vec![act0.clone()],
+            },
+        );
+        let r1 = agent_handle_infer(&env1, &eng).await.expect("stage1");
+        let act1 = match r1.msg {
+            Message::InferDone {
+                activation_hex,
+                activation_payload_b64,
+                activation_layer_start,
+                activation_layer_end,
+                ..
+            } => {
+                assert!(!activation_payload_b64.is_empty());
+                joule_proto::ShardActivation {
+                    node: plan.shards[1].node.clone(),
+                    layer_start: activation_layer_start.unwrap_or(0),
+                    layer_end: activation_layer_end.unwrap_or(0),
+                    activation_hex,
+                    payload_b64: activation_payload_b64,
+                }
+            }
+            other => panic!("stage1 InferDone expected: {other:?}"),
+        };
+        let up1 = joule_cluster::decode_payload(&act1).unwrap();
+        assert_ne!(up0, up1, "mid stage must depend on prior activation");
+        eprintln!(
+            "OBSERVE seq-multi-stage: stage1 upstream_in={} act_len={}",
+            up0.len(),
+            up1.len()
+        );
+
+        // Mid-chain missing prior fails closed.
+        let env_bad = Envelope::new(
+            plan.shards[1].node.clone(),
+            Message::InferRequest {
+                request_id: Uuid::new_v4(),
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: false,
+                upstream_activations: vec![joule_proto::ShardActivation {
+                    node: plan.shards[0].node.clone(),
+                    layer_start: 0,
+                    layer_end: 1,
+                    activation_hex: "00".repeat(32),
+                    payload_b64: String::new(),
+                }],
+            },
+        );
+        match agent_handle_infer(&env_bad, &eng)
+            .await
+            .expect("bad mid")
+            .msg
+        {
+            Message::InferError { error, .. } => {
+                assert!(
+                    error.contains("mid-chain")
+                        || error.contains("payload")
+                        || error.contains("activation"),
+                    "{error}"
+                );
+                eprintln!("OBSERVE seq-multi-stage: mid-chain fail-closed: {error}");
+            }
+            other => panic!("expected InferError mid-chain, got {other:?}"),
+        }
+
+        // Tail with full chain.
+        let env_t = Envelope::new(
+            plan.shards[2].node.clone(),
+            Message::InferRequest {
+                request_id: rid,
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: true,
+                upstream_activations: vec![act0, act1],
+            },
+        );
+        match agent_handle_infer(&env_t, &eng).await.expect("tail").msg {
+            Message::InferDone { text, .. } => {
+                assert!(text.contains("joule-pipeline-stage"));
+                assert!(text.contains("upstream_bytes="));
+                assert!(!text.contains("upstream_bytes=0]"));
+                eprintln!(
+                    "OBSERVE seq-multi-stage: shards=3 tail_text_len={} ok",
+                    text.len()
+                );
+            }
+            other => panic!("tail InferDone expected: {other:?}"),
+        }
+    }
+
+    /// Production path: `require_band_weights` after prepare_and_install (shipped agent opts).
+    #[tokio::test]
+    async fn agent_production_band_gate_after_prepare() {
+        use joule_runtime::{ClusterEngine, ManifestFile, WeightsStore};
+        use std::fs;
+
+        let eng = ClusterEngine::new();
+        let plan = demo_plan(93);
+        eng.load_plan(&plan).await.unwrap();
+        let env = Envelope::new(
+            plan.shards[0].node.clone(),
+            Message::InferRequest {
+                request_id: Uuid::new_v4(),
+                model: CLUSTER_MODEL.into(),
+                prompt: "band-gate-prod".into(),
+                max_tokens: 8,
+                plan: plan.clone(),
+                is_tail: false,
+                upstream_activations: vec![],
+            },
+        );
+        let opts_on = InferAgentOpts {
+            require_band_weights: true,
+        };
+        // No prepare → stage_layers fails closed (Err from agent_handle_infer_with).
+        let fail = agent_handle_infer_with(&env, &eng, opts_on).await;
+        let fail_dbg = format!("{fail:?}");
+        assert!(
+            fail.is_err()
+                && (fail_dbg.contains("missing band weights")
+                    || fail_dbg.contains("band weights")
+                    || fail_dbg.contains("not loaded")),
+            "must fail without prepare: {fail_dbg}"
+        );
+        eprintln!("OBSERVE agent-band-gate: fail without prepare: {fail_dbg}");
+
+        // Shipped prepare_and_install (lab-tiny) → resident weights → gate allows lab path.
+        let dir = std::env::temp_dir().join(format!("joule-agent-band-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WeightsStore::new(&dir);
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.model("kimi-open").unwrap();
+        let lab = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "lab-tiny")
+            .unwrap();
+        let report = joule_runtime::prepare_and_install(&store, &eng, spec, lab).expect("prepare");
+        assert!(eng.has_resident_weights() || eng.is_model_loaded());
+        // Mirror production agent: opts from has_resident_weights after prepare.
+        let opts_prod = InferAgentOpts {
+            require_band_weights: eng.has_resident_weights() || eng.is_model_loaded(),
+        };
+        assert!(opts_prod.require_band_weights);
+        let ok = agent_handle_infer_with(&env, &eng, opts_prod)
+            .await
+            .expect("stage after prepare");
+        match ok.msg {
+            Message::InferDone {
+                activation_payload_b64,
+                ..
+            } => {
+                assert!(!activation_payload_b64.is_empty());
+                eprintln!(
+                    "OBSERVE agent-band-gate: after prepare require_band_weights=true ok tensors={} bytes={}",
+                    report.tensors, report.bytes_resident
+                );
+            }
+            other => panic!("expected InferDone after prepare: {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

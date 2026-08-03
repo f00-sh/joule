@@ -38,8 +38,8 @@ pub use lease::{
 };
 pub use pipeline::{
     activation_from_payload, activation_hex, activation_preimage, commitment_hex,
-    concat_upstream_payloads, decode_payload, non_tail_nodes, verify_upstream_activations,
-    DOMAIN_ACTIVATION,
+    concat_prior_payloads, concat_upstream_payloads, decode_payload, next_non_tail_node,
+    non_tail_nodes, verify_prefix_activations, verify_upstream_activations, DOMAIN_ACTIVATION,
 };
 pub use plan_agree::{on_accept, PlanAcceptEffect, PlanAgreeView};
 pub use plan_sign::{

@@ -256,15 +256,33 @@ impl Engine for ClusterEngine {
                     req.layer_start, req.layer_end
                 )));
             };
-            for f in &need {
-                if !lm
+            let match_one = |f: &str| {
+                lm.loaded_file_basenames
+                    .iter()
+                    .any(|b| b == f || b.ends_with(f))
+            };
+            let all_need = !need.is_empty() && need.iter().all(|f| match_one(f));
+            let any_need = need.iter().any(|f| match_one(f));
+            if all_need {
+                // K3/band-exact load satisfied.
+            } else if any_need {
+                // Partial preferred set → fail closed (missing sibling shard file).
+                let missing: Vec<_> = need.iter().filter(|f| !match_one(f)).cloned().collect();
+                return Err(RuntimeError::Infer(format!(
+                    "missing band weights: incomplete preferred set for layers {}-{} missing={missing:?} have={:?}",
+                    req.layer_start, req.layer_end, lm.loaded_file_basenames
+                )));
+            } else {
+                // Preferred names are K3-class but engine holds lab quant files after prepare:
+                // require real resident weights (not armed-only marker).
+                let real = lm
                     .loaded_file_basenames
                     .iter()
-                    .any(|b| b == f || b.ends_with(f.as_str()))
-                {
+                    .any(|b| b != "__joule_armed__" && !b.is_empty());
+                if !real {
                     return Err(RuntimeError::Infer(format!(
-                        "missing band weights: {f} not loaded for layers {}-{} (have {:?})",
-                        req.layer_start, req.layer_end, lm.loaded_file_basenames
+                        "missing band weights: no staged files for layers {}-{} (preferred {need:?})",
+                        req.layer_start, req.layer_end
                     )));
                 }
             }

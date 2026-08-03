@@ -1974,9 +1974,19 @@ async fn run_agent(
                         }
                     }
                     Message::InferRequest { .. } => {
-                        let reply = joule_control::agent_handle_infer(&env, engine.as_ref())
-                            .await
-                            .context("handle infer")?;
+                        // Production agent: after prepare_and_install, ClusterEngine has
+                        // resident weights → require_band_weights on multi-shard stages.
+                        let opts = joule_control::InferAgentOpts {
+                            require_band_weights: engine.has_resident_weights()
+                                || engine.is_model_loaded(),
+                        };
+                        let reply = joule_control::agent_handle_infer_with(
+                            &env,
+                            engine.as_ref(),
+                            opts,
+                        )
+                        .await
+                        .context("handle infer")?;
                         let reply = Envelope::new(node_id.clone(), reply.msg);
                         writer.write_all(&encode_line(&reply)?).await?;
                     }

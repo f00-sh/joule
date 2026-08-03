@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-08-03
+
+Sequential multi-stage pipeline parallel fix, production band-weight gate, layer-band load.
+
+### Added
+- **Sequential multi-stage PP:** non-tail shards run in layer order; each mid-chain stage receives prior activation payloads (not empty parallel fanout); tail still verifies the full upstream set
+- **Production band-weight gate:** after `prepare_and_install`, agent/peer-infer uses `require_band_weights: true` on `stage_layers` (ClusterEngine fails closed without resident weights)
+- `load_model_for_band` / `band_files_ready` / preferred file map on StageRequest (from 0.1.10 follow-through)
+
+### Changed
+- Mesh peer-bus dispatches first non-tail only, then advances chain or exactly-once tail (coordinator only)
+- Lab quant after prepare still satisfies band gate when preferred K3 basenames are not the loaded set
+
+### Fixed
+- Mid-chain missing/corrupt activation payloads fail closed on agent path
+
 ## [0.1.10] — 2026-08-03
 
 Pipeline activation handoff, honest K3 pin path, file↔layer design map.

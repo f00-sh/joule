@@ -13,7 +13,7 @@
 class Joule < Formula
   desc "Donate idle compute, earn millijoules, use open-weight AI"
   homepage "https://joule.f00.sh/"
-  version "0.0.0"
+  version "0.1.11"
   license "MIT"
 
   on_macos do
