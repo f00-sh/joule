@@ -2197,6 +2197,7 @@ name = "joule-mesh"
 version = "0.1.10"
 dependencies = [
  "anyhow",
+ "async-trait",
  "ed25519-dalek",
  "hex",
  "joule-cluster",
