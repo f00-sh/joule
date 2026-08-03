@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-08-03
+
+Close-out of pure-Rust band weight stage track: integrated sequential PP + JST3 matmul.
+
+### Added
+- **Integrated sequential JST3 chain:** multi-donor layer-ordered stages with ClusterEngine f32 weights emit **JST3** matmul activations (band-scoped multi-layer stack); mid-chain fail-closed; weight diagonal change alters activation
+- Weight-byte stage path (**JST2**), pure-Rust matmul (**JST3**), band-scoped tensor select + span-scaled stack (post-0.1.11 on main, shipped here)
+
+### Changed
+- Production path keeps `require_band_weights` after prepare; stub gate-off unchanged
+- Docs honesty: pure-Rust toy geometry — **not** full Kimi multi-hundred-GB matmul
+
+### Fixed
+- (integrated proof for sequential + weight-resident engine)
+
 ## [0.1.11] — 2026-08-03
 
 Sequential multi-stage pipeline parallel fix, production band-weight gate, layer-band load.

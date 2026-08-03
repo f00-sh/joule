@@ -2200,4 +2200,260 @@ mod tests {
         }
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// Integrated criterion: sequential ≥3-shard path + ClusterEngine f32 weights → JST3 matmul.
+    #[tokio::test]
+    async fn sequential_jst3_chain_weight_resident_production_path() {
+        use joule_runtime::{ClusterEngine, LoadedModel, MATMUL_DIM};
+        use std::collections::HashMap;
+
+        fn f32_diag_model(scale: f32) -> LoadedModel {
+            let need = MATMUL_DIM * MATMUL_DIM + MATMUL_DIM;
+            let mut w = vec![0.0f32; need];
+            for i in 0..MATMUL_DIM {
+                w[i * MATMUL_DIM + i] = scale;
+                w[MATMUL_DIM * MATMUL_DIM + i] = 0.01 * (i as f32);
+            }
+            let mut bytes = Vec::with_capacity(need * 4);
+            for v in &w {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            let mut tensors = HashMap::new();
+            tensors.insert("blk.0.weight".into(), bytes);
+            let mut sources = HashMap::new();
+            sources.insert("blk.0.weight".into(), "model.safetensors".into());
+            LoadedModel {
+                model_id: CLUSTER_MODEL.into(),
+                quant: "f32-diag".into(),
+                source_dir: std::path::PathBuf::from("/tmp/joule-f32-diag"),
+                tensors,
+                tensor_info: vec![],
+                bytes_resident: (need * 4) as u64,
+                loaded_at_unix: 0,
+                loaded_file_basenames: vec!["model.safetensors".into()],
+                tensor_sources: sources,
+            }
+        }
+
+        fn payload_bytes(act: &joule_proto::ShardActivation) -> Vec<u8> {
+            joule_cluster::decode_payload(act).expect("decode payload")
+        }
+
+        fn jst3_stack_depth(payload: &[u8]) -> u32 {
+            assert!(
+                payload.starts_with(b"JST3"),
+                "want JST3 got {:?}",
+                &payload[..4.min(payload.len())]
+            );
+            // magic(4)+ls(4)+le(4)+dim(4)=16 → layers_applied
+            u32::from_le_bytes(payload[16..20].try_into().unwrap())
+        }
+
+        let eng = ClusterEngine::new();
+        let plan = demo_plan_3(joule_runtime::placement_model_layers());
+        eng.load_plan(&plan).await.unwrap();
+        eng.install_loaded(f32_diag_model(1.0));
+        assert!(eng.has_resident_weights());
+        let opts = InferAgentOpts {
+            require_band_weights: true,
+        };
+        let rid = Uuid::new_v4();
+        let prompt = "full-jst3-chain";
+
+        // Stage 0: empty upstream, production gate on → JST3.
+        let env0 = Envelope::new(
+            plan.shards[0].node.clone(),
+            Message::InferRequest {
+                request_id: rid,
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: false,
+                upstream_activations: vec![],
+            },
+        );
+        let r0 = agent_handle_infer_with(&env0, &eng, opts)
+            .await
+            .expect("stage0");
+        let act0 = match r0.msg {
+            Message::InferDone {
+                activation_hex,
+                activation_payload_b64,
+                activation_layer_start,
+                activation_layer_end,
+                ..
+            } => joule_proto::ShardActivation {
+                node: plan.shards[0].node.clone(),
+                layer_start: activation_layer_start.unwrap_or(0),
+                layer_end: activation_layer_end.unwrap_or(0),
+                activation_hex,
+                payload_b64: activation_payload_b64,
+            },
+            other => panic!("stage0 InferDone: {other:?}"),
+        };
+        let p0 = payload_bytes(&act0);
+        assert!(p0.starts_with(b"JST3"));
+        let stack0 = jst3_stack_depth(&p0);
+        let span0 = act0
+            .layer_end
+            .saturating_sub(act0.layer_start)
+            .saturating_add(1);
+        assert_eq!(stack0, span0.clamp(1, 32));
+        eprintln!(
+            "OBSERVE full-jst3-chain: stage0 upstream_in=0 magic=JST3 stack={stack0} span={span0}"
+        );
+
+        // Stage 1: prior activation required; JST3 depends on upstream.
+        let env1 = Envelope::new(
+            plan.shards[1].node.clone(),
+            Message::InferRequest {
+                request_id: rid,
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: false,
+                upstream_activations: vec![act0.clone()],
+            },
+        );
+        let r1 = agent_handle_infer_with(&env1, &eng, opts)
+            .await
+            .expect("stage1");
+        let act1 = match r1.msg {
+            Message::InferDone {
+                activation_hex,
+                activation_payload_b64,
+                activation_layer_start,
+                activation_layer_end,
+                ..
+            } => joule_proto::ShardActivation {
+                node: plan.shards[1].node.clone(),
+                layer_start: activation_layer_start.unwrap_or(0),
+                layer_end: activation_layer_end.unwrap_or(0),
+                activation_hex,
+                payload_b64: activation_payload_b64,
+            },
+            other => panic!("stage1 InferDone: {other:?}"),
+        };
+        let p1 = payload_bytes(&act1);
+        assert!(p1.starts_with(b"JST3"));
+        assert_ne!(p0, p1, "mid stage must depend on prior JST3 upstream");
+        let stack1 = jst3_stack_depth(&p1);
+        eprintln!(
+            "OBSERVE full-jst3-chain: stage1 upstream_in={} stack={} act_len={}",
+            p0.len(),
+            stack1,
+            p1.len()
+        );
+
+        // Wider span (shard0 often wider or different) vs narrow mid → stack differs when spans differ.
+        assert!(
+            stack0 != stack1
+                || span0
+                    != act1
+                        .layer_end
+                        .saturating_sub(act1.layer_start)
+                        .saturating_add(1),
+            "layer spans drive stack; got stack0={stack0} stack1={stack1}"
+        );
+
+        // Mid-chain corrupt prior fails closed on shipped handler.
+        let env_bad = Envelope::new(
+            plan.shards[1].node.clone(),
+            Message::InferRequest {
+                request_id: Uuid::new_v4(),
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: false,
+                upstream_activations: vec![joule_proto::ShardActivation {
+                    node: plan.shards[0].node.clone(),
+                    layer_start: 0,
+                    layer_end: 1,
+                    activation_hex: "00".repeat(32),
+                    payload_b64: String::new(),
+                }],
+            },
+        );
+        match agent_handle_infer_with(&env_bad, &eng, opts)
+            .await
+            .expect("bad mid")
+            .msg
+        {
+            Message::InferError { error, .. } => {
+                assert!(
+                    error.contains("mid-chain")
+                        || error.contains("payload")
+                        || error.contains("activation"),
+                    "{error}"
+                );
+                eprintln!("OBSERVE full-jst3-chain: mid fail-closed: {error}");
+            }
+            other => panic!("expected InferError, got {other:?}"),
+        }
+
+        // Tail: full upstream chain, production gate, JST3 + matmul text.
+        let env_t = Envelope::new(
+            plan.shards[2].node.clone(),
+            Message::InferRequest {
+                request_id: rid,
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 16,
+                plan: plan.clone(),
+                is_tail: true,
+                upstream_activations: vec![act0.clone(), act1.clone()],
+            },
+        );
+        match agent_handle_infer_with(&env_t, &eng, opts)
+            .await
+            .expect("tail")
+            .msg
+        {
+            Message::InferDone { text, .. } => {
+                assert!(text.contains("joule-pipeline-stage"));
+                assert!(text.contains("matmul") || text.contains("upstream_bytes="));
+                eprintln!(
+                    "OBSERVE full-jst3-chain: shards=3 tail_ok text_len={}",
+                    text.len()
+                );
+            }
+            other => panic!("tail InferDone: {other:?}"),
+        }
+
+        // Zero diagonal kills matmul signal → different JST3 (scale-1.0 vs 0.0).
+        eng.install_loaded(f32_diag_model(0.0));
+        let r0b = agent_handle_infer_with(&env0, &eng, opts)
+            .await
+            .expect("stage0 reweight");
+        let act0b = match r0b.msg {
+            Message::InferDone {
+                activation_hex,
+                activation_payload_b64,
+                activation_layer_start,
+                activation_layer_end,
+                ..
+            } => joule_proto::ShardActivation {
+                node: plan.shards[0].node.clone(),
+                layer_start: activation_layer_start.unwrap_or(0),
+                layer_end: activation_layer_end.unwrap_or(0),
+                activation_hex,
+                payload_b64: activation_payload_b64,
+            },
+            other => panic!("{other:?}"),
+        };
+        let p0b = payload_bytes(&act0b);
+        assert!(p0b.starts_with(b"JST3"));
+        assert_ne!(
+            p0, p0b,
+            "weight diagonal 1.0 vs 0.0 must change JST3 activation"
+        );
+        eprintln!(
+            "OBSERVE full-jst3-chain: weight_flip act0_len={} act0b_len={} differ=true",
+            p0.len(),
+            p0b.len()
+        );
+    }
 }
