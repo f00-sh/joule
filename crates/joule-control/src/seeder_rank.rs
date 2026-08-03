@@ -27,9 +27,10 @@ pub fn seeder_score(c: &SeederCandidate) -> i64 {
         s -= 200;
     }
     // Prefer local / loopback multiaddrs.
-    let local = c.multiaddrs.iter().any(|a| {
-        a.contains("127.0.0.1") || a.contains("localhost") || a.contains("::1")
-    });
+    let local = c
+        .multiaddrs
+        .iter()
+        .any(|a| a.contains("127.0.0.1") || a.contains("localhost") || a.contains("::1"));
     if local {
         s += 500;
     } else if !c.multiaddrs.is_empty() {

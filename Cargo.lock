@@ -2154,6 +2154,7 @@ dependencies = [
  "joule-cluster",
  "joule-dht",
  "joule-ledger",
+ "joule-mesh",
  "joule-proto",
  "joule-runtime",
  "rand 0.8.7",
@@ -2196,9 +2197,11 @@ name = "joule-mesh"
 version = "0.1.9"
 dependencies = [
  "anyhow",
+ "ed25519-dalek",
  "joule-cluster",
  "joule-proto",
  "joule-runtime",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "tokio",

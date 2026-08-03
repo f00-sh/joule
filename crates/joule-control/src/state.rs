@@ -218,6 +218,8 @@ pub struct ControlState {
     pub leases: joule_cluster::LeaseBook,
     /// MANIFEST digests staged + sha256 verified (content-addressed).
     pub digests_verified: bool,
+    /// NodeId → ed25519 device pubkey hex (from Hello).
+    pub node_device_pubkeys: std::collections::HashMap<NodeId, String>,
     dirty: bool,
 }
 
@@ -261,6 +263,7 @@ impl ControlState {
             notary_secret_keys: HashMap::new(),
             leases: joule_cluster::LeaseBook::default(),
             digests_verified: false,
+            node_device_pubkeys: std::collections::HashMap::new(),
             dirty: false,
         }
     }
@@ -480,6 +483,17 @@ impl ControlState {
         }
     }
 
+    pub fn set_node_device_pubkey(&mut self, id: &NodeId, pubkey_hex: &str) {
+        let pk = pubkey_hex.trim().to_ascii_lowercase();
+        if pk.len() == 64 && pk.chars().all(|c| c.is_ascii_hexdigit()) {
+            self.node_device_pubkeys.insert(id.clone(), pk);
+        }
+    }
+
+    pub fn device_pubkey(&self, id: &NodeId) -> Option<&str> {
+        self.node_device_pubkeys.get(id).map(|s| s.as_str())
+    }
+
     pub fn shared() -> SharedState {
         Self::shared_with_notify(Arc::new(Notify::new()))
     }
@@ -534,12 +548,7 @@ impl ControlState {
     }
 
     /// Release lease by request id (idempotent).
-    pub fn release_stream_lease(
-        &mut self,
-        request_id: Uuid,
-        event: &str,
-        detail: &str,
-    ) -> bool {
+    pub fn release_stream_lease(&mut self, request_id: Uuid, event: &str, detail: &str) -> bool {
         let mut book = std::mem::take(&mut self.leases);
         let ok = book.release_by_request(&mut self.cluster, request_id, event, detail);
         self.leases = book;
@@ -1008,28 +1017,41 @@ impl ControlState {
         sig_hex: &str,
         signed_at_unix_ms: u64,
     ) {
-        // Expected shards must present a valid device signature (outsiders ignored later).
+        // Expected shards: device sig must verify and match Hello-bound pubkey.
         if self
             .pending_plan_accepts
             .get(&request_id)
             .is_some_and(|p| p.expected.contains(from))
         {
-            if let Err(e) = joule_cluster::verify_plan_accept_sig(
-                from,
-                plan_id,
-                request_id,
-                accepted,
-                plan_hash_hex,
-                confirm_hex,
-                signer_pubkey_hex,
-                sig_hex,
-                signed_at_unix_ms,
-            ) {
-                let want_hash = self
-                    .pending_plan_accepts
-                    .get(&request_id)
-                    .map(|p| p.plan_hash_hex.clone())
-                    .unwrap_or_default();
+            let want_hash = self
+                .pending_plan_accepts
+                .get(&request_id)
+                .map(|p| p.plan_hash_hex.clone())
+                .unwrap_or_default();
+            let reg = self.device_pubkey(from).map(|s| s.to_string());
+            let sig_err = if signer_pubkey_hex.is_empty() || sig_hex.is_empty() {
+                Some("missing plan accept signature".to_string())
+            } else if let Some(reg_pk) = reg {
+                if reg_pk != signer_pubkey_hex.trim().to_ascii_lowercase() {
+                    Some("plan accept pubkey not bound to this node (Hello)".into())
+                } else {
+                    joule_cluster::verify_plan_accept_sig(
+                        from,
+                        plan_id,
+                        request_id,
+                        accepted,
+                        plan_hash_hex,
+                        confirm_hex,
+                        signer_pubkey_hex,
+                        sig_hex,
+                        signed_at_unix_ms,
+                    )
+                    .err()
+                }
+            } else {
+                Some("no device pubkey registered for node (Hello required)".into())
+            };
+            if let Some(e) = sig_err {
                 if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
                     if let Some(tx) = p.tx.take() {
                         let _ = tx.send(Err(format!("plan accept sig from {from}: {e}")));
@@ -1076,13 +1098,8 @@ impl ControlState {
                         let _ = tx.send(Err(detail.clone()));
                     }
                 }
-                self.leases.record_accepts(
-                    request_id,
-                    &[],
-                    event,
-                    &detail,
-                    Some(&want_hash),
-                );
+                self.leases
+                    .record_accepts(request_id, &[], event, &detail, Some(&want_hash));
             }
             joule_cluster::PlanAcceptEffect::Record { ready } => {
                 let Some(p) = self.pending_plan_accepts.get_mut(&request_id) else {

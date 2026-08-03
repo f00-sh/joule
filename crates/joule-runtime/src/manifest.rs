@@ -285,10 +285,10 @@ impl ModelSpec {
 
         let can_load_model = pool_ready && self.weights.published;
         // Live path requires verified content digests — not model_loaded flag alone.
-        let can_begin_service =
-            can_load_model && flags.model_loaded && flags.digests_verified;
+        let can_begin_service = can_load_model && flags.model_loaded && flags.digests_verified;
         // Honor digests even if operator flips service_live early.
-        let service_live_honest = flags.service_live && flags.digests_verified && flags.model_loaded;
+        let service_live_honest =
+            flags.service_live && flags.digests_verified && flags.model_loaded;
 
         let (inference_mode, message) = if service_live_honest {
             (
@@ -405,7 +405,10 @@ mod tests {
             .any(|x| x.id == "kimi-eligible" && x.reached));
         assert!(r2.weights_published);
         assert!(r2.can_load_model); // weights published + pool ready
-        assert!(!r2.can_begin_service, "needs digests_verified + model_loaded");
+        assert!(
+            !r2.can_begin_service,
+            "needs digests_verified + model_loaded"
+        );
 
         // Missing digests: service_live flag alone cannot claim live.
         let mut flags = RuntimeFlags {

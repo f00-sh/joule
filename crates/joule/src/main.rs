@@ -1451,11 +1451,17 @@ async fn run_agent(
     let mut lines = BufReader::new(reader).lines();
 
     // Signed Hello for j1… accounts so the whole pool accepts only key holders.
+    // Device key: recovery identity when present; else random process key (not NodeId-derived).
+    let device_sk = if !ident.recovery_code.is_empty() {
+        ident.signing_key()?
+    } else {
+        ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)
+    };
     let hello_msg = if ident.recovery_code.is_empty() {
         Message::Hello {
             account: account.clone(),
             caps,
-            pubkey_hex: String::new(),
+            pubkey_hex: hex::encode(device_sk.verifying_key().as_bytes()),
             sig_hex: String::new(),
             signed_at_unix_ms: 0,
         }
@@ -1530,7 +1536,7 @@ async fn run_agent(
                 }
                 let env = decode_line(line.as_bytes()).context("decode control line")?;
                 match env.msg {
-                    Message::Welcome { account: acc, api_key: key } => {
+                    Message::Welcome { account: acc, api_key: key, pool_pubkey_hex: _ } => {
                         println!("joined pool · account {acc}");
                         if let Some(ref ip) = identity_path {
                             if let Err(e) = identity::remember_api_key(ip, &key) {
@@ -1674,7 +1680,6 @@ async fn run_agent(
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0);
-                        let sk = joule_cluster::lab_signing_key_for_node(&node_id);
                         let pre = joule_cluster::plan_accept_sign_preimage(
                             &node_id,
                             plan.plan_id,
@@ -1684,7 +1689,7 @@ async fn run_agent(
                             &confirm,
                             ts,
                         );
-                        let (pk, sig) = joule_cluster::sign_preimage(&sk, &pre);
+                        let (pk, sig) = joule_cluster::sign_preimage(&device_sk, &pre);
                         let acc = Envelope::new(
                             node_id.clone(),
                             Message::PlanAccept {

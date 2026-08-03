@@ -378,12 +378,7 @@ mod tests {
         let free1 = c.scheduler_snapshot().stream_slots_free;
         assert_eq!(free1, free0 - 1);
         assert_eq!(book.active_count(), 1);
-        assert!(book.release(
-            &mut c,
-            lease.lease_id,
-            "lease_released",
-            "test done"
-        ));
+        assert!(book.release(&mut c, lease.lease_id, "lease_released", "test done"));
         assert_eq!(c.scheduler_snapshot().stream_slots_free, free0);
         assert_eq!(book.active_count(), 0);
         let trail = book.audit_for_request(rid);
@@ -420,7 +415,9 @@ mod tests {
         let rid = Uuid::new_v4();
         let ok = plan_accept_confirm_hex(plan.plan_id, rid, &node, true, &ph);
         assert!(verify_plan_accept_confirm(plan.plan_id, rid, &node, true, &ph, &ok).is_ok());
-        assert!(verify_plan_accept_confirm(plan.plan_id, rid, &node, true, &ph, "deadbeef").is_err());
+        assert!(
+            verify_plan_accept_confirm(plan.plan_id, rid, &node, true, &ph, "deadbeef").is_err()
+        );
         assert!(verify_plan_accept_confirm(plan.plan_id, rid, &node, false, &ph, &ok).is_err());
         // wrong plan hash
         assert!(verify_plan_accept_confirm(plan.plan_id, rid, &node, true, "00", &ok).is_err());
@@ -452,12 +449,7 @@ mod tests {
             "all shards confirmed",
             Some(&ph),
         );
-        assert!(book.release(
-            &mut c,
-            lease.lease_id,
-            "lease_released",
-            "infer ok"
-        ));
+        assert!(book.release(&mut c, lease.lease_id, "lease_released", "infer ok"));
         let trail = book.audit_for_request(rid);
         let events: Vec<_> = trail.iter().map(|e| e.event.as_str()).collect();
         assert_eq!(

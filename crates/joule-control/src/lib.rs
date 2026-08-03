@@ -6,7 +6,6 @@
 mod account_auth;
 mod app;
 mod blobs;
-mod seeder_rank;
 mod broadcast;
 mod edge;
 mod http;
@@ -17,6 +16,7 @@ mod official_fetch;
 mod operator_actions;
 mod persist;
 mod pins;
+mod seeder_rank;
 mod state;
 mod tcp;
 

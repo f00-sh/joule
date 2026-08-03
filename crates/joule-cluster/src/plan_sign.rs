@@ -152,19 +152,21 @@ mod tests {
         assert!(verify_plan_offer_sig(&from, plan_id, rid, &ph, &pk, &sig, ts).is_ok());
         assert!(verify_plan_offer_sig(&from, plan_id, rid, &ph, &pk, &sig, ts + 1).is_err());
         assert!(verify_plan_offer_sig(&from, plan_id, rid, &ph, "", &sig, ts).is_err());
-        assert!(verify_plan_offer_sig(&from, plan_id, rid, &ph, &pk, "00".repeat(64).as_str(), ts)
-            .is_err());
+        assert!(
+            verify_plan_offer_sig(&from, plan_id, rid, &ph, &pk, "00".repeat(64).as_str(), ts)
+                .is_err()
+        );
 
         let confirm = "cd".repeat(32);
         let pre_a = plan_accept_sign_preimage(&from, plan_id, rid, true, &ph, &confirm, ts);
         let (pk2, sig2) = sign_preimage(&sk, &pre_a);
-        assert!(verify_plan_accept_sig(
-            &from, plan_id, rid, true, &ph, &confirm, &pk2, &sig2, ts
-        )
-        .is_ok());
-        assert!(verify_plan_accept_sig(
-            &from, plan_id, rid, false, &ph, &confirm, &pk2, &sig2, ts
-        )
-        .is_err());
+        assert!(
+            verify_plan_accept_sig(&from, plan_id, rid, true, &ph, &confirm, &pk2, &sig2, ts)
+                .is_ok()
+        );
+        assert!(
+            verify_plan_accept_sig(&from, plan_id, rid, false, &ph, &confirm, &pk2, &sig2, ts)
+                .is_err()
+        );
     }
 }

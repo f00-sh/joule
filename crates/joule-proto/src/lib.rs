@@ -285,6 +285,9 @@ pub enum Message {
     Welcome {
         account: String,
         api_key: String,
+        /// Pool ed25519 verifying key (hex) for PlanOffer authenticity.
+        #[serde(default)]
+        pool_pubkey_hex: String,
     },
     Heartbeat {
         load: f32,

@@ -13,7 +13,12 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-fn e2e_plan_auth(
+fn e2e_device_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)
+}
+
+fn e2e_plan_auth_sk(
+    sk: &ed25519_dalek::SigningKey,
     node: &NodeId,
     plan_id: Uuid,
     request_id: Uuid,
@@ -25,18 +30,22 @@ fn e2e_plan_auth(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let sk = joule_cluster::lab_signing_key_for_node(node);
     let pre = joule_cluster::plan_accept_sign_preimage(
-        node, plan_id, request_id, accepted, plan_hash_hex, confirm_hex, ts,
+        node,
+        plan_id,
+        request_id,
+        accepted,
+        plan_hash_hex,
+        confirm_hex,
+        ts,
     );
-    let (pk, sig) = joule_cluster::sign_preimage(&sk, &pre);
+    let (pk, sig) = joule_cluster::sign_preimage(sk, &pre);
     joule_proto::PlanAuth {
         signer_pubkey_hex: pk,
         sig_hex: sig,
         signed_at_unix_ms: ts,
     }
 }
-
 
 async fn operator_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
@@ -49,6 +58,8 @@ async fn spawn_agent(
     mem: u32,
 ) -> (String, tokio::task::JoinHandle<()>) {
     let node_id = NodeId::new();
+    let device_sk = e2e_device_key();
+    let device_pk = hex::encode(device_sk.verifying_key().as_bytes());
     let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -58,7 +69,7 @@ async fn spawn_agent(
         Message::Hello {
             account: account.into(),
             caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
-            pubkey_hex: String::new(),
+            pubkey_hex: device_pk.clone(),
             sig_hex: String::new(),
             signed_at_unix_ms: 0,
         },
@@ -102,6 +113,7 @@ async fn spawn_agent(
         .unwrap();
 
     let handle = tokio::spawn(async move {
+        let device_sk = device_sk;
         let stub = StubEngine::new();
         let mut tick = tokio::time::interval(Duration::from_millis(200));
         loop {
@@ -156,7 +168,7 @@ async fn spawn_agent(
                                     } else {
                                         "not in plan".into()
                                     },
-                                    auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
+                                    auth: e2e_plan_auth_sk(&device_sk, &node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
                                     plan_hash_hex: ph,
                                     confirm_hex: confirm,
                     },
@@ -660,6 +672,8 @@ async fn local_pool_lab_mid_tensor_infer() {
 
     // Agent loop uses ClusterEngine + lab-mid (not StubEngine).
     let node_id = NodeId::new();
+    let device_sk = e2e_device_key();
+    let device_pk = hex::encode(device_sk.verifying_key().as_bytes());
     let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -668,7 +682,7 @@ async fn local_pool_lab_mid_tensor_infer() {
         Message::Hello {
             account: "lab-mid-donor".into(),
             caps: NodeCaps::for_cluster(DeviceClass::Gpu, 8192, 40),
-            pubkey_hex: String::new(),
+            pubkey_hex: device_pk,
             sig_hex: String::new(),
             signed_at_unix_ms: 0,
         },
@@ -712,6 +726,7 @@ async fn local_pool_lab_mid_tensor_infer() {
     let agent = tokio::spawn({
         let eng = eng.clone();
         let node_id = node_id.clone();
+        let device_sk = device_sk;
         async move {
             let mut tick = tokio::time::interval(Duration::from_millis(200));
             loop {
@@ -753,10 +768,10 @@ async fn local_pool_lab_mid_tensor_infer() {
                                         } else {
                                             "not in plan".into()
                                         },
-                                        auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
+                                        auth: e2e_plan_auth_sk(&device_sk, &node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
                                         plan_hash_hex: ph,
                                         confirm_hex: confirm,
-                    },
+                                    },
                                 );
                                 let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
                             }
@@ -2017,8 +2032,10 @@ async fn lease_chat_free_used_free_and_audit() {
         sched_after["stream_slots_free"].as_u64().unwrap(),
         free_before
     );
-    eprintln!("OBSERVE after free={} used={} sched={sched_after}",
-        sched_after["stream_slots_free"], sched_after["stream_slots_used"]);
+    eprintln!(
+        "OBSERVE after free={} used={} sched={sched_after}",
+        sched_after["stream_slots_free"], sched_after["stream_slots_used"]
+    );
 
     let leases: serde_json::Value = client
         .get(format!("{base}/v1/cluster/leases"))
@@ -2128,7 +2145,10 @@ async fn lease_pool_full_http_503() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(used >= total, "failed to saturate used={used} total={total}");
+    assert!(
+        used >= total,
+        "failed to saturate used={used} total={total}"
+    );
     eprintln!("OBSERVE saturated used={used} total={total}");
 
     let over = client
@@ -2153,10 +2173,7 @@ async fn lease_pool_full_http_503() {
     );
     assert_eq!(body["code"], "pool_full", "body={body}");
     assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("pool full"),
+        body["error"].as_str().unwrap_or("").contains("pool full"),
         "body={body}"
     );
 
@@ -2304,6 +2321,8 @@ async fn spawn_agent_hang_infer(
     release: Arc<std::sync::atomic::AtomicBool>,
 ) -> (String, tokio::task::JoinHandle<()>) {
     let node_id = NodeId::new();
+    let device_sk = e2e_device_key();
+    let device_pk = hex::encode(device_sk.verifying_key().as_bytes());
     let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -2313,7 +2332,7 @@ async fn spawn_agent_hang_infer(
         Message::Hello {
             account: account.into(),
             caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
-            pubkey_hex: String::new(),
+            pubkey_hex: device_pk.clone(),
             sig_hex: String::new(),
             signed_at_unix_ms: 0,
         },
@@ -2329,14 +2348,16 @@ async fn spawn_agent_hang_infer(
         other => panic!("expected welcome, got {other:?}"),
     };
     writer
-        .write_all(&encode_line(&Envelope::new(
-            node_id.clone(),
-            Message::Heartbeat {
-                load: 0.0,
-                healthy: true,
-            },
-        ))
-        .unwrap())
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::Heartbeat {
+                    load: 0.0,
+                    healthy: true,
+                },
+            ))
+            .unwrap(),
+        )
         .await
         .unwrap();
     writer
@@ -2359,6 +2380,7 @@ async fn spawn_agent_hang_infer(
         .unwrap();
 
     let handle = tokio::spawn(async move {
+        let device_sk = device_sk;
         let stub = StubEngine::new();
         let mut tick = tokio::time::interval(Duration::from_millis(200));
         loop {
@@ -2396,7 +2418,7 @@ async fn spawn_agent_hang_infer(
                                     request_id: *request_id,
                                     accepted,
                                     reason: "hang-agent accept".into(),
-                                    auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
+                                    auth: e2e_plan_auth_sk(&device_sk, &node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
                                     plan_hash_hex: ph,
                                     confirm_hex: confirm,
                     },
@@ -2441,6 +2463,8 @@ async fn spawn_agent_bad_accept(
     mem: u32,
 ) -> (String, tokio::task::JoinHandle<()>) {
     let node_id = NodeId::new();
+    let device_sk = e2e_device_key();
+    let device_pk = hex::encode(device_sk.verifying_key().as_bytes());
     let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -2450,7 +2474,7 @@ async fn spawn_agent_bad_accept(
         Message::Hello {
             account: account.into(),
             caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
-            pubkey_hex: String::new(),
+            pubkey_hex: device_pk.clone(),
             sig_hex: String::new(),
             signed_at_unix_ms: 0,
         },
@@ -2466,14 +2490,16 @@ async fn spawn_agent_bad_accept(
         other => panic!("expected welcome, got {other:?}"),
     };
     writer
-        .write_all(&encode_line(&Envelope::new(
-            node_id.clone(),
-            Message::Heartbeat {
-                load: 0.0,
-                healthy: true,
-            },
-        ))
-        .unwrap())
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::Heartbeat {
+                    load: 0.0,
+                    healthy: true,
+                },
+            ))
+            .unwrap(),
+        )
         .await
         .unwrap();
     writer
@@ -2496,6 +2522,7 @@ async fn spawn_agent_bad_accept(
         .unwrap();
 
     let handle = tokio::spawn(async move {
+        let device_sk = device_sk;
         let stub = StubEngine::new();
         let mut tick = tokio::time::interval(Duration::from_millis(200));
         loop {
@@ -2527,7 +2554,7 @@ async fn spawn_agent_bad_accept(
                                     reason: "bad confirm".into(),
                                     plan_hash_hex: plan_hash_hex.clone(),
                                     confirm_hex: "deadbeef".into(),
-                                    auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, true, plan_hash_hex, "deadbeef"),
+                                    auth: e2e_plan_auth_sk(&device_sk, &node_id, plan.plan_id, *request_id, true, plan_hash_hex, "deadbeef"),
                     },
                             );
                             if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
@@ -2592,7 +2619,10 @@ async fn mesh_poison_request_infer_wrong_plan_id_is_ignored_plan_offer_still_agr
     let status = r.status();
     let body: serde_json::Value = r.json().await.unwrap();
     eprintln!("OBSERVE poison RequestInfer self-accept status={status} body={body}");
-    assert!(status.is_success(), "PlanOffer path must still succeed: {body}");
+    assert!(
+        status.is_success(),
+        "PlanOffer path must still succeed: {body}"
+    );
     assert_eq!(
         body["joule_coordination"].as_str().unwrap_or(""),
         "mesh_request_infer",
@@ -2669,8 +2699,14 @@ async fn mesh_production_request_infer_plan_offer_only_agree() {
         .unwrap();
     eprintln!("OBSERVE production mesh audit={leases}");
     let audit = leases["audit"].as_array().cloned().unwrap_or_default();
-    assert!(audit.iter().any(|e| e["event"] == "plan_agreed"), "{leases}");
-    assert!(audit.iter().any(|e| e["event"] == "lease_released"), "{leases}");
+    assert!(
+        audit.iter().any(|e| e["event"] == "plan_agreed"),
+        "{leases}"
+    );
+    assert!(
+        audit.iter().any(|e| e["event"] == "lease_released"),
+        "{leases}"
+    );
     assert_eq!(leases["stream_slots_used"].as_u64().unwrap_or(99), 0);
     a.abort();
     b.abort();
@@ -2683,6 +2719,8 @@ async fn spawn_agent_poison_request_infer(
     mem: u32,
 ) -> (String, tokio::task::JoinHandle<()>) {
     let node_id = NodeId::new();
+    let device_sk = e2e_device_key();
+    let device_pk = hex::encode(device_sk.verifying_key().as_bytes());
     let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -2692,7 +2730,7 @@ async fn spawn_agent_poison_request_infer(
         Message::Hello {
             account: account.into(),
             caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
-            pubkey_hex: String::new(),
+            pubkey_hex: device_pk.clone(),
             sig_hex: String::new(),
             signed_at_unix_ms: 0,
         },
@@ -2740,6 +2778,7 @@ async fn spawn_agent_poison_request_infer(
         .unwrap();
 
     let handle = tokio::spawn(async move {
+        let device_sk = device_sk;
         let stub = StubEngine::new();
         let mut tick = tokio::time::interval(Duration::from_millis(200));
         loop {
@@ -2777,7 +2816,7 @@ async fn spawn_agent_poison_request_infer(
                                         request_id: *request_id,
                                         accepted: true,
                                         reason: "poison local mesh coordinator".into(),
-                                        auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, true, &ph, &confirm),
+                                        auth: e2e_plan_auth_sk(&device_sk, &node_id, plan.plan_id, *request_id, true, &ph, &confirm),
                                         plan_hash_hex: ph2,
                                         confirm_hex: confirm,
                                     },
@@ -2806,7 +2845,7 @@ async fn spawn_agent_poison_request_infer(
                                     request_id: *request_id,
                                     accepted,
                                     reason: "poison-agent later offer".into(),
-                                    auth: e2e_plan_auth(&node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
+                                    auth: e2e_plan_auth_sk(&device_sk, &node_id, plan.plan_id, *request_id, accepted, &ph, &confirm),
                                     plan_hash_hex: ph,
                                     confirm_hex: confirm,
                     },

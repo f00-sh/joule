@@ -22,10 +22,7 @@ pub enum PlanAcceptEffect {
     /// Drop message (unknown, outsider, wrong plan_id).
     Ignore,
     /// Fail closed: tear down pending agreement.
-    Abort {
-        event: &'static str,
-        detail: String,
-    },
+    Abort { event: &'static str, detail: String },
     /// Record accept from an expected shard; `ready` when all expected have accepted.
     Record { ready: bool },
 }
@@ -88,7 +85,10 @@ pub fn on_accept(
         };
     }
     // Would be ready after inserting `from`.
-    let ready = p.expected.iter().all(|n| n == from || p.already_accepted.contains(n));
+    let ready = p
+        .expected
+        .iter()
+        .all(|n| n == from || p.already_accepted.contains(n));
     PlanAcceptEffect::Record { ready }
 }
 
@@ -193,15 +193,7 @@ mod tests {
         // wrong plan_id → Ignore
         let ok_a = plan_accept_confirm_hex(plan.plan_id, rid, &a, true, &want_hash);
         assert_eq!(
-            on_accept(
-                Some(&view),
-                &a,
-                Uuid::nil(),
-                rid,
-                true,
-                &want_hash,
-                &ok_a
-            ),
+            on_accept(Some(&view), &a, Uuid::nil(), rid, true, &want_hash, &ok_a),
             PlanAcceptEffect::Ignore
         );
 
@@ -241,15 +233,7 @@ mod tests {
 
         // expected reject → Abort
         let rej = plan_accept_confirm_hex(plan.plan_id, rid, &a, false, &want_hash);
-        match on_accept(
-            Some(&view),
-            &a,
-            plan.plan_id,
-            rid,
-            false,
-            &want_hash,
-            &rej,
-        ) {
+        match on_accept(Some(&view), &a, plan.plan_id, rid, false, &want_hash, &rej) {
             PlanAcceptEffect::Abort {
                 event: "plan_rejected",
                 ..
@@ -259,15 +243,7 @@ mod tests {
 
         // first expected accept → Record ready=false
         assert_eq!(
-            on_accept(
-                Some(&view),
-                &a,
-                plan.plan_id,
-                rid,
-                true,
-                &want_hash,
-                &ok_a
-            ),
+            on_accept(Some(&view), &a, plan.plan_id, rid, true, &want_hash, &ok_a),
             PlanAcceptEffect::Record { ready: false }
         );
 
@@ -294,30 +270,14 @@ mod tests {
         );
         // still not ready with only a
         assert_eq!(
-            on_accept(
-                Some(&view2),
-                &a,
-                plan.plan_id,
-                rid,
-                true,
-                &want_hash,
-                &ok_a
-            ),
+            on_accept(Some(&view2), &a, plan.plan_id, rid, true, &want_hash, &ok_a),
             PlanAcceptEffect::Record { ready: false }
         );
 
         // second expected → ready
         let ok_b = plan_accept_confirm_hex(plan.plan_id, rid, &b, true, &want_hash);
         assert_eq!(
-            on_accept(
-                Some(&view2),
-                &b,
-                plan.plan_id,
-                rid,
-                true,
-                &want_hash,
-                &ok_b
-            ),
+            on_accept(Some(&view2), &b, plan.plan_id, rid, true, &want_hash, &ok_b),
             PlanAcceptEffect::Record { ready: true }
         );
 

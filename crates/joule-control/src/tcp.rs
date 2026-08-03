@@ -16,6 +16,27 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+fn control_plan_offer_auth(
+    app: &App,
+    from: &NodeId,
+    plan_id: uuid::Uuid,
+    request_id: uuid::Uuid,
+    plan_hash_hex: &str,
+) -> joule_proto::PlanAuth {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let pre = joule_cluster::plan_offer_sign_preimage(from, plan_id, request_id, plan_hash_hex, ts);
+    let pk = app.identity.public_info().verifying_key_hex;
+    let sig = app.identity.sign_bytes(pre.as_bytes());
+    joule_proto::PlanAuth {
+        signer_pubkey_hex: pk,
+        sig_hex: sig,
+        signed_at_unix_ms: ts,
+    }
+}
+
 pub async fn run_agent_listener(app: App, listener: TcpListener) -> Result<()> {
     loop {
         let (sock, peer) = listener.accept().await?;
@@ -128,6 +149,10 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 let api_key = {
                     let mut g = app.state.write().await;
                     let key = g.register_node(id.clone(), &account, caps);
+                    // Bind device pubkey for plan-bus authenticity (Hello pubkey or lab).
+                    if !pubkey_hex.is_empty() {
+                        g.set_node_device_pubkey(&id, &pubkey_hex);
+                    }
                     crate::edge::publish_snapshot_async(&g, Some(&app.identity), true);
                     key
                 };
@@ -142,6 +167,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     Message::Welcome {
                         account: account.clone(),
                         api_key,
+                        pool_pubkey_hex: app.identity.public_info().verifying_key_hex,
                     },
                 );
                 let _ = tx.send(welcome);
@@ -302,7 +328,33 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     sizes.push(m.size);
                     multiaddrs.push(addrs);
                 }
-                let seeder = g.blobs.pick_seeder(&hash, &requester);
+                // Rank seeders by locality/health/load/backpressure (not arbitrary first).
+                let free = g.cluster.scheduler_snapshot().stream_slots_free;
+                let mesh_list = g.mesh.list();
+                let hints: Vec<_> = peer_ids
+                    .iter()
+                    .zip(multiaddrs.iter())
+                    .map(|(n, addrs)| {
+                        let mesh_h = mesh_list.iter().find(|p| &p.node == n);
+                        (
+                            n.clone(),
+                            crate::seeder_rank::SeederCandidate {
+                                node: n.clone(),
+                                multiaddrs: addrs.clone(),
+                                healthy: mesh_h.map(|p| p.healthy).unwrap_or(true),
+                                load: mesh_h.map(|p| p.load).unwrap_or(0.1),
+                                active_transfers: g
+                                    .pending_blob_xfers
+                                    .values()
+                                    .filter(|(req, _, _)| req == n)
+                                    .count()
+                                    as u32,
+                                pool_stream_slots_free: free,
+                            },
+                        )
+                    })
+                    .collect();
+                let seeder = g.blobs.pick_seeder_ranked(&hash, &requester, &hints);
                 drop(g);
 
                 let locate = Envelope::new(
@@ -506,6 +558,11 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     from = %env.from,
                     "{message}"
                 );
+                if files_complete {
+                    let mut g = app.state.write().await;
+                    g.set_digests_verified(true);
+                    info!("digests_verified from PrepareOk (files_complete)");
+                }
             }
             Message::ModelLoaded {
                 model,
@@ -522,7 +579,11 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     from = %env.from,
                     "{message}"
                 );
-                app.state.write().await.mark_node_loaded(env.from.clone());
+                let mut g = app.state.write().await;
+                if tensors > 0 && bytes_resident > 0 {
+                    g.set_digests_verified(true);
+                }
+                g.mark_node_loaded(env.from.clone());
             }
             other => {
                 warn!(msg = ?other, "ignored agent→control message");
@@ -546,6 +607,34 @@ async fn send_to_agent(routes: &AgentRoutes, node: &NodeId, env: Envelope) -> bo
     } else {
         false
     }
+}
+
+/// Dial a donor multiaddr and write one NDJSON InferRequest (peer-direct path).
+/// Returns true when the TCP write completes; false falls back to control relay.
+async fn send_infer_peer_direct(multiaddr: &str, env: &Envelope) -> bool {
+    let Ok(bytes) = encode_line(env) else {
+        return false;
+    };
+    let Some(addr) = parse_tcp_multiaddr_local(multiaddr) else {
+        return false;
+    };
+    match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+        Ok(Ok(mut stream)) => {
+            if stream.write_all(&bytes).await.is_err() {
+                return false;
+            }
+            let _ = stream.flush().await;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Parse `tcp://host:port` (or bare `host:port`) for peer-direct Infer dial.
+fn parse_tcp_multiaddr_local(s: &str) -> Option<std::net::SocketAddr> {
+    let s = s.trim();
+    let rest = s.strip_prefix("tcp://").unwrap_or(s);
+    rest.parse().ok()
 }
 
 /// Dispatch one generation across the **VRAM-sharded pool** (all healthy donors).
@@ -632,8 +721,7 @@ pub async fn dispatch_mesh_infer(
     }
 
     // Geometry from mesh; capacity truth still requires a stream lease.
-    let plan_geometry =
-        joule_cluster::plan_from_mesh_donors(&donors).map_err(|e| e.to_string())?;
+    let plan_geometry = joule_cluster::plan_from_mesh_donors(&donors).map_err(|e| e.to_string())?;
     let request_id = Uuid::new_v4();
     let lease = {
         let mut g = app.state.write().await;
@@ -702,15 +790,19 @@ pub async fn dispatch_mesh_infer(
                 plan: plan.clone(),
                 request_id,
                 plan_hash_hex: plan_hash_hex.clone(),
-                            auth: joule_proto::PlanAuth::default(),
-},
+                auth: control_plan_offer_auth(
+                    app,
+                    &shard.node,
+                    plan.plan_id,
+                    request_id,
+                    &plan_hash_hex,
+                ),
+            },
         );
         if !send_to_agent(&app.routes, &shard.node, env).await {
             let mut g = app.state.write().await;
             g.pending_plan_accepts.remove(&request_id);
-            guard
-                .release_now("lease_released", "plan offer fail")
-                .await;
+            guard.release_now("lease_released", "plan offer fail").await;
             return Err(format!("PlanOffer: shard {} not connected", shard.node));
         }
     }
@@ -802,16 +894,20 @@ async fn dispatch_control_stream(
                 plan: plan.clone(),
                 request_id,
                 plan_hash_hex: plan_hash_hex.clone(),
-                            auth: joule_proto::PlanAuth::default(),
-},
+                auth: control_plan_offer_auth(
+                    app,
+                    &shard.node,
+                    plan.plan_id,
+                    request_id,
+                    &plan_hash_hex,
+                ),
+            },
         );
         if !send_to_agent(&app.routes, &shard.node, env).await {
             let mut g = app.state.write().await;
             g.pending_plan_accepts.remove(&request_id);
             drop(g);
-            guard
-                .release_now("lease_released", "plan offer fail")
-                .await;
+            guard.release_now("lease_released", "plan offer fail").await;
             return Err(format!("PlanOffer: shard {} not connected", shard.node));
         }
     }
@@ -921,8 +1017,19 @@ async fn fanout_infer(
         );
     }
 
+    // Prefer peer-direct Infer hop when all shards advertise dial multiaddrs.
+    let shard_addrs: Vec<Vec<String>> = {
+        let g = app.state.read().await;
+        plan.shards
+            .iter()
+            .map(|s| g.mesh.multiaddrs_for(&s.node))
+            .collect()
+    };
+    let peer_direct = joule_mesh::prefer_peer_direct_infer(&shard_addrs);
+    info!(peer_direct, shards = plan.shards.len(), "infer fanout path");
+
     let mut sent = 0usize;
-    for shard in &plan.shards {
+    for (i, shard) in plan.shards.iter().enumerate() {
         let is_tail = shard.node == tail;
         let env = Envelope::new(
             shard.node.clone(),
@@ -935,7 +1042,20 @@ async fn fanout_infer(
                 is_tail,
             },
         );
-        if send_to_agent(&app.routes, &shard.node, env).await {
+        let mut delivered = false;
+        if peer_direct {
+            if let Some(addr) = shard_addrs.get(i).and_then(|a| a.first()) {
+                // Peer-direct hop: dial donor multiaddr (no control as byte path).
+                delivered = send_infer_peer_direct(addr, &env).await;
+                if delivered {
+                    info!(node = %shard.node, %addr, "InferRequest peer-direct");
+                }
+            }
+        }
+        if !delivered && send_to_agent(&app.routes, &shard.node, env).await {
+            delivered = true;
+        }
+        if delivered {
             sent += 1;
         } else {
             warn!(node = %shard.node, "shard agent not connected");
@@ -1051,7 +1171,6 @@ impl StreamLeaseGuard {
         let mut g = self.app.state.write().await;
         g.release_stream_lease(self.request_id, event, detail);
     }
-
 }
 
 impl Drop for StreamLeaseGuard {

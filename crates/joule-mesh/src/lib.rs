@@ -11,9 +11,7 @@ pub use peer_infer::{can_peer_infer, prefer_peer_direct_infer};
 
 use anyhow::{bail, Context, Result};
 use joule_cluster::{plan_from_mesh_donors, Cluster, LeaseBook};
-use joule_proto::{
-    ClusterPlan, DeviceClass, Envelope, Message, NodeCaps, NodeId, CLUSTER_MODEL,
-};
+use joule_proto::{ClusterPlan, DeviceClass, Envelope, Message, NodeCaps, NodeId, CLUSTER_MODEL};
 use joule_runtime::{Engine, InferRequest, StubEngine};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -122,6 +120,8 @@ struct PeerBusInner {
     /// Stream capacity + leases (same truth as control path).
     cluster: Cluster,
     leases: LeaseBook,
+    /// Per-node ed25519 device keys (not derived from NodeId).
+    device_keys: std::collections::HashMap<NodeId, ed25519_dalek::SigningKey>,
 }
 
 impl PeerBus {
@@ -137,6 +137,7 @@ impl PeerBus {
                 dead_coordinators: HashSet::new(),
                 cluster: Cluster::default(),
                 leases: LeaseBook::default(),
+                device_keys: std::collections::HashMap::new(),
             })),
         }
     }
@@ -176,6 +177,8 @@ impl PeerBus {
         if let Some(d) = g.donors.get_mut(node) {
             d.healthy = false;
         }
+        // Mid-flight: cancel any plan/lease that depended on this node.
+        invalidate_inflight_for_dead_node(&mut g, node);
     }
 
     /// Mark a **confirmed shard** (not only coordinator) dead for mid-infer replan.
@@ -189,28 +192,16 @@ impl PeerBus {
         let Some(inf) = g.inflight.get(&request_id) else {
             return false;
         };
-        if g.completions.contains_key(&request_id) {
-            return false;
-        }
-        let dead = |id: &NodeId| g.dead_coordinators.contains(id) || g.donors.get(id).is_some_and(|d| !d.healthy);
-        if dead(&inf.coordinator) {
-            return true;
-        }
-        if let Some(plan) = &inf.plan {
-            for s in &plan.shards {
-                // Confirmed shard or any plan member dead mid-flight forces replan.
-                if dead(&s.node)
-                    && (inf.accepts.contains(&s.node) || !inf.accepts.is_empty() || inf.attempt > 0)
-                {
-                    return true;
-                }
-            }
-        }
-        false
+        let dead = |id: &NodeId| {
+            g.dead_coordinators.contains(id) || g.donors.get(id).is_some_and(|d| !d.healthy)
+        };
+        inflight_needs_replan(inf, &dead)
     }
 
     pub async fn register_peer(&self, donor: MeshDonor, tx: mpsc::UnboundedSender<Envelope>) {
         let mut g = self.inner.lock().await;
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        g.device_keys.insert(donor.node.clone(), sk);
         g.mailboxes.insert(donor.node.clone(), tx);
         g.donors.insert(donor.node.clone(), donor);
         sync_mesh_capacity(&mut g);
@@ -338,8 +329,7 @@ impl PeerBus {
                     let mut g = self.inner.lock().await;
                     sync_mesh_capacity(&mut g);
                     // Release prior lease on replan attempts for same request.
-                    if g
-                        .inflight
+                    if g.inflight
                         .get(&request_id)
                         .map(|i| i.lease_held)
                         .unwrap_or(false)
@@ -420,7 +410,31 @@ impl PeerBus {
                         plan: plan.clone(),
                         request_id,
                         plan_hash_hex: plan_hash_hex.clone(),
-                        auth: joule_proto::PlanAuth::default(),
+                        auth: {
+                            let ts = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            let sk = {
+                                let g = self.inner.lock().await;
+                                g.device_keys.get(local).cloned().unwrap_or_else(|| {
+                                    ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)
+                                })
+                            };
+                            let pre = joule_cluster::plan_offer_sign_preimage(
+                                local,
+                                plan.plan_id,
+                                request_id,
+                                &plan_hash_hex,
+                                ts,
+                            );
+                            let (pk, sig) = joule_cluster::sign_preimage(&sk, &pre);
+                            joule_proto::PlanAuth {
+                                signer_pubkey_hex: pk,
+                                sig_hex: sig,
+                                signed_at_unix_ms: ts,
+                            }
+                        },
                     },
                 );
                 for s in &plan.shards {
@@ -431,8 +445,26 @@ impl PeerBus {
                 plan,
                 request_id,
                 plan_hash_hex,
-                ..
+                auth,
             } => {
+                // Fail closed: PlanOffer must be signed (coordinator device key).
+                let offer_hash = if plan_hash_hex.is_empty() {
+                    joule_cluster::plan_hash_hex(&plan)
+                } else {
+                    plan_hash_hex.clone()
+                };
+                if let Err(e) = joule_cluster::verify_plan_offer_sig(
+                    &env.from,
+                    plan.plan_id,
+                    request_id,
+                    &offer_hash,
+                    &auth.signer_pubkey_hex,
+                    &auth.sig_hex,
+                    auth.signed_at_unix_ms,
+                ) {
+                    warn!(error = %e, "PlanOffer signature rejected");
+                    return Ok(());
+                }
                 let accepted = plan.shards.iter().any(|s| &s.node == local);
                 let ph = if plan_hash_hex.is_empty() {
                     joule_cluster::plan_hash_hex(&plan)
@@ -450,7 +482,12 @@ impl PeerBus {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                let sk = joule_cluster::lab_signing_key_for_node(local);
+                let sk = {
+                    let g = self.inner.lock().await;
+                    g.device_keys.get(local).cloned().unwrap_or_else(|| {
+                        ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng)
+                    })
+                };
                 let pre = joule_cluster::plan_accept_sign_preimage(
                     local,
                     plan.plan_id,
@@ -552,11 +589,7 @@ impl PeerBus {
                         }
                     }
                     let view = joule_cluster::PlanAgreeView {
-                        plan_id: inf
-                            .plan
-                            .as_ref()
-                            .map(|p| p.plan_id)
-                            .unwrap_or(plan_id),
+                        plan_id: inf.plan.as_ref().map(|p| p.plan_id).unwrap_or(plan_id),
                         want_hash: inf.plan_hash_hex.as_str(),
                         expected: &expected,
                         already_accepted: &inf.accepts,
@@ -581,14 +614,7 @@ impl PeerBus {
                             .get(&request_id)
                             .map(|i| i.plan_hash_hex.clone())
                             .unwrap_or_default();
-                        mesh_record_accepts(
-                            &mut g,
-                            request_id,
-                            &[],
-                            event,
-                            &detail,
-                            Some(&want),
-                        );
+                        mesh_record_accepts(&mut g, request_id, &[], event, &detail, Some(&want));
                         abort_inflight_and_release(&mut g, request_id, detail);
                         return Ok(());
                     }
@@ -695,8 +721,7 @@ impl PeerBus {
                 request_id, text, ..
             } if !text.is_empty() => {
                 let mut g = self.inner.lock().await;
-                if g
-                    .inflight
+                if g.inflight
                     .get(&request_id)
                     .and_then(|i| i.aborted.as_ref())
                     .is_some()
@@ -704,10 +729,20 @@ impl PeerBus {
                     // Never complete after aborted agreement.
                     return Ok(());
                 }
+                // Reject InferDone for a plan that still includes a dead confirmed shard.
+                let dead = |id: &NodeId| {
+                    g.dead_coordinators.contains(id) || g.donors.get(id).is_some_and(|d| !d.healthy)
+                };
+                if g.inflight
+                    .get(&request_id)
+                    .is_some_and(|i| inflight_needs_replan(i, &dead))
+                {
+                    warn!(%request_id, "ignore InferDone; confirmed shard dead — replan required");
+                    return Ok(());
+                }
                 g.completions.insert(request_id, text);
                 // Release stream lease on successful settle.
-                if g
-                    .inflight
+                if g.inflight
                     .get(&request_id)
                     .map(|i| i.lease_held)
                     .unwrap_or(false)
@@ -724,7 +759,7 @@ impl PeerBus {
         Ok(())
     }
 
-    /// Wait for completion text; on timeout, re-elect and re-plan (coordinator death path).
+    /// Wait for completion text; on confirmed-shard/coordinator death, cancel and re-plan.
     pub async fn wait_completion(
         &self,
         request_id: Uuid,
@@ -733,6 +768,37 @@ impl PeerBus {
         let start = tokio::time::Instant::now();
         let mut replan_budget = 2u32;
         loop {
+            // Prefer replan over accepting a completion bound to a dead shard.
+            let need_replan = {
+                let g = self.inner.lock().await;
+                match g.inflight.get(&request_id) {
+                    Some(i) => {
+                        let dead = |id: &NodeId| {
+                            g.dead_coordinators.contains(id)
+                                || g.donors.get(id).is_some_and(|d| !d.healthy)
+                        };
+                        let death = inflight_needs_replan(i, &dead);
+                        let no_done = !g.completions.contains_key(&request_id);
+                        death
+                            || (no_done
+                                && start.elapsed()
+                                    > g.coord_timeout.saturating_mul(i.attempt.max(1)))
+                    }
+                    None => false,
+                }
+            };
+
+            if need_replan && replan_budget > 0 {
+                replan_budget -= 1;
+                // Drop any stale completion from the dead-shard plan.
+                {
+                    let mut g = self.inner.lock().await;
+                    g.completions.remove(&request_id);
+                }
+                self.replan_request(request_id).await?;
+                continue;
+            }
+
             if let Some(t) = self
                 .inner
                 .lock()
@@ -747,8 +813,7 @@ impl PeerBus {
                 // Always release on timeout so slots free→used→free.
                 {
                     let mut g = self.inner.lock().await;
-                    if g
-                        .inflight
+                    if g.inflight
                         .get(&request_id)
                         .map(|i| i.lease_held)
                         .unwrap_or(false)
@@ -765,42 +830,11 @@ impl PeerBus {
             }
             let coord_timeout = self.inner.lock().await.coord_timeout;
             tokio::time::sleep(coord_timeout.min(Duration::from_millis(50))).await;
-
-            // If still no completion after coord timeout and attempts left, re-plan.
-            let need_replan = {
-                let g = self.inner.lock().await;
-                let inf = g.inflight.get(&request_id);
-                match inf {
-                    Some(i) if !g.completions.contains_key(&request_id) => {
-                        let dead = |id: &NodeId| {
-                            g.dead_coordinators.contains(id)
-                                || g.donors.get(id).is_some_and(|d| !d.healthy)
-                        };
-                        let shard_dead = i.plan.as_ref().is_some_and(|p| {
-                            p.shards.iter().any(|s| {
-                                dead(&s.node)
-                                    && (i.accepts.contains(&s.node)
-                                        || !i.accepts.is_empty()
-                                        || i.attempt > 0
-                                        || i.plan.is_some())
-                            })
-                        });
-                        dead(&i.coordinator)
-                            || shard_dead
-                            || start.elapsed() > coord_timeout.saturating_mul(i.attempt.max(1))
-                    }
-                    _ => false,
-                }
-            };
-            if need_replan && replan_budget > 0 {
-                replan_budget -= 1;
-                // Cancel prior lease, re-agree + re-lease among remaining healthy donors.
-                self.replan_request(request_id).await?;
-            }
         }
     }
 
-    /// Elect new coordinator from remaining healthy donors and restart PlanOffer.
+    /// Restart PlanOffer among remaining healthy donors (re-agree + re-lease).
+    /// Keeps a healthy coordinator; re-elects only when the coordinator is dead.
     pub async fn replan_request(&self, request_id: Uuid) -> Result<()> {
         let (account, prompt, max_tokens, old_coord) = {
             let g = self.inner.lock().await;
@@ -815,8 +849,13 @@ impl PeerBus {
                 inf.coordinator.clone(),
             )
         };
-        // Mark old coordinator dead if not already
-        {
+        let coord_dead = {
+            let g = self.inner.lock().await;
+            g.dead_coordinators.contains(&old_coord)
+                || g.donors.get(&old_coord).is_some_and(|d| !d.healthy)
+        };
+        // Only force-kill coordinator when it is already dead (coordinator-death path).
+        if coord_dead {
             let mut g = self.inner.lock().await;
             g.dead_coordinators.insert(old_coord.clone());
             if let Some(d) = g.donors.get_mut(&old_coord) {
@@ -827,15 +866,33 @@ impl PeerBus {
             let g = self.inner.lock().await;
             g.donors.values().filter(|d| d.healthy).cloned().collect()
         };
-        let new_coord =
-            elect_coordinator(&donors).context("no remaining donors for re-election")?;
-        info!(%request_id, old = %old_coord, new = %new_coord, "coordinator re-elected; re-plan");
+        let new_coord = if !coord_dead && donors.iter().any(|d| d.node == old_coord) {
+            old_coord.clone()
+        } else {
+            elect_coordinator(&donors).context("no remaining donors for re-election")?
+        };
+        info!(%request_id, old = %old_coord, new = %new_coord, "re-plan after death");
         {
             let mut g = self.inner.lock().await;
+            // Drop stale completion + release prior lease before re-agree.
+            g.completions.remove(&request_id);
+            if g.inflight
+                .get(&request_id)
+                .map(|i| i.lease_held)
+                .unwrap_or(false)
+            {
+                mesh_release(
+                    &mut g,
+                    request_id,
+                    "lease_released",
+                    "cancel for shard/coordinator replan",
+                );
+            }
             if let Some(inf) = g.inflight.get_mut(&request_id) {
                 inf.coordinator = new_coord.clone();
                 inf.plan = None;
                 inf.accepts.clear();
+                inf.lease_held = false;
                 inf.attempt += 1;
             }
         }
@@ -877,6 +934,63 @@ pub async fn run_peer_actor(
     while let Some(env) = rx.recv().await {
         if let Err(e) = bus.handle_envelope(&local, env, &engine).await {
             warn!(error = %e, %local, "peer actor handle error");
+        }
+    }
+}
+
+fn inflight_needs_replan(inf: &InflightRequest, dead: &dyn Fn(&NodeId) -> bool) -> bool {
+    if dead(&inf.coordinator) {
+        return true;
+    }
+    if let Some(plan) = &inf.plan {
+        for s in &plan.shards {
+            // Confirmed shard or any plan member dead mid-flight forces replan.
+            if dead(&s.node)
+                && (inf.accepts.contains(&s.node) || !inf.accepts.is_empty() || inf.attempt > 0)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Drop completions/leases for inflight work that depended on a just-dead node.
+fn invalidate_inflight_for_dead_node(inner: &mut PeerBusInner, node: &NodeId) {
+    let affected: Vec<Uuid> = inner
+        .inflight
+        .iter()
+        .filter_map(|(rid, inf)| {
+            let coord = &inf.coordinator == node;
+            let accepted = inf.accepts.contains(node);
+            let in_plan = inf
+                .plan
+                .as_ref()
+                .is_some_and(|p| p.shards.iter().any(|s| &s.node == node));
+            if coord || accepted || in_plan {
+                Some(*rid)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for rid in affected {
+        inner.completions.remove(&rid);
+        if inner
+            .inflight
+            .get(&rid)
+            .map(|i| i.lease_held)
+            .unwrap_or(false)
+        {
+            mesh_release(
+                inner,
+                rid,
+                "lease_released",
+                "confirmed shard/coordinator death mid-infer",
+            );
+            if let Some(inf) = inner.inflight.get_mut(&rid) {
+                inf.lease_held = false;
+            }
         }
     }
 }
@@ -951,12 +1065,7 @@ fn mesh_try_admit(
     r
 }
 
-fn mesh_release(
-    inner: &mut PeerBusInner,
-    request_id: Uuid,
-    event: &str,
-    detail: &str,
-) -> bool {
+fn mesh_release(inner: &mut PeerBusInner, request_id: Uuid, event: &str, detail: &str) -> bool {
     let mut book = std::mem::take(&mut inner.leases);
     let ok = book.release_by_request(&mut inner.cluster, request_id, event, detail);
     inner.leases = book;
@@ -1107,12 +1216,7 @@ mod tests {
             rxs.push((id.clone(), rx));
         }
         // Non-coordinator sends tampered confirm (lowest mem is not elected).
-        let bad = donors
-            .iter()
-            .min_by_key(|(_, m)| *m)
-            .unwrap()
-            .0
-            .clone();
+        let bad = donors.iter().min_by_key(|(_, m)| *m).unwrap().0.clone();
         for (id, rx) in rxs {
             let b = bus.clone();
             let is_bad = id == bad;
@@ -1146,8 +1250,8 @@ mod tests {
                                         reason: "tampered".into(),
                                         plan_hash_hex: plan_hash_hex.clone(),
                                         confirm_hex: "00".repeat(32),
-                                                                auth: joule_proto::PlanAuth::default(),
-                        },
+                                        auth: joule_proto::PlanAuth::default(),
+                                    },
                                 );
                                 let _ = b.send_to(&c, acc).await;
                             }
@@ -1335,8 +1439,8 @@ mod tests {
                                     reason: "outsider".into(),
                                     plan_hash_hex: ph,
                                     confirm_hex: confirm,
-                                                            auth: joule_proto::PlanAuth::default(),
-                        },
+                                    auth: joule_proto::PlanAuth::default(),
+                                },
                             ),
                         ))
                     })
@@ -1421,8 +1525,8 @@ mod tests {
                                     reason: "outsider bad confirm".into(),
                                     plan_hash_hex: ph,
                                     confirm_hex: "00".repeat(32),
-                                                            auth: joule_proto::PlanAuth::default(),
-                        },
+                                    auth: joule_proto::PlanAuth::default(),
+                                },
                             ),
                         ))
                     })
@@ -1512,8 +1616,8 @@ mod tests {
                                     reason: "outsider reject".into(),
                                     plan_hash_hex: ph,
                                     confirm_hex: confirm,
-                                                            auth: joule_proto::PlanAuth::default(),
-                        },
+                                    auth: joule_proto::PlanAuth::default(),
+                                },
                             ),
                         ))
                     })
@@ -1531,7 +1635,6 @@ mod tests {
         assert!(!text.is_empty());
         assert!(bus.abort_reason(rid).await.is_none());
     }
-
 
     #[tokio::test]
     async fn confirmed_shard_death_triggers_replan() {
@@ -1600,20 +1703,30 @@ mod tests {
             drop(g);
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
+        // Snapshot attempt before death (first plan already bumped attempt).
+        let attempt_before = {
+            let g = bus.inner.lock().await;
+            g.inflight.get(&rid).map(|i| i.attempt).unwrap_or(0)
+        };
         bus.mark_shard_dead(&victim).await;
-        // Force replan path (same as wait_completion detects).
-        let _ = bus.replan_request(rid).await;
+        // wait_completion must auto replan without an explicit replan_request call.
         let text = bus
             .wait_completion(rid, Duration::from_secs(6))
             .await
-            .expect("completion after shard replan");
+            .expect("completion after auto shard replan");
         assert!(!text.is_empty());
         let g = bus.inner.lock().await;
         let inf = g.inflight.get(&rid).expect("inflight");
-        assert!(inf.attempt >= 1, "replan attempt {}", inf.attempt);
+        assert!(
+            inf.attempt > attempt_before,
+            "auto replan must increase attempt (before={attempt_before} after={})",
+            inf.attempt
+        );
         let trail = g.leases.audit_trail();
         assert!(
-            trail.iter().any(|e| e.event == "lease_released" || e.event == "lease_granted"),
+            trail
+                .iter()
+                .any(|e| e.event == "lease_released" || e.event == "lease_granted"),
             "lease lifecycle on replan: {trail:?}"
         );
         assert!(

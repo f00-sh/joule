@@ -83,7 +83,11 @@ impl WeightsStore {
 
     /// Required digests from a quant (sha256 list) for audit/readiness.
     pub fn required_digests(quant: &QuantSpec) -> Vec<String> {
-        quant.files.iter().map(|f| f.sha256.to_lowercase()).collect()
+        quant
+            .files
+            .iter()
+            .map(|f| f.sha256.to_lowercase())
+            .collect()
     }
 
     /// Inventory of complete weight files as content-addressed blob metas (for seeding).
