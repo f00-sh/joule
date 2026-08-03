@@ -423,9 +423,98 @@ async fn service_live_flips_when_mesh_loaded() {
         op["service_live"], true,
         "operator status shows service_live op={op} ready={ready}"
     );
+    assert_eq!(op["digests_verified"], true);
+    let hz: serde_json::Value = client
+        .get(format!("http://{http_addr}/healthz"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hz["service_live"], true, "healthz honest live hz={hz}");
     for h in handles {
         h.abort();
     }
+}
+
+/// Fail-closed: operator force live without digests; HTTP surfaces stay false.
+/// Persist-restore of live intent without digests cannot claim public live.
+#[tokio::test]
+async fn service_live_surfaces_fail_closed_without_digests() {
+    let app = load_or_init_app(None).expect("app");
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let (_k, h) = spawn_agent(agent_addr, "live-fc", 8192).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Operator intent: force service_live without digests.
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+        assert!(!g.digests_verified);
+        g.set_service_live_intent(true);
+        assert!(
+            !g.service_live,
+            "set_service_live_intent(true) must refuse without digests"
+        );
+        // Even raw corruption must not leak to public surfaces.
+        g.service_live = true;
+        g.digests_verified = false;
+        assert!(!g.service_live_public());
+    }
+
+    let client = reqwest::Client::new();
+    for path in [
+        format!("http://{http_addr}/healthz"),
+        format!("http://{http_addr}/v1/operator/status"),
+        format!("http://{http_addr}/v1/models"),
+    ] {
+        let v: serde_json::Value = client
+            .get(&path)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let live = if path.ends_with("/models") {
+            v["data"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|m| m["service_live"].as_bool())
+                .unwrap_or(true) // if empty list (no pool), treat as not claiming live wrongly
+        } else {
+            v["service_live"].as_bool().unwrap_or(true)
+        };
+        // models may return empty data when offline — only assert when present
+        if path.ends_with("/models") {
+            if let Some(arr) = v["data"].as_array() {
+                if let Some(m) = arr.first() {
+                    assert_eq!(
+                        m["service_live"], false,
+                        "models must not claim live without digests: {v}"
+                    );
+                    assert_eq!(m["digests_verified"], false);
+                }
+            }
+        } else {
+            assert!(
+                !live,
+                "{path} must report service_live=false without digests: {v}"
+            );
+        }
+        eprintln!("OBSERVE fail-closed {path} service_live=false digests absent");
+    }
+
+    // Persist fail-closed is unit-tested (persist::service_live_restore_requires_digests_verified).
+    // Here: public surfaces stay false after force-intent with digests false.
+    {
+        let g = app.state.read().await;
+        assert!(!g.service_live_public());
+        assert!(!g.digests_verified);
+    }
+
+    h.abort();
 }
 
 /// Local donor pause (Heartbeat healthy=false) drops backends without process kill.

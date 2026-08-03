@@ -38,6 +38,9 @@ pub struct Snapshot {
     pub operator_paused: bool,
     #[serde(default)]
     pub service_live: bool,
+    /// MANIFEST digests staged + sha256 verified (required for public service_live).
+    #[serde(default)]
+    pub digests_verified: bool,
     #[serde(default)]
     pub heartbeat_mint_mj: Option<i64>,
     #[serde(default)]
@@ -108,6 +111,7 @@ pub fn save(dir: &Path, state: &ControlState) -> Result<()> {
         chain: state.ledger.sealed().entries().to_vec(),
         operator_paused: state.operator_paused,
         service_live: state.service_live,
+        digests_verified: state.digests_verified,
         heartbeat_mint_mj: Some(state.heartbeat_mint_mj),
         dual_verify_every: Some(state.dual_verify_every),
         broadcasts: state.broadcasts.recent().to_vec(),
@@ -157,7 +161,12 @@ pub fn apply_snapshot(state: &mut ControlState, snap: Snapshot) {
         );
     }
     state.operator_paused = snap.operator_paused;
-    state.service_live = snap.service_live;
+    state.digests_verified = snap.digests_verified;
+    // Never restore live claim without digests (old snaps default digests_verified=false).
+    state.service_live = snap.service_live && snap.digests_verified;
+    if !state.digests_verified {
+        state.service_live = false;
+    }
     if let Some(v) = snap.heartbeat_mint_mj {
         if (0..=1_000_000).contains(&v) {
             state.heartbeat_mint_mj = v;
@@ -180,6 +189,54 @@ mod tests {
     use joule_ledger::leecher_factors_bp;
     use joule_proto::{DeviceClass, NodeCaps, NodeId};
     use uuid::Uuid;
+
+    #[test]
+    fn service_live_restore_requires_digests_verified() {
+        let dir = std::env::temp_dir().join(format!("joule-persist-live-{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Simulate bad/legacy snap: service_live true without digests (field default false).
+        let mut state = ControlState::new();
+        state.data_dir = Some(dir.clone());
+        state.service_live = true;
+        state.digests_verified = false;
+        save(&dir, &state).unwrap();
+
+        let mut state2 = ControlState::new();
+        let snap = load(&dir).unwrap().expect("snapshot");
+        apply_snapshot(&mut state2, snap);
+        assert!(
+            !state2.service_live,
+            "restore must clear service_live when digests_verified is false"
+        );
+        assert!(!state2.digests_verified);
+        assert!(
+            !state2.service_live_public(),
+            "public live claim must stay false"
+        );
+
+        // Honest path: digests + live intent restore together.
+        state2.digests_verified = true;
+        state2.service_live = true;
+        // model not loaded → public still false
+        assert!(!state2.service_live_public());
+        let id = NodeId::new();
+        state2.nodes_model_loaded.insert(id);
+        assert!(state2.service_live_public());
+        save(&dir, &state2).unwrap();
+        let mut state3 = ControlState::new();
+        apply_snapshot(&mut state3, load(&dir).unwrap().unwrap());
+        assert!(state3.digests_verified);
+        assert!(state3.service_live);
+        // nodes_model_loaded is not persisted — public live needs re-load after restart.
+        assert!(
+            !state3.service_live_public(),
+            "after restart model_loaded empty ⇒ public false until mesh reloads"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn disconnects_window_survives_save_load() {

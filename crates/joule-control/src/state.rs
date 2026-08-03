@@ -447,8 +447,29 @@ impl ControlState {
     pub fn runtime_flags(&self) -> joule_runtime::RuntimeFlags {
         joule_runtime::RuntimeFlags {
             model_loaded: !self.nodes_model_loaded.is_empty(),
+            // Raw operator/auto flag — readiness honesty ANDs digests + model_loaded.
             service_live: self.service_live,
             digests_verified: self.digests_verified,
+        }
+    }
+
+    /// Public live claim for HTTP/dashboard: matches readiness honesty
+    /// (`service_live ∧ digests_verified ∧ model_loaded`). Never report live without digests.
+    pub fn service_live_public(&self) -> bool {
+        self.service_live
+            && self.digests_verified
+            && !self.nodes_model_loaded.is_empty()
+            && !self.operator_paused
+    }
+
+    /// Set operator `service_live` intent; refuse true without digests_verified.
+    pub fn set_service_live_intent(&mut self, want: bool) {
+        if want && !self.digests_verified {
+            self.service_live = false;
+            info!("service_live intent true refused — digests not verified");
+        } else {
+            self.service_live = want;
+            // Public true still needs model_loaded (service_live_public).
         }
     }
 

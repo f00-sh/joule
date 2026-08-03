@@ -87,7 +87,8 @@ async fn healthz(State(app): State<App>) -> impl IntoResponse {
         "stream_slots_used": sched.stream_slots_used,
         "can_accept_work": sched.can_accept_work,
         "operator_paused": g.operator_paused,
-        "service_live": g.service_live,
+        "service_live": g.service_live_public(),
+        "digests_verified": g.digests_verified,
         "blob_digests": g.blobs.catalog().len(),
         "mesh_peers": g.mesh.healthy_count(),
         "mesh_total": g.mesh.snapshot().total,
@@ -299,7 +300,9 @@ async fn models(State(app): State<App>) -> impl IntoResponse {
             "inference_mode": ld.map(|d| d.inference_mode.clone()).unwrap_or_default(),
             "readiness_message": ld.map(|d| d.readiness_message.clone()).unwrap_or_default(),
             "model_loaded": flags.model_loaded,
-            "service_live": flags.service_live,
+            "digests_verified": flags.digests_verified,
+            // Honest live claim (not raw operator flag).
+            "service_live": g.service_live_public(),
         })]
     } else {
         vec![]
@@ -460,7 +463,10 @@ async fn operator_status(State(app): State<App>) -> impl IntoResponse {
     let g = app.state.read().await;
     Json(json!({
         "ok": true,
-        "service_live": g.service_live,
+        "service_live": g.service_live_public(),
+        "service_live_intent": g.service_live,
+        "digests_verified": g.digests_verified,
+        "model_loaded": !g.nodes_model_loaded.is_empty(),
         "operator_paused": g.operator_paused,
         "heartbeat_mint_mj": g.heartbeat_mint_mj,
         "dual_verify_every": g.dual_verify_every,
@@ -473,7 +479,7 @@ async fn operator_status(State(app): State<App>) -> impl IntoResponse {
         "operator_pubkey": crate::broadcast::operator_pubkey_hex(),
         "official_fingerprint": crate::pins::MASTER_OPENPGP_FINGERPRINT,
         "unofficial_override": crate::pins::unofficial_operator_allowed(),
-        "law": "pause/resume/policy via signed operator bus; digests peer-seeded",
+        "law": "service_live public only with digests_verified + model_loaded; digests peer-seeded",
     }))
 }
 

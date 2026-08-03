@@ -80,7 +80,8 @@ async fn apply_policy(app: &App, body_json: &str) {
     };
     let mut g = app.state.write().await;
     if let Some(v) = body.service_live {
-        g.service_live = v;
+        // Fail closed: cannot force public live without digests_verified.
+        g.set_service_live_intent(v);
     }
     if let Some(true) = body.pause {
         g.operator_paused = true;
@@ -99,7 +100,9 @@ async fn apply_policy(app: &App, body_json: &str) {
     }
     g.mark_dirty();
     info!(
-        service_live = g.service_live,
+        service_live_intent = g.service_live,
+        service_live_public = g.service_live_public(),
+        digests_verified = g.digests_verified,
         heartbeat_mint_mj = g.heartbeat_mint_mj,
         dual_verify_every = g.dual_verify_every,
         "operator policy applied"
