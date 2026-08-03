@@ -77,8 +77,10 @@ pub fn lab_stage_activation(req: &StageRequest) -> Result<StageOutput, String> {
     }
     let text = if req.is_tail {
         let digest = activation_commitment_hex(&out);
+        // Compact single metadata token + prompt so usage billing stays comparable
+        // to stub infer (whitespace token count drives mJ burn).
         Some(format!(
-            "[joule-pipeline-stage:{}] layers {}-{} upstream_bytes={} act={} | {}",
+            "[joule-pipeline-stage:{}:L{}-{}:upstream_bytes={}:act={}] {}",
             req.model,
             req.layer_start,
             req.layer_end,
@@ -136,6 +138,7 @@ mod tests {
         tail.require_upstream = true;
         let t = lab_stage_activation(&tail).unwrap();
         assert!(t.text.as_ref().unwrap().contains("upstream_bytes="));
+        assert!(t.text.as_ref().unwrap().contains("joule-pipeline-stage"));
         assert!(t.text.as_ref().unwrap().contains("hello"));
         // Wrong upstream fails closed for tail.
         let mut bad = tail.clone();

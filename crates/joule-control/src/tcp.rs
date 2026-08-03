@@ -1459,7 +1459,7 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
             request_id,
             model,
             prompt,
-            max_tokens: _,
+            max_tokens,
             plan,
             is_tail,
             upstream_activations,
@@ -1514,7 +1514,7 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
                     .infer(joule_runtime::InferRequest {
                         model: model.clone(),
                         prompt: prompt.clone(),
-                        max_tokens: 256,
+                        max_tokens: *max_tokens,
                     })
                     .await
                     .context("single-shard tail infer")?;
@@ -1708,7 +1708,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multi_donor_infer_tail_runs_engine() {
+    async fn multi_donor_infer_tail_runs_pipeline_stage() {
         let plan = demo_plan(joule_runtime::placement_model_layers());
         let eng = StubEngine::new();
         eng.load_plan(&plan).await.unwrap();
@@ -1726,6 +1726,10 @@ mod tests {
             })
             .await
             .unwrap();
+        assert!(
+            stage.activation.starts_with(b"JST1") && stage.activation.len() >= 16,
+            "non-tail stage must emit real tensor payload"
+        );
         let upstream = vec![joule_cluster::activation_from_payload(
             plan.shards[0].node.clone(),
             0,
@@ -1742,16 +1746,66 @@ mod tests {
                 max_tokens: 8,
                 plan: plan.clone(),
                 is_tail: true,
-                upstream_activations: upstream,
+                upstream_activations: upstream.clone(),
             },
         );
         let reply = agent_handle_infer(&env, &eng).await.expect("handle");
         match reply.msg {
             Message::InferDone { text, .. } => {
-                assert!(!text.is_empty(), "tail must produce tokens");
-                assert!(text.contains("tail-full-infer") || text.contains("joule"));
+                // Multi-shard tail must use stage_layers path, not independent engine.infer.
+                assert!(
+                    text.contains("joule-pipeline-stage"),
+                    "multi-shard tail must be pipeline stage, not stub infer: {text}"
+                );
+                assert!(
+                    text.contains("upstream_bytes=")
+                        && !text.contains("upstream_bytes=0]")
+                        && !text.contains("upstream_bytes=0:"),
+                    "tail stage must consume non-empty upstream: {text}"
+                );
+                assert!(
+                    text.contains("tail-full-infer"),
+                    "prompt must appear: {text}"
+                );
+                eprintln!(
+                    "OBSERVE real-pp agent_handle_infer: text_len={} upstream_payload_len={}",
+                    text.len(),
+                    stage.activation.len()
+                );
             }
             other => panic!("expected InferDone, got {other:?}"),
+        }
+
+        // Wrong/corrupt upstream payload must fail closed at verify (not run independent infer).
+        let mut bad = upstream;
+        bad[0].payload_b64 = String::new();
+        let env_bad = Envelope::new(
+            plan.shards[1].node.clone(),
+            Message::InferRequest {
+                request_id: Uuid::new_v4(),
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                max_tokens: 8,
+                plan: plan.clone(),
+                is_tail: true,
+                upstream_activations: bad,
+            },
+        );
+        let reply_bad = agent_handle_infer(&env_bad, &eng).await.expect("handle");
+        match reply_bad.msg {
+            Message::InferError { error, .. } => {
+                assert!(
+                    error.contains("activation")
+                        || error.contains("pipeline")
+                        || error.contains("payload"),
+                    "wrong upstream must fail closed via agent_handle_infer: {error}"
+                );
+                eprintln!("OBSERVE real-pp wrong-upstream fail-closed: {error}");
+            }
+            Message::InferDone { text, .. } => {
+                panic!("wrong upstream must not complete: {text}");
+            }
+            other => panic!("expected InferError for wrong upstream, got {other:?}"),
         }
     }
 

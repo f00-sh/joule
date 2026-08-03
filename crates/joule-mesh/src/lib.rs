@@ -741,7 +741,7 @@ impl PeerBus {
                 request_id,
                 model,
                 prompt,
-                max_tokens: _,
+                max_tokens,
                 plan,
                 is_tail,
                 upstream_activations,
@@ -756,7 +756,7 @@ impl PeerBus {
                             .infer(InferRequest {
                                 model: model.clone(),
                                 prompt: prompt.clone(),
-                                max_tokens: 256,
+                                max_tokens,
                             })
                             .await
                         {
