@@ -1,0 +1,31 @@
+{
+  "org": "f00-sh",
+  "org_sub": "joule",
+  "reply_to": "OPS/JOULE",
+  "to": "joule users and operators",
+  "from": "Project Engineering",
+  "subject": "joule v0.1.9 \u2014 product icon + Authenticode-ready Windows pipeline",
+  "ref": "CHANGELOG.md [0.1.9], tag v0.1.9",
+  "date": "2026-08-03",
+  "opening": "v0.1.9 ships the joule product icon in Windows exe, Setup, macOS app, and Linux packages, plus an Authenticode sign path when a code-signing PFX secret is configured.",
+  "sections": [
+    {
+      "heading": "Added",
+      "items": [
+        "packaging/icons + winres embed into joule.exe",
+        "AppIcon.icns for macOS .app/.pkg/.dmg",
+        "Linux hicolor icons and Icon=joule desktop entry",
+        "sign.ps1 + CI secrets JOULE_WINDOWS_CERT_PFX_BASE64"
+      ]
+    },
+    {
+      "heading": "Signing",
+      "body": "Without an OV/EV Authenticode certificate secret, Windows installers remain unsigned (SmartScreen may warn). Add the PFX as a GitHub Actions secret to sign on the next build."
+    }
+  ],
+  "signature": {
+    "name": "Project Engineering",
+    "title": "f00-sh / joule",
+    "office": ""
+  }
+}
