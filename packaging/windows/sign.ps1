@@ -1,15 +1,15 @@
 # Authenticode-sign Windows joule binaries when a code-signing cert is available.
 #
 # Inputs (env):
-#   JOULE_WINDOWS_CERT_PFX_BASE64  — base64 of a .pfx (preferred for CI secrets)
-#   JOULE_WINDOWS_CERT_PFX         — path to .pfx on disk
-#   JOULE_WINDOWS_CERT_PASSWORD    — PFX password (may be empty)
-#   JOULE_WINDOWS_TIMESTAMP_URL    — optional RFC3161 timestamp (default DigiCert)
+#   JOULE_WINDOWS_CERT_PFX_BASE64  - base64 of a .pfx (preferred for CI secrets)
+#   JOULE_WINDOWS_CERT_PFX         - path to .pfx on disk
+#   JOULE_WINDOWS_CERT_PASSWORD    - PFX password (may be empty)
+#   JOULE_WINDOWS_TIMESTAMP_URL    - optional RFC3161 timestamp (default DigiCert)
 #
 # Usage:
 #   packaging/windows/sign.ps1 -Files @("dist\joule.exe","dist\setup.exe")
 #
-# Exit 0 always when no cert is configured (unsigned ship is allowed).
+# Exit 0 when no cert is configured (unsigned ship is allowed).
 # Exit non-zero if a cert is configured but signing fails.
 
 param(
@@ -18,7 +18,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Write-Info($m) { Write-Host "[sign] $m" }
+function Write-Info([string]$m) {
+    Write-Host ("[sign] " + $m)
+}
 
 $pfxPath = $env:JOULE_WINDOWS_CERT_PFX
 $pfxB64 = $env:JOULE_WINDOWS_CERT_PFX_BASE64
@@ -37,7 +39,7 @@ try {
     }
 
     if (-not $pfxPath -or -not (Test-Path $pfxPath)) {
-        Write-Info "no cert configured (set JOULE_WINDOWS_CERT_PFX_BASE64 or JOULE_WINDOWS_CERT_PFX) — shipping unsigned"
+        Write-Info "no cert configured - shipping unsigned"
         exit 0
     }
 
@@ -51,7 +53,6 @@ try {
         if ($hit) { $signtool = $hit.FullName; break }
     }
     if (-not $signtool) {
-        # Try PATH
         $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
         if ($cmd) { $signtool = $cmd.Source }
     }
@@ -60,34 +61,26 @@ try {
         exit 2
     }
 
-    Write-Info "using $signtool"
-    Write-Info "timestamp $ts"
+    Write-Info ("using " + $signtool)
+    Write-Info ("timestamp " + $ts)
 
     foreach ($f in $Files) {
         if (-not (Test-Path $f)) {
-            Write-Error "missing file to sign: $f"
+            Write-Error ("missing file to sign: " + $f)
             exit 3
         }
-        Write-Info "signing $f"
-        # /fd sha256 /tr RFC3161 /td sha256
-        & $signtool sign `
-            /f $pfxPath `
-            /p $pass `
-            /fd sha256 `
-            /tr $ts `
-            /td sha256 `
-            /v `
-            $f
+        Write-Info ("signing " + $f)
+        & $signtool sign /f $pfxPath /p $pass /fd sha256 /tr $ts /td sha256 /v $f
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "signtool failed for $f (exit $LASTEXITCODE)"
+            Write-Error ("signtool failed for " + $f + " exit " + $LASTEXITCODE)
             exit $LASTEXITCODE
         }
         & $signtool verify /pa /v $f
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "signtool verify failed for $f"
+            Write-Error ("signtool verify failed for " + $f)
             exit $LASTEXITCODE
         }
-        Write-Info "signed+verified $f"
+        Write-Info ("signed and verified " + $f)
     }
     Write-Info "all files signed"
     exit 0
