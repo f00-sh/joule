@@ -37,6 +37,8 @@ pub struct LoadedModel {
     pub loaded_at_unix: u64,
     /// Basenames of weight files that contributed tensors (band gate).
     pub loaded_file_basenames: Vec<String>,
+    /// Tensor name → source weight file basename (for band-scoped stage select).
+    pub tensor_sources: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +102,7 @@ pub fn load_model(
     let mut tensor_info = Vec::new();
     let mut bytes_resident = 0u64;
     let mut loaded_file_basenames = Vec::new();
+    let mut tensor_sources = HashMap::new();
 
     // 1) Explicit manifest files (raw or safetensors by extension).
     for file in &quant.files {
@@ -115,6 +118,7 @@ pub fn load_model(
             let (t, info, n) = load_safetensors_file(&path)?;
             bytes_resident = bytes_resident.saturating_add(n);
             for (k, v) in t {
+                tensor_sources.insert(k.clone(), base.clone());
                 tensors.insert(k, v);
             }
             tensor_info.extend(info);
@@ -129,6 +133,7 @@ pub fn load_model(
                 shape: vec![data.len()],
                 nbytes: n,
             });
+            tensor_sources.insert(name.clone(), base.clone());
             tensors.insert(name, data);
         }
         loaded_file_basenames.push(base);
@@ -140,15 +145,19 @@ pub fn load_model(
             for ent in rd.flatten() {
                 let path = ent.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("safetensors") {
+                    let base = path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown.safetensors")
+                        .to_string();
                     let (t, info, n) = load_safetensors_file(&path)?;
                     bytes_resident = bytes_resident.saturating_add(n);
                     for (k, v) in t {
+                        tensor_sources.insert(k.clone(), base.clone());
                         tensors.insert(k, v);
                     }
                     tensor_info.extend(info);
-                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                        loaded_file_basenames.push(name.to_string());
-                    }
+                    loaded_file_basenames.push(base);
                 }
             }
         }
@@ -166,6 +175,7 @@ pub fn load_model(
                 nbytes: bytes_resident,
             });
             tensors.insert("__joule_armed__".into(), marker);
+            tensor_sources.insert("__joule_armed__".into(), ".armed".into());
         } else {
             return Err(LoadError::NotPrepared(
                 "no tensors on disk and cache not armed".into(),
@@ -185,6 +195,7 @@ pub fn load_model(
             .map(|d| d.as_secs())
             .unwrap_or(0),
         loaded_file_basenames,
+        tensor_sources,
     })
 }
 
@@ -210,6 +221,7 @@ pub fn load_model_for_band(
     let mut tensor_info = Vec::new();
     let mut bytes_resident = 0u64;
     let mut loaded_file_basenames = Vec::new();
+    let mut tensor_sources = HashMap::new();
 
     for base in &required {
         let file = quant
@@ -230,6 +242,7 @@ pub fn load_model_for_band(
             let (t, info, n) = load_safetensors_file(&path)?;
             bytes_resident = bytes_resident.saturating_add(n);
             for (k, v) in t {
+                tensor_sources.insert(k.clone(), base.clone());
                 tensors.insert(k, v);
             }
             tensor_info.extend(info);
@@ -244,6 +257,7 @@ pub fn load_model_for_band(
                 shape: vec![data.len()],
                 nbytes: n,
             });
+            tensor_sources.insert(name.clone(), base.clone());
             tensors.insert(name, data);
         }
         loaded_file_basenames.push(base.clone());
@@ -267,6 +281,7 @@ pub fn load_model_for_band(
             .map(|d| d.as_secs())
             .unwrap_or(0),
         loaded_file_basenames,
+        tensor_sources,
     })
 }
 

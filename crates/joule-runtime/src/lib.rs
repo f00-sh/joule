@@ -38,7 +38,10 @@ pub use stage::{
     activation_commitment_hex, lab_stage_activation, stage_activation,
     stage_activation_with_weights, weight_material_from_tensors, StageOutput, StageRequest,
 };
-pub use stage_matmul::{stage_activation_matmul, MATMUL_DIM};
+pub use stage_matmul::{
+    select_band_tensors, stage_activation_matmul, stage_activation_matmul_scoped, MATMUL_DIM,
+    MAX_STACK_BLOCKS,
+};
 pub use weights::{
     digests_verified_for_quant, is_lab_fixture_quant, is_synthetic_placeholder_digest,
     quant_can_unlock_service_digests, BlobAnnounce, PrepareStatus, WeightsStore,
@@ -288,10 +291,21 @@ impl Engine for ClusterEngine {
                 }
             }
         }
-        // Pure-Rust band matmul (JST3) when LoadedModel has f32 weight matrices.
-        // Falls back to JST2 weight-hash path if tensors are not matmul-shaped.
+        // Band-scoped multi-layer pure-Rust matmul (JST3). Prefer preferred-file
+        // tensors when source metadata exists; stack depth scales with layer span.
         if let Some(lm) = loaded {
-            match stage_activation_matmul(&req, &lm.tensors) {
+            let preferred = if !req.required_weight_files.is_empty() {
+                req.required_weight_files.clone()
+            } else {
+                joule_cluster::preferred_weight_files(req.layer_start, req.layer_end)
+                    .unwrap_or_default()
+            };
+            match stage_activation_matmul_scoped(
+                &req,
+                &lm.tensors,
+                Some(&lm.tensor_sources),
+                &preferred,
+            ) {
                 Ok(out) => return Ok(out),
                 Err(e) => {
                     let material = weight_material_from_tensors(&lm.tensors);
@@ -301,7 +315,6 @@ impl Engine for ClusterEngine {
                         }
                         return lab_stage_activation(&req).map_err(RuntimeError::Infer);
                     }
-                    // JST2 hash path still depends on weight bytes if matmul cannot run.
                     return stage_activation_with_weights(&req, &material)
                         .map_err(RuntimeError::Infer);
                 }
@@ -546,13 +559,20 @@ mod tests {
             &out.activation[..4.min(out.activation.len())]
         );
         assert!(!out.activation.is_empty());
-        // Mutate staged file content + reload → matmul activation must change.
+        // Mutate staged file: diagonal scale 1.0 → 2.5 (real f32 matmul difference).
         let path2 = md.join("model-00001-of-00016.safetensors");
         {
             use safetensors::tensor::{serialize, TensorView};
             use safetensors::Dtype;
             use std::collections::BTreeMap;
-            let data: Vec<u8> = vec![1u8; 64]; // different payload
+            let mut floats = vec![0.0f32; 16];
+            for i in 0..4 {
+                floats[i * 4 + i] = 2.5; // non-zero diagonal
+            }
+            let mut data = Vec::with_capacity(64);
+            for f in &floats {
+                data.extend_from_slice(&f.to_le_bytes());
+            }
             let tensor = TensorView::new(Dtype::F32, vec![4, 4], &data).unwrap();
             let mut map: BTreeMap<String, TensorView<'_>> = BTreeMap::new();
             map.insert("demo.weight".into(), tensor);
