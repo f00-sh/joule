@@ -180,6 +180,8 @@ pub struct ControlState {
     pub heartbeat_mint_mj: Millijoule,
     /// Every Nth chat request also runs a second-worker verify (0 = off).
     pub dual_verify_every: u64,
+    /// How long chat admission waits for a free stream slot (tests may shorten).
+    pub lease_wait: Duration,
     pub chat_count: u64,
     pub data_dir: Option<PathBuf>,
     /// Wake waiters when a compute slot frees.
@@ -237,6 +239,7 @@ impl ControlState {
             pending_challenges: HashMap::new(),
             heartbeat_mint_mj: 10,
             dual_verify_every: 3,
+            lease_wait: Duration::from_secs(20),
             chat_count: 0,
             data_dir: None,
             schedule_notify: None,
@@ -578,6 +581,18 @@ impl ControlState {
         self.pending_blob_xfers
             .retain(|_, (_, _, started)| now.duration_since(*started) < Duration::from_secs(120));
         self.mesh.prune_stale(Duration::from_secs(180));
+        // Expire stale stream leases so cancel/disconnect cannot strand slots forever.
+        let unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut book = std::mem::take(&mut self.leases);
+        let n = book.expire_stale(&mut self.cluster, unix);
+        self.leases = book;
+        if n > 0 {
+            self.wake_scheduler();
+            warn!(expired = n, "expired stale stream leases");
+        }
         self.save_if_dirty();
     }
 

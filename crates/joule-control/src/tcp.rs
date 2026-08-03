@@ -635,6 +635,7 @@ pub async fn dispatch_mesh_infer(
         let mut g = app.state.write().await;
         g.admit_stream_lease(account, request_id, Duration::from_secs(90))?
     };
+    let mut guard = StreamLeaseGuard::new(app, request_id);
     // Prefer lease plan shards (registry) when they match mesh geometry size;
     // mesh plan is used for PlanOffer agreement among mesh donors.
     let plan = plan_geometry;
@@ -700,7 +701,9 @@ pub async fn dispatch_mesh_infer(
         if !send_to_agent(&app.routes, &shard.node, env).await {
             let mut g = app.state.write().await;
             g.pending_plan_accepts.remove(&request_id);
-            g.release_stream_lease(request_id, "lease_released", "plan offer fail");
+            guard
+                .release_now("lease_released", "plan offer fail")
+                .await;
             return Err(format!("PlanOffer: shard {} not connected", shard.node));
         }
     }
@@ -714,7 +717,8 @@ pub async fn dispatch_mesh_infer(
     if let Err(e) = agree {
         let mut g = app.state.write().await;
         g.pending_plan_accepts.remove(&request_id);
-        g.release_stream_lease(request_id, "lease_released", &e);
+        drop(g);
+        guard.release_now("lease_released", &e).await;
         return Err(e);
     }
 
@@ -732,15 +736,11 @@ pub async fn dispatch_mesh_infer(
         CoordinationPath::MeshRequestInfer,
     )
     .await;
-    // Always release lease (success, error, or timeout inside fanout).
-    {
-        let mut g = app.state.write().await;
-        let detail = match &out {
-            Ok(_) => "infer ok",
-            Err(e) => e.as_str(),
-        };
-        g.release_stream_lease(request_id, "lease_released", detail);
-    }
+    let detail = match &out {
+        Ok(_) => "infer ok",
+        Err(e) => e.as_str(),
+    };
+    guard.release_now("lease_released", detail).await;
     out
 }
 
@@ -754,7 +754,12 @@ async fn dispatch_control_stream(
     charge: bool,
 ) -> Result<InferOutcome, String> {
     let request_id = Uuid::new_v4();
-    let lease = acquire_lease_with_wait(app, account, request_id, Duration::from_secs(20)).await?;
+    let wait = {
+        let g = app.state.read().await;
+        g.lease_wait
+    };
+    let lease = acquire_lease_with_wait(app, account, request_id, wait).await?;
+    let mut guard = StreamLeaseGuard::new(app, request_id);
     let plan = lease.plan.clone();
     let plan_hash_hex = lease.plan_hash_hex.clone();
     info!(
@@ -795,7 +800,10 @@ async fn dispatch_control_stream(
         if !send_to_agent(&app.routes, &shard.node, env).await {
             let mut g = app.state.write().await;
             g.pending_plan_accepts.remove(&request_id);
-            g.release_stream_lease(request_id, "lease_released", "plan offer fail");
+            drop(g);
+            guard
+                .release_now("lease_released", "plan offer fail")
+                .await;
             return Err(format!("PlanOffer: shard {} not connected", shard.node));
         }
     }
@@ -808,7 +816,8 @@ async fn dispatch_control_stream(
     if let Err(e) = agree {
         let mut g = app.state.write().await;
         g.pending_plan_accepts.remove(&request_id);
-        g.release_stream_lease(request_id, "lease_released", &e);
+        drop(g);
+        guard.release_now("lease_released", &e).await;
         return Err(e);
     }
 
@@ -826,14 +835,11 @@ async fn dispatch_control_stream(
     )
     .await;
 
-    {
-        let mut g = app.state.write().await;
-        let detail = match &out {
-            Ok(_) => "infer ok",
-            Err(e) => e.as_str(),
-        };
-        g.release_stream_lease(request_id, "lease_released", detail);
-    }
+    let detail = match &out {
+        Ok(_) => "infer ok",
+        Err(e) => e.as_str(),
+    };
+    guard.release_now("lease_released", detail).await;
 
     let out = out?;
 
@@ -1010,6 +1016,53 @@ async fn acquire_lease_with_wait(
             _ = app.schedule_notify.notified() => {}
             _ = tokio::time::sleep(wait) => {}
         }
+    }
+}
+
+/// Cancel-safe lease hold: releases on Drop if not disarmed (client cancel / panic path).
+struct StreamLeaseGuard {
+    app: App,
+    request_id: Uuid,
+    released: bool,
+}
+
+impl StreamLeaseGuard {
+    fn new(app: &App, request_id: Uuid) -> Self {
+        Self {
+            app: app.clone(),
+            request_id,
+            released: false,
+        }
+    }
+
+    async fn release_now(&mut self, event: &str, detail: &str) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let mut g = self.app.state.write().await;
+        g.release_stream_lease(self.request_id, event, detail);
+    }
+
+}
+
+impl Drop for StreamLeaseGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let app = self.app.clone();
+        let rid = self.request_id;
+        // Prefer immediate try_write so cancel paths free slots without waiting a task.
+        if let Ok(mut g) = app.state.try_write() {
+            g.release_stream_lease(rid, "lease_released", "drop guard");
+            return;
+        }
+        tokio::spawn(async move {
+            let mut g = app.state.write().await;
+            g.release_stream_lease(rid, "lease_released", "drop guard async");
+        });
     }
 }
 

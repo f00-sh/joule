@@ -1884,3 +1884,642 @@ async fn late_joiner_gets_model_digests() {
     std::env::remove_var("JOULE_OPERATOR_PUBKEY");
     std::env::remove_var("JOULE_ALLOW_UNOFFICIAL_OPERATOR");
 }
+
+/// Concurrent chat free→used→free + GET /v1/cluster/leases audit trail.
+#[tokio::test]
+async fn lease_chat_free_used_free_and_audit() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let (api_key, agent) = spawn_agent(agent_addr, "lease-alice", 16384).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+
+    let sched_before: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let free_before = sched_before["stream_slots_free"].as_u64().unwrap();
+    let used_before = sched_before["stream_slots_used"].as_u64().unwrap();
+    assert!(free_before >= 1, "sched={sched_before}");
+    assert_eq!(used_before, 0);
+    eprintln!("OBSERVE before free={free_before} used={used_before} sched={sched_before}");
+
+    // Concurrent completions within capacity.
+    let mut handles = Vec::new();
+    for i in 0..3 {
+        let client = client.clone();
+        let base = base.clone();
+        let key = api_key.clone();
+        handles.push(tokio::spawn(async move {
+            client
+                .post(format!("{base}/v1/chat/completions"))
+                .header("Authorization", format!("Bearer {key}"))
+                .json(&serde_json::json!({
+                    "model": CLUSTER_MODEL,
+                    "messages": [{"role":"user","content": format!("lease-concurrent-{i}")}],
+                    "max_tokens": 16
+                }))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+    let mut mid_used = 0u64;
+    for _ in 0..40 {
+        let s: serde_json::Value = client
+            .get(format!("{base}/v1/cluster/scheduler"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        mid_used = mid_used.max(s["stream_slots_used"].as_u64().unwrap_or(0));
+        let done = handles.iter().all(|h| h.is_finished());
+        if done {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    eprintln!("OBSERVE mid max_used={mid_used}");
+    for h in handles {
+        let resp = h.await.unwrap();
+        assert!(
+            resp.status().is_success(),
+            "status={} body={}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+    }
+
+    let sched_after: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        sched_after["stream_slots_used"].as_u64().unwrap(),
+        0,
+        "must free after concurrent chats: {sched_after}"
+    );
+    assert_eq!(
+        sched_after["stream_slots_free"].as_u64().unwrap(),
+        free_before
+    );
+    eprintln!("OBSERVE after free={} used={} sched={sched_after}",
+        sched_after["stream_slots_free"], sched_after["stream_slots_used"]);
+
+    let leases: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/leases"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(leases["ok"], true);
+    assert_eq!(leases["active_leases"].as_u64().unwrap(), 0);
+    let audit = leases["audit"].as_array().expect("audit array");
+    assert!(
+        audit.iter().any(|e| e["event"] == "lease_granted"),
+        "audit={leases}"
+    );
+    assert!(
+        audit.iter().any(|e| e["event"] == "lease_released"),
+        "audit={leases}"
+    );
+    assert!(
+        audit.iter().any(|e| e["event"] == "plan_agreed"),
+        "audit must show multi-party agree: {leases}"
+    );
+    eprintln!("OBSERVE audit trail (request→lease→accepts→release): {leases}");
+    // mid_used may be 0 if requests were very fast; prefer seeing use or at least audit grants.
+    assert!(
+        mid_used > 0
+            || audit
+                .iter()
+                .filter(|e| e["event"] == "lease_granted")
+                .count()
+                >= 3,
+        "mid_used={mid_used} audit={leases}"
+    );
+
+    agent.abort();
+}
+
+/// Pool full → HTTP 503 + code pool_full; used never exceeds total.
+#[tokio::test]
+async fn lease_pool_full_http_503() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+        // Fail closed quickly once saturated.
+        g.lease_wait = Duration::from_millis(250);
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    // 4096 MiB → 1 stream slot. Hang on InferRequest to hold the lease.
+    let hang = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (api_key, hang_agent) =
+        spawn_agent_hang_infer(agent_addr, "full-only", 4096, hang.clone()).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let sched: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let total = sched["stream_slots_total"].as_u64().unwrap().max(1);
+    assert!(total >= 1, "sched={sched}");
+
+    // Start `total` long-running chats that hold leases after PlanAccept.
+    let mut holders = Vec::new();
+    for i in 0..total {
+        let client = client.clone();
+        let base = base.clone();
+        let key = api_key.clone();
+        holders.push(tokio::spawn(async move {
+            client
+                .post(format!("{base}/v1/chat/completions"))
+                .header("Authorization", format!("Bearer {key}"))
+                .timeout(Duration::from_secs(8))
+                .json(&serde_json::json!({
+                    "model": CLUSTER_MODEL,
+                    "messages": [{"role":"user","content": format!("hold-{i}")}],
+                    "max_tokens": 8
+                }))
+                .send()
+                .await
+        }));
+    }
+    // Wait until used == total
+    let mut used = 0u64;
+    for _ in 0..80 {
+        let s: serde_json::Value = client
+            .get(format!("{base}/v1/cluster/scheduler"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        used = s["stream_slots_used"].as_u64().unwrap_or(0);
+        if used >= total {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(used >= total, "failed to saturate used={used} total={total}");
+    eprintln!("OBSERVE saturated used={used} total={total}");
+
+    let over = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .timeout(Duration::from_secs(5))
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role":"user","content":"should-be-full"}],
+            "max_tokens": 8
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = over.status();
+    let body: serde_json::Value = over.json().await.unwrap();
+    eprintln!("OBSERVE pool_full HTTP status={status} body={body}");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "status={status} body={body}"
+    );
+    assert_eq!(body["code"], "pool_full", "body={body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("pool full"),
+        "body={body}"
+    );
+
+    let s_max: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        s_max["stream_slots_used"].as_u64().unwrap()
+            <= s_max["stream_slots_total"].as_u64().unwrap(),
+        "{s_max}"
+    );
+
+    // Unhang → holders finish → free restored.
+    hang.store(false, std::sync::atomic::Ordering::SeqCst);
+    for h in holders {
+        let _ = h.await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    {
+        let mut g = app.state.write().await;
+        g.prune();
+    }
+    let s_end: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        s_end["stream_slots_used"].as_u64().unwrap(),
+        0,
+        "end={s_end}"
+    );
+    eprintln!("OBSERVE after unhang free restored: {s_end}");
+
+    hang_agent.abort();
+}
+
+/// Invalid PlanAccept confirm_hex aborts; lease released; no false success.
+#[tokio::test]
+async fn lease_invalid_plan_accept_aborts_and_releases() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+        g.lease_wait = Duration::from_secs(2);
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let (api_key, agent) = spawn_agent_bad_accept(agent_addr, "bad-accept", 8192).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let sched0: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let free0 = sched0["stream_slots_free"].as_u64().unwrap();
+
+    let resp = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role":"user","content":"tamper-accept"}],
+            "max_tokens": 8
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    eprintln!("OBSERVE invalid PlanAccept status={status} body={body}");
+    assert!(
+        !status.is_success(),
+        "tampered accept must not succeed: {status}"
+    );
+    assert!(
+        body.contains("confirm")
+            || body.contains("plan")
+            || body.contains("reject")
+            || body.contains("mismatch")
+            || body.contains("timed out")
+            || body.contains("Service"),
+        "body={body}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let sched1: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    eprintln!("OBSERVE after invalid accept free0={free0} sched={sched1}");
+    assert_eq!(
+        sched1["stream_slots_used"].as_u64().unwrap(),
+        0,
+        "lease must release after invalid accept: {sched1}"
+    );
+    assert_eq!(sched1["stream_slots_free"].as_u64().unwrap(), free0);
+
+    let leases: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/leases"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    eprintln!("OBSERVE invalid-accept audit={leases}");
+    let audit = leases["audit"].as_array().cloned().unwrap_or_default();
+    assert!(
+        audit.iter().any(|e| {
+            let ev = e["event"].as_str().unwrap_or("");
+            ev == "plan_accept_invalid" || ev == "lease_released" || ev == "plan_hash_mismatch"
+        }),
+        "audit={leases}"
+    );
+
+    agent.abort();
+}
+
+/// Agent that hangs on InferRequest (holds stream lease while hanging).
+async fn spawn_agent_hang_infer(
+    agent_addr: std::net::SocketAddr,
+    account: &str,
+    mem: u32,
+    release: Arc<std::sync::atomic::AtomicBool>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let node_id = NodeId::new();
+    let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let hello = Envelope::new(
+        node_id.clone(),
+        Message::Hello {
+            account: account.into(),
+            caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
+            pubkey_hex: String::new(),
+            sig_hex: String::new(),
+            signed_at_unix_ms: 0,
+        },
+    );
+    writer
+        .write_all(&encode_line(&hello).unwrap())
+        .await
+        .unwrap();
+    let welcome_line = lines.next_line().await.unwrap().expect("welcome");
+    let welcome = decode_line(welcome_line.as_bytes()).unwrap();
+    let api_key = match welcome.msg {
+        Message::Welcome { api_key, .. } => api_key,
+        other => panic!("expected welcome, got {other:?}"),
+    };
+    writer
+        .write_all(&encode_line(&Envelope::new(
+            node_id.clone(),
+            Message::Heartbeat {
+                load: 0.0,
+                healthy: true,
+            },
+        ))
+        .unwrap())
+        .await
+        .unwrap();
+    writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::PeerAlive {
+                    multiaddrs: vec![format!("tcp://127.0.0.1:{}", 18000 + (mem % 1000))],
+                    load: 0.05,
+                    healthy: true,
+                    blob_count: 0,
+                    mem_mib: mem,
+                    verified_mem_mib: 0,
+                    throughput_class: 40,
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(async move {
+        let stub = StubEngine::new();
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let hb = Envelope::new(
+                        node_id.clone(),
+                        Message::Heartbeat { load: 0.05, healthy: true },
+                    );
+                    if writer.write_all(&encode_line(&hb).unwrap()).await.is_err() {
+                        break;
+                    }
+                }
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { break; };
+                    if line.trim().is_empty() { continue; }
+                    let env = decode_line(line.as_bytes()).unwrap();
+                    match &env.msg {
+                        Message::PlanOffer {
+                            plan,
+                            request_id,
+                            plan_hash_hex,
+                        } => {
+                            let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                            let (ph, confirm) = joule_cluster::plan_accept_fields(
+                                plan,
+                                *request_id,
+                                &node_id,
+                                accepted,
+                                Some(plan_hash_hex.as_str()).filter(|s| !s.is_empty()),
+                            );
+                            let reply = Envelope::new(
+                                node_id.clone(),
+                                Message::PlanAccept {
+                                    plan_id: plan.plan_id,
+                                    request_id: *request_id,
+                                    accepted,
+                                    reason: "hang-agent accept".into(),
+                                    plan_hash_hex: ph,
+                                    confirm_hex: confirm,
+                                },
+                            );
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::InferRequest { .. } => {
+                            // Hold until release flag clears.
+                            while release.load(std::sync::atomic::Ordering::SeqCst) {
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                            }
+                            let reply = joule_control::agent_handle_infer(&env, &stub)
+                                .await
+                                .unwrap();
+                            let reply = Envelope::new(node_id.clone(), reply.msg);
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::Challenge { .. } => {
+                            let reply = joule_control::agent_handle_challenge(&env, &stub)
+                                .await
+                                .unwrap();
+                            let reply = Envelope::new(node_id.clone(), reply.msg);
+                            let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+    (api_key, handle)
+}
+
+/// Agent that always sends invalid PlanAccept confirm_hex.
+async fn spawn_agent_bad_accept(
+    agent_addr: std::net::SocketAddr,
+    account: &str,
+    mem: u32,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let node_id = NodeId::new();
+    let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let hello = Envelope::new(
+        node_id.clone(),
+        Message::Hello {
+            account: account.into(),
+            caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
+            pubkey_hex: String::new(),
+            sig_hex: String::new(),
+            signed_at_unix_ms: 0,
+        },
+    );
+    writer
+        .write_all(&encode_line(&hello).unwrap())
+        .await
+        .unwrap();
+    let welcome_line = lines.next_line().await.unwrap().expect("welcome");
+    let welcome = decode_line(welcome_line.as_bytes()).unwrap();
+    let api_key = match welcome.msg {
+        Message::Welcome { api_key, .. } => api_key,
+        other => panic!("expected welcome, got {other:?}"),
+    };
+    writer
+        .write_all(&encode_line(&Envelope::new(
+            node_id.clone(),
+            Message::Heartbeat {
+                load: 0.0,
+                healthy: true,
+            },
+        ))
+        .unwrap())
+        .await
+        .unwrap();
+    writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::PeerAlive {
+                    multiaddrs: vec![format!("tcp://127.0.0.1:{}", 19000 + (mem % 1000))],
+                    load: 0.05,
+                    healthy: true,
+                    blob_count: 0,
+                    mem_mib: mem,
+                    verified_mem_mib: 0,
+                    throughput_class: 40,
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(async move {
+        let stub = StubEngine::new();
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let hb = Envelope::new(
+                        node_id.clone(),
+                        Message::Heartbeat { load: 0.05, healthy: true },
+                    );
+                    if writer.write_all(&encode_line(&hb).unwrap()).await.is_err() {
+                        break;
+                    }
+                }
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { break; };
+                    if line.trim().is_empty() { continue; }
+                    let env = decode_line(line.as_bytes()).unwrap();
+                    match &env.msg {
+                        Message::PlanOffer {
+                            plan,
+                            request_id,
+                            plan_hash_hex,
+                        } => {
+                            let reply = Envelope::new(
+                                node_id.clone(),
+                                Message::PlanAccept {
+                                    plan_id: plan.plan_id,
+                                    request_id: *request_id,
+                                    accepted: true,
+                                    reason: "bad confirm".into(),
+                                    plan_hash_hex: plan_hash_hex.clone(),
+                                    confirm_hex: "deadbeef".into(),
+                                },
+                            );
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::InferRequest { .. } => {
+                            // Should never be asked if fail-closed works.
+                            let reply = joule_control::agent_handle_infer(&env, &stub)
+                                .await
+                                .unwrap();
+                            let reply = Envelope::new(node_id.clone(), reply.msg);
+                            let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
+                        }
+                        Message::Challenge { .. } => {
+                            let reply = joule_control::agent_handle_challenge(&env, &stub)
+                                .await
+                                .unwrap();
+                            let reply = Envelope::new(node_id.clone(), reply.msg);
+                            let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+    (api_key, handle)
+}

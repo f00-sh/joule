@@ -7,12 +7,14 @@
 //! See docs/design/decentral-discovery-v0.md.
 
 use anyhow::{bail, Context, Result};
-use joule_cluster::plan_from_mesh_donors;
-use joule_proto::{ClusterPlan, Envelope, Message, NodeId, CLUSTER_MODEL};
+use joule_cluster::{plan_from_mesh_donors, Cluster, LeaseBook};
+use joule_proto::{
+    ClusterPlan, DeviceClass, Envelope, Message, NodeCaps, NodeId, CLUSTER_MODEL,
+};
 use joule_runtime::{Engine, InferRequest, StubEngine};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -86,8 +88,14 @@ pub struct InflightRequest {
     pub max_tokens: u32,
     pub coordinator: NodeId,
     pub plan: Option<ClusterPlan>,
+    /// Canonical plan hash every PlanAccept must confirm.
+    pub plan_hash_hex: String,
     pub accepts: HashSet<NodeId>,
     pub attempt: u32,
+    /// True after a stream lease was admitted for this request.
+    pub lease_held: bool,
+    /// Abort reason (invalid confirm, reject, pool full) — no InferDone success.
+    pub aborted: Option<String>,
 }
 
 /// Peer-only mesh bus: nodes exchange envelopes without control.
@@ -108,6 +116,9 @@ struct PeerBusInner {
     coord_timeout: Duration,
     /// Force next coordinator death for tests (drop messages from that node as coordinator).
     dead_coordinators: HashSet<NodeId>,
+    /// Stream capacity + leases (same truth as control path).
+    cluster: Cluster,
+    leases: LeaseBook,
 }
 
 impl PeerBus {
@@ -121,8 +132,35 @@ impl PeerBus {
                 completions: HashMap::new(),
                 coord_timeout: Duration::from_millis(500),
                 dead_coordinators: HashSet::new(),
+                cluster: Cluster::default(),
+                leases: LeaseBook::default(),
             })),
         }
+    }
+
+    /// Active stream leases + scheduler free/used (for tests / audit).
+    pub async fn capacity_snapshot(&self) -> (u32, u32, u32, u32) {
+        let g = self.inner.lock().await;
+        let s = g.cluster.scheduler_snapshot();
+        (
+            s.stream_slots_total,
+            s.stream_slots_used,
+            s.stream_slots_free,
+            g.leases.active_count(),
+        )
+    }
+
+    pub async fn audit_trail(&self) -> Vec<joule_cluster::LeaseAuditEntry> {
+        self.inner.lock().await.leases.audit_trail().to_vec()
+    }
+
+    pub async fn abort_reason(&self, request_id: Uuid) -> Option<String> {
+        self.inner
+            .lock()
+            .await
+            .inflight
+            .get(&request_id)
+            .and_then(|i| i.aborted.clone())
     }
 
     pub async fn set_coord_timeout(&self, d: Duration) {
@@ -141,14 +179,13 @@ impl PeerBus {
         let mut g = self.inner.lock().await;
         g.mailboxes.insert(donor.node.clone(), tx);
         g.donors.insert(donor.node.clone(), donor);
+        sync_mesh_capacity(&mut g);
     }
 
     pub async fn upsert_donor(&self, donor: MeshDonor) {
-        self.inner
-            .lock()
-            .await
-            .donors
-            .insert(donor.node.clone(), donor);
+        let mut g = self.inner.lock().await;
+        g.donors.insert(donor.node.clone(), donor);
+        sync_mesh_capacity(&mut g);
     }
 
     async fn send_to(&self, to: &NodeId, env: Envelope) -> Result<()> {
@@ -203,8 +240,11 @@ impl PeerBus {
                     max_tokens,
                     coordinator: coordinator.clone(),
                     plan: None,
+                    plan_hash_hex: String::new(),
                     accepts: HashSet::new(),
                     attempt: 0,
+                    lease_held: false,
+                    aborted: None,
                 },
             );
         }
@@ -258,12 +298,62 @@ impl PeerBus {
                     bail!("local coordinator is marked dead");
                 }
                 let plan = replan(&donors)?;
+                let plan_hash_hex = joule_cluster::plan_hash_hex(&plan);
+                // Stream lease before any PlanOffer (fail closed if pool full).
                 {
                     let mut g = self.inner.lock().await;
+                    sync_mesh_capacity(&mut g);
+                    // Release prior lease on replan attempts for same request.
+                    if g
+                        .inflight
+                        .get(&request_id)
+                        .map(|i| i.lease_held)
+                        .unwrap_or(false)
+                    {
+                        mesh_release(&mut g, request_id, "lease_released", "replan");
+                        if let Some(inf) = g.inflight.get_mut(&request_id) {
+                            inf.lease_held = false;
+                        }
+                    }
+                    match mesh_try_admit(&mut g, &account, request_id) {
+                        Ok(_lease) => {
+                            mesh_bind_hash(&mut g, request_id, plan_hash_hex.clone());
+                        }
+                        Err(e) => {
+                            warn!(%request_id, error = %e, "peer-bus pool full — no PlanOffer");
+                            if let Some(inf) = g.inflight.get_mut(&request_id) {
+                                inf.aborted = Some(e.clone());
+                                inf.lease_held = false;
+                            } else {
+                                g.inflight.insert(
+                                    request_id,
+                                    InflightRequest {
+                                        request_id,
+                                        account: account.clone(),
+                                        model: model.clone(),
+                                        prompt: prompt.clone(),
+                                        max_tokens,
+                                        coordinator: local.clone(),
+                                        plan: None,
+                                        plan_hash_hex: String::new(),
+                                        accepts: HashSet::new(),
+                                        attempt: 1,
+                                        lease_held: false,
+                                        aborted: Some(e),
+                                    },
+                                );
+                            }
+                            return Ok(());
+                        }
+                    }
                     if let Some(inf) = g.inflight.get_mut(&request_id) {
                         inf.coordinator = local.clone();
                         inf.plan = Some(plan.clone());
+                        inf.plan_hash_hex = plan_hash_hex.clone();
+                        inf.accepts.clear();
                         inf.attempt += 1;
+                        inf.lease_held = true;
+                        inf.aborted = None;
                     } else {
                         g.inflight.insert(
                             request_id,
@@ -275,14 +365,21 @@ impl PeerBus {
                                 max_tokens,
                                 coordinator: local.clone(),
                                 plan: Some(plan.clone()),
+                                plan_hash_hex: plan_hash_hex.clone(),
                                 accepts: HashSet::new(),
                                 attempt: 1,
+                                lease_held: true,
+                                aborted: None,
                             },
                         );
                     }
                 }
-                info!(%request_id, shards = plan.shards.len(), "peer-bus PlanOffer");
-                let plan_hash_hex = joule_cluster::plan_hash_hex(&plan);
+                info!(
+                    %request_id,
+                    shards = plan.shards.len(),
+                    %plan_hash_hex,
+                    "peer-bus PlanOffer + stream lease"
+                );
                 let offer = Envelope::new(
                     local.clone(),
                     Message::PlanOffer {
@@ -350,34 +447,115 @@ impl PeerBus {
                 }
             }
             Message::PlanAccept {
-                plan_id: _,
+                plan_id,
                 request_id,
                 accepted,
-                ..
+                plan_hash_hex,
+                confirm_hex,
+                reason: _,
             } => {
-                if !accepted {
-                    return Ok(());
-                }
-                let (ready, plan, prompt, max_tokens, model) = {
-                    let mut g = self.inner.lock().await;
-                    let Some(inf) = g.inflight.get_mut(&request_id) else {
+                let decision = {
+                    let g = self.inner.lock().await;
+                    let Some(inf) = g.inflight.get(&request_id) else {
                         return Ok(());
                     };
-                    // Only the elected coordinator collects accepts / fans out Infer.
-                    if &inf.coordinator != local {
+                    if &inf.coordinator != local || inf.aborted.is_some() {
                         return Ok(());
                     }
-                    inf.accepts.insert(env.from.clone());
-                    let plan = inf.plan.clone();
-                    let need = plan.as_ref().map(|p| p.shards.len()).unwrap_or(0);
-                    let ready = plan.is_some() && inf.accepts.len() >= need && need > 0;
-                    (
-                        ready,
-                        plan,
-                        inf.prompt.clone(),
-                        inf.max_tokens,
-                        inf.model.clone(),
-                    )
+                    let want_hash = inf.plan_hash_hex.clone();
+                    if want_hash.is_empty() {
+                        return Ok(());
+                    }
+                    // Pre-check without holding mut borrow across lease helpers.
+                    if let Err(e) = joule_cluster::verify_plan_accept_confirm(
+                        plan_id,
+                        request_id,
+                        &env.from,
+                        accepted,
+                        &want_hash,
+                        &confirm_hex,
+                    ) {
+                        Some(Err((
+                            "plan_accept_invalid".to_string(),
+                            format!("{}: {e}", env.from),
+                            format!("invalid confirm: {e}"),
+                            want_hash,
+                        )))
+                    } else if !plan_hash_hex.is_empty() && plan_hash_hex != want_hash {
+                        let detail = format!(
+                            "plan hash mismatch from {}: got {plan_hash_hex}",
+                            env.from
+                        );
+                        Some(Err((
+                            "plan_hash_mismatch".to_string(),
+                            detail.clone(),
+                            detail,
+                            want_hash,
+                        )))
+                    } else if !accepted {
+                        Some(Err((
+                            "plan_rejected".to_string(),
+                            env.from.to_string(),
+                            format!("plan rejected by {}", env.from),
+                            want_hash,
+                        )))
+                    } else {
+                        Some(Ok(want_hash))
+                    }
+                };
+                let Some(decision) = decision else {
+                    return Ok(());
+                };
+                let (ready, plan, prompt, max_tokens, model) = match decision {
+                    Err((event, audit_detail, abort_reason, want_hash)) => {
+                        warn!(%request_id, from = %env.from, %event, "peer PlanAccept rejected");
+                        let mut g = self.inner.lock().await;
+                        mesh_record_accepts(
+                            &mut g,
+                            request_id,
+                            &[],
+                            &event,
+                            &audit_detail,
+                            Some(&want_hash),
+                        );
+                        abort_inflight_and_release(&mut g, request_id, abort_reason);
+                        return Ok(());
+                    }
+                    Ok(want_hash) => {
+                        let mut g = self.inner.lock().await;
+                        let (ready, plan, prompt, max_tokens, model, accepts) = {
+                            let Some(inf) = g.inflight.get_mut(&request_id) else {
+                                return Ok(());
+                            };
+                            if &inf.coordinator != local || inf.aborted.is_some() {
+                                return Ok(());
+                            }
+                            inf.accepts.insert(env.from.clone());
+                            let plan = inf.plan.clone();
+                            let prompt = inf.prompt.clone();
+                            let max_tokens = inf.max_tokens;
+                            let model = inf.model.clone();
+                            let need = plan.as_ref().map(|p| p.shards.len()).unwrap_or(0);
+                            let ready = plan.is_some() && inf.accepts.len() >= need && need > 0;
+                            let accepts: Vec<NodeId> = if ready {
+                                inf.accepts.iter().cloned().collect()
+                            } else {
+                                vec![]
+                            };
+                            (ready, plan, prompt, max_tokens, model, accepts)
+                        };
+                        if ready {
+                            mesh_record_accepts(
+                                &mut g,
+                                request_id,
+                                &accepts,
+                                "plan_agreed",
+                                "all shards confirmed (peer-bus)",
+                                Some(&want_hash),
+                            );
+                        }
+                        (ready, plan, prompt, max_tokens, model)
+                    }
                 };
                 if let (true, Some(plan)) = (ready, plan) {
                     let tail = plan.shards.last().map(|s| s.node.clone());
@@ -441,7 +619,29 @@ impl PeerBus {
             Message::InferDone {
                 request_id, text, ..
             } if !text.is_empty() => {
-                self.inner.lock().await.completions.insert(request_id, text);
+                let mut g = self.inner.lock().await;
+                if g
+                    .inflight
+                    .get(&request_id)
+                    .and_then(|i| i.aborted.as_ref())
+                    .is_some()
+                {
+                    // Never complete after aborted agreement.
+                    return Ok(());
+                }
+                g.completions.insert(request_id, text);
+                // Release stream lease on successful settle.
+                if g
+                    .inflight
+                    .get(&request_id)
+                    .map(|i| i.lease_held)
+                    .unwrap_or(false)
+                {
+                    mesh_release(&mut g, request_id, "lease_released", "infer ok");
+                    if let Some(inf) = g.inflight.get_mut(&request_id) {
+                        inf.lease_held = false;
+                    }
+                }
             }
             Message::InferDone { .. } => {}
             _ => {}
@@ -469,6 +669,23 @@ impl PeerBus {
                 return Ok(t);
             }
             if start.elapsed() > overall_timeout {
+                // Always release on timeout so slots free→used→free.
+                {
+                    let mut g = self.inner.lock().await;
+                    if g
+                        .inflight
+                        .get(&request_id)
+                        .map(|i| i.lease_held)
+                        .unwrap_or(false)
+                    {
+                        mesh_release(&mut g, request_id, "lease_released", "peer-bus timeout");
+                        if let Some(inf) = g.inflight.get_mut(&request_id) {
+                            inf.lease_held = false;
+                            inf.aborted =
+                                Some(inf.aborted.clone().unwrap_or_else(|| "timeout".into()));
+                        }
+                    }
+                }
                 bail!("peer-bus infer timed out");
             }
             let coord_timeout = self.inner.lock().await.coord_timeout;
@@ -574,6 +791,107 @@ pub async fn run_peer_actor(
     }
 }
 
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Mirror mesh donors into the local Cluster for stream-slot accounting.
+fn sync_mesh_capacity(inner: &mut PeerBusInner) {
+    for d in inner.donors.values() {
+        if !d.healthy {
+            if let Ok(()) = inner.cluster.set_health(&d.node, false, 1.0) {
+                // ok
+            }
+            continue;
+        }
+        let mem = joule_cluster::placement_mem_mib(d.verified_mem_mib);
+        if mem == 0 {
+            continue;
+        }
+        inner.cluster.upsert_node(
+            d.node.clone(),
+            "mesh",
+            NodeCaps::for_cluster(DeviceClass::Gpu, mem, 10),
+        );
+        inner.cluster.set_verified_mem_mib(&d.node, mem);
+        let _ = inner.cluster.set_health(&d.node, true, 0.0);
+    }
+}
+
+fn abort_inflight_and_release(inner: &mut PeerBusInner, request_id: Uuid, reason: String) {
+    let held = if let Some(inf) = inner.inflight.get_mut(&request_id) {
+        inf.aborted = Some(reason.clone());
+        let held = inf.lease_held;
+        inf.lease_held = false;
+        held
+    } else {
+        true
+    };
+    if held {
+        let mut book = std::mem::take(&mut inner.leases);
+        book.release_by_request(&mut inner.cluster, request_id, "lease_released", &reason);
+        inner.leases = book;
+    }
+}
+
+fn mesh_expire_stale(inner: &mut PeerBusInner) {
+    let now = now_unix();
+    let mut book = std::mem::take(&mut inner.leases);
+    book.expire_stale(&mut inner.cluster, now);
+    inner.leases = book;
+}
+
+fn mesh_try_admit(
+    inner: &mut PeerBusInner,
+    account: &str,
+    request_id: Uuid,
+) -> Result<joule_cluster::StreamLease, String> {
+    mesh_expire_stale(inner);
+    let mut book = std::mem::take(&mut inner.leases);
+    let r = book.try_admit(
+        &mut inner.cluster,
+        account,
+        request_id,
+        Duration::from_secs(90),
+    );
+    inner.leases = book;
+    r
+}
+
+fn mesh_release(
+    inner: &mut PeerBusInner,
+    request_id: Uuid,
+    event: &str,
+    detail: &str,
+) -> bool {
+    let mut book = std::mem::take(&mut inner.leases);
+    let ok = book.release_by_request(&mut inner.cluster, request_id, event, detail);
+    inner.leases = book;
+    ok
+}
+
+fn mesh_bind_hash(inner: &mut PeerBusInner, request_id: Uuid, plan_hash_hex: String) {
+    let mut book = std::mem::take(&mut inner.leases);
+    book.bind_agreement_hash(request_id, plan_hash_hex);
+    inner.leases = book;
+}
+
+fn mesh_record_accepts(
+    inner: &mut PeerBusInner,
+    request_id: Uuid,
+    accepts: &[NodeId],
+    event: &str,
+    detail: &str,
+    plan_hash_hex: Option<&str>,
+) {
+    let mut book = std::mem::take(&mut inner.leases);
+    book.record_accepts(request_id, accepts, event, detail, plan_hash_hex);
+    inner.leases = book;
+}
+
 /// Full peer-only chat: multi-donor bus, RequestInfer, wait for text.
 pub async fn peer_only_chat(
     donors: Vec<(NodeId, u32)>,
@@ -677,6 +995,179 @@ mod tests {
             text.contains("peer-only-hello") || text.len() > 4,
             "text={text}"
         );
+    }
+
+    #[tokio::test]
+    async fn peer_plan_accept_requires_valid_confirm_hex() {
+        let donors = donors_n(2);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        let mut rxs = Vec::new();
+        for (id, mem) in &donors {
+            let (tx, rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+            rxs.push((id.clone(), rx));
+        }
+        // Non-coordinator sends tampered confirm (lowest mem is not elected).
+        let bad = donors
+            .iter()
+            .min_by_key(|(_, m)| *m)
+            .unwrap()
+            .0
+            .clone();
+        for (id, rx) in rxs {
+            let b = bus.clone();
+            let is_bad = id == bad;
+            tokio::spawn(async move {
+                let engine = StubEngine::new();
+                let mut rx = rx;
+                while let Some(env) = rx.recv().await {
+                    if is_bad {
+                        if let Message::PlanOffer {
+                            plan,
+                            request_id,
+                            plan_hash_hex,
+                        } = &env.msg
+                        {
+                            // Tampered confirm — coordinator must fail closed.
+                            let coord = b
+                                .inner
+                                .lock()
+                                .await
+                                .inflight
+                                .get(request_id)
+                                .map(|i| i.coordinator.clone());
+                            if let Some(c) = coord {
+                                let acc = Envelope::new(
+                                    id.clone(),
+                                    Message::PlanAccept {
+                                        plan_id: plan.plan_id,
+                                        request_id: *request_id,
+                                        accepted: true,
+                                        reason: "tampered".into(),
+                                        plan_hash_hex: plan_hash_hex.clone(),
+                                        confirm_hex: "00".repeat(32),
+                                    },
+                                );
+                                let _ = b.send_to(&c, acc).await;
+                            }
+                            continue;
+                        }
+                    }
+                    let _ = b.handle_envelope(&id, env, &engine).await;
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (_t, _u, free0, leases0) = bus.capacity_snapshot().await;
+        let rid = bus
+            .request_infer("alice", "user: tamper-test", 8)
+            .await
+            .expect("request");
+        // Wait briefly for PlanAccept path to reject.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let abort = bus.abort_reason(rid).await;
+        assert!(
+            abort.as_ref().is_some_and(|s| s.contains("confirm") || s.contains("invalid")),
+            "expected abort on bad confirm, got {abort:?}"
+        );
+        // No false completion.
+        assert!(bus.take_completion(rid).await.is_none());
+        let (_t2, used2, free2, leases2) = bus.capacity_snapshot().await;
+        assert_eq!(leases2, 0, "lease must release after invalid accept");
+        assert_eq!(used2, 0);
+        assert!(free2 >= free0 || leases0 == 0);
+        let trail = bus.audit_trail().await;
+        assert!(
+            trail.iter().any(|e| e.event == "plan_accept_invalid"),
+            "trail={trail:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_lease_free_used_free_on_chat() {
+        let donors = donors_n(3);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        let mut rxs = Vec::new();
+        for (id, mem) in &donors {
+            let (tx, rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+            rxs.push((id.clone(), rx));
+        }
+        for (id, rx) in rxs {
+            let b = bus.clone();
+            tokio::spawn(async move {
+                run_peer_actor(b, id, rx).await;
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let (total0, used0, free0, leases0) = bus.capacity_snapshot().await;
+        assert!(total0 >= 1, "total={total0}");
+        assert_eq!(used0, 0);
+        assert_eq!(leases0, 0);
+        assert_eq!(free0, total0);
+
+        let rid = bus
+            .request_infer("alice", "user: lease-lifecycle", 16)
+            .await
+            .expect("request");
+        // Observe used during flight (brief poll).
+        let mut saw_used = false;
+        for _ in 0..50 {
+            let (_t, u, _f, l) = bus.capacity_snapshot().await;
+            if u > 0 || l > 0 {
+                saw_used = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let text = bus
+            .wait_completion(rid, Duration::from_secs(5))
+            .await
+            .expect("completion");
+        assert!(!text.is_empty());
+        let (total1, used1, free1, leases1) = bus.capacity_snapshot().await;
+        assert_eq!(used1, 0, "slots must free after complete");
+        assert_eq!(leases1, 0);
+        assert_eq!(free1, total1);
+        let trail = bus.audit_trail().await;
+        assert!(
+            trail.iter().any(|e| e.event == "lease_granted"),
+            "trail={trail:?}"
+        );
+        assert!(
+            trail.iter().any(|e| e.event == "plan_agreed"),
+            "trail={trail:?}"
+        );
+        assert!(
+            trail.iter().any(|e| e.event == "lease_released"),
+            "trail={trail:?}"
+        );
+        // Either we observed mid-flight use, or audit proves grant+release lifecycle.
+        assert!(
+            saw_used
+                || trail.iter().any(|e| e.event == "lease_granted")
+                    && trail.iter().any(|e| e.event == "lease_released"),
+            "free→used→free not observed; trail={trail:?}"
+        );
+        let _ = (total0, free0);
     }
 
     /// Mid-flight death: first coordinator is **alive and elected**, then silenced
