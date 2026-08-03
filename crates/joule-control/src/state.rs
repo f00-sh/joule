@@ -976,6 +976,8 @@ impl ControlState {
     }
 
     /// Record PlanAccept for a mesh-coordinated request; completes wait when all expected accept.
+    ///
+    /// Policy is pure [`joule_cluster::on_accept`] (membership → plan_id → verify → record).
     pub fn settle_plan_accept(
         &mut self,
         request_id: Uuid,
@@ -985,98 +987,65 @@ impl ControlState {
         plan_hash_hex: &str,
         confirm_hex: &str,
     ) {
-        let (want_hash, plan_ok, expected_member) = {
-            let Some(p) = self.pending_plan_accepts.get(&request_id) else {
-                return;
-            };
-            (
-                p.plan_hash_hex.clone(),
-                p.plan_id == plan_id,
-                p.expected.contains(from),
+        let effect = {
+            let pending = self.pending_plan_accepts.get(&request_id);
+            let view = pending.map(|p| joule_cluster::PlanAgreeView {
+                plan_id: p.plan_id,
+                want_hash: p.plan_hash_hex.as_str(),
+                expected: &p.expected,
+                already_accepted: &p.accepted,
+            });
+            joule_cluster::on_accept(
+                view.as_ref(),
+                from,
+                plan_id,
+                request_id,
+                accepted,
+                plan_hash_hex,
+                confirm_hex,
             )
         };
-        if !plan_ok {
-            return;
-        }
-        // Non-shard senders cannot pad quorum or DoS-abort (ignore).
-        if !expected_member {
-            return;
-        }
-        // Require content confirmation (fail closed on missing/tamper).
-        if let Err(e) = joule_cluster::verify_plan_accept_confirm(
-            plan_id,
-            request_id,
-            from,
-            accepted,
-            &want_hash,
-            confirm_hex,
-        ) {
-            if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
-                if let Some(tx) = p.tx.take() {
-                    let _ = tx.send(Err(format!("plan accept from {from} rejected: {e}")));
+        match effect {
+            joule_cluster::PlanAcceptEffect::Ignore => {}
+            joule_cluster::PlanAcceptEffect::Abort { event, detail } => {
+                let want_hash = self
+                    .pending_plan_accepts
+                    .get(&request_id)
+                    .map(|p| p.plan_hash_hex.clone())
+                    .unwrap_or_default();
+                if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
+                    if let Some(tx) = p.tx.take() {
+                        let _ = tx.send(Err(detail.clone()));
+                    }
                 }
-            }
-            self.leases.record_accepts(
-                request_id,
-                &[],
-                "plan_accept_invalid",
-                &format!("{from}: {e}"),
-                Some(&want_hash),
-            );
-            return;
-        }
-        if !plan_hash_hex.is_empty() && plan_hash_hex != want_hash {
-            if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
-                if let Some(tx) = p.tx.take() {
-                    let _ = tx.send(Err(format!(
-                        "plan hash mismatch from {from}: got {plan_hash_hex}"
-                    )));
-                }
-            }
-            self.leases.record_accepts(
-                request_id,
-                &[],
-                "plan_hash_mismatch",
-                &format!("{from}: got {plan_hash_hex}"),
-                Some(&want_hash),
-            );
-            return;
-        }
-        let Some(p) = self.pending_plan_accepts.get_mut(&request_id) else {
-            return;
-        };
-        if accepted {
-            p.accepted.insert(from.clone());
-        } else {
-            if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
-                if let Some(tx) = p.tx.take() {
-                    let _ = tx.send(Err(format!("plan rejected by {from}")));
-                }
-            }
-            self.leases.record_accepts(
-                request_id,
-                &[],
-                "plan_rejected",
-                &from.to_string(),
-                Some(&want_hash),
-            );
-            return;
-        }
-        // Ready only when every expected shard has accepted (not mere count padding).
-        let ready = p.expected.iter().all(|n| p.accepted.contains(n));
-        if ready {
-            if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
-                let accepts: Vec<NodeId> = p.expected.iter().cloned().collect();
-                let agreed_hash = p.plan_hash_hex.clone();
                 self.leases.record_accepts(
                     request_id,
-                    &accepts,
-                    "plan_agreed",
-                    "all shards confirmed",
-                    Some(&agreed_hash),
+                    &[],
+                    event,
+                    &detail,
+                    Some(&want_hash),
                 );
-                if let Some(tx) = p.tx.take() {
-                    let _ = tx.send(Ok(()));
+            }
+            joule_cluster::PlanAcceptEffect::Record { ready } => {
+                let Some(p) = self.pending_plan_accepts.get_mut(&request_id) else {
+                    return;
+                };
+                p.accepted.insert(from.clone());
+                if ready {
+                    if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
+                        let accepts: Vec<NodeId> = p.expected.iter().cloned().collect();
+                        let agreed_hash = p.plan_hash_hex.clone();
+                        self.leases.record_accepts(
+                            request_id,
+                            &accepts,
+                            "plan_agreed",
+                            "all shards confirmed",
+                            Some(&agreed_hash),
+                        );
+                        if let Some(tx) = p.tx.take() {
+                            let _ = tx.send(Ok(()));
+                        }
+                    }
                 }
             }
         }

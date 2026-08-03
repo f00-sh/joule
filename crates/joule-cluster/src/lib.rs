@@ -7,6 +7,7 @@ mod capacity_challenge;
 mod chunks;
 mod erasure;
 mod lease;
+mod plan_agree;
 mod scheduler;
 
 pub use capacity_challenge::{
@@ -27,6 +28,7 @@ pub use lease::{
     verify_plan_accept_confirm, LeaseAuditEntry, LeaseBook, StreamLease, DOMAIN_ACCEPT,
     DOMAIN_LEASE, DOMAIN_PLAN,
 };
+pub use plan_agree::{on_accept, PlanAcceptEffect, PlanAgreeView};
 pub use scheduler::{
     compute_state, free_slots, free_stream_slots, max_slots, max_streams, pool_max_streams,
     ComputeState, NodeSchedule, SchedulerSnapshot, DEFAULT_MODEL_LAYERS, STREAM_BUDGET_MIB,

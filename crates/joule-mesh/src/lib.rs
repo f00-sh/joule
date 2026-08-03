@@ -454,7 +454,9 @@ impl PeerBus {
                 confirm_hex,
                 reason: _,
             } => {
-                let decision = {
+                // Thin adapter: pure joule_cluster::on_accept owns order
+                // (expected → plan_id → verify → record/abort).
+                let effect = {
                     let g = self.inner.lock().await;
                     let Some(inf) = g.inflight.get(&request_id) else {
                         return Ok(());
@@ -462,100 +464,62 @@ impl PeerBus {
                     if &inf.coordinator != local || inf.aborted.is_some() {
                         return Ok(());
                     }
-                    let want_hash = inf.plan_hash_hex.clone();
-                    if want_hash.is_empty() {
+                    if inf.plan_hash_hex.is_empty() {
                         return Ok(());
                     }
-                    // Pre-check without holding mut borrow across lease helpers.
-                    if let Err(e) = joule_cluster::verify_plan_accept_confirm(
-                        plan_id,
-                        request_id,
-                        &env.from,
-                        accepted,
-                        &want_hash,
-                        &confirm_hex,
-                    ) {
-                        Some(Err((
-                            "plan_accept_invalid".to_string(),
-                            format!("{}: {e}", env.from),
-                            format!("invalid confirm: {e}"),
-                            want_hash,
-                        )))
-                    } else if !plan_hash_hex.is_empty() && plan_hash_hex != want_hash {
-                        let detail = format!(
-                            "plan hash mismatch from {}: got {plan_hash_hex}",
-                            env.from
-                        );
-                        Some(Err((
-                            "plan_hash_mismatch".to_string(),
-                            detail.clone(),
-                            detail,
-                            want_hash,
-                        )))
-                    } else {
-                        // Only shards in the plan may accept/reject (outsiders ignored).
-                        let expected = inf
+                    let expected: HashSet<NodeId> = inf
+                        .plan
+                        .as_ref()
+                        .map(|p| p.shards.iter().map(|s| s.node.clone()).collect())
+                        .unwrap_or_default();
+                    let view = joule_cluster::PlanAgreeView {
+                        plan_id: inf
                             .plan
                             .as_ref()
-                            .map(|p| {
-                                p.shards
-                                    .iter()
-                                    .map(|s| s.node.clone())
-                                    .collect::<HashSet<_>>()
-                            })
-                            .unwrap_or_default();
-                        if !expected.contains(&env.from) {
-                            warn!(
-                                %request_id,
-                                from = %env.from,
-                                "peer PlanAccept from non-shard ignored"
-                            );
-                            None
-                        } else if !accepted {
-                            Some(Err((
-                                "plan_rejected".to_string(),
-                                env.from.to_string(),
-                                format!("plan rejected by {}", env.from),
-                                want_hash,
-                            )))
-                        } else {
-                            Some(Ok(want_hash))
-                        }
-                    }
+                            .map(|p| p.plan_id)
+                            .unwrap_or(plan_id),
+                        want_hash: inf.plan_hash_hex.as_str(),
+                        expected: &expected,
+                        already_accepted: &inf.accepts,
+                    };
+                    joule_cluster::on_accept(
+                        Some(&view),
+                        &env.from,
+                        plan_id,
+                        request_id,
+                        accepted,
+                        &plan_hash_hex,
+                        &confirm_hex,
+                    )
                 };
-                let Some(decision) = decision else {
-                    return Ok(());
-                };
-                let (ready, plan, prompt, max_tokens, model) = match decision {
-                    Err((event, audit_detail, abort_reason, want_hash)) => {
+                match effect {
+                    joule_cluster::PlanAcceptEffect::Ignore => return Ok(()),
+                    joule_cluster::PlanAcceptEffect::Abort { event, detail } => {
                         warn!(%request_id, from = %env.from, %event, "peer PlanAccept rejected");
                         let mut g = self.inner.lock().await;
+                        let want = g
+                            .inflight
+                            .get(&request_id)
+                            .map(|i| i.plan_hash_hex.clone())
+                            .unwrap_or_default();
                         mesh_record_accepts(
                             &mut g,
                             request_id,
                             &[],
-                            &event,
-                            &audit_detail,
-                            Some(&want_hash),
+                            event,
+                            &detail,
+                            Some(&want),
                         );
-                        abort_inflight_and_release(&mut g, request_id, abort_reason);
+                        abort_inflight_and_release(&mut g, request_id, detail);
                         return Ok(());
                     }
-                    Ok(want_hash) => {
-                        let mut g = self.inner.lock().await;
-                        let (ready, plan, prompt, max_tokens, model, accepts) = {
+                    joule_cluster::PlanAcceptEffect::Record { ready } => {
+                        let (plan, prompt, max_tokens, model, want_hash, accepts) = {
+                            let mut g = self.inner.lock().await;
                             let Some(inf) = g.inflight.get_mut(&request_id) else {
                                 return Ok(());
                             };
                             if &inf.coordinator != local || inf.aborted.is_some() {
-                                return Ok(());
-                            }
-                            let expected: HashSet<NodeId> = inf
-                                .plan
-                                .as_ref()
-                                .map(|p| p.shards.iter().map(|s| s.node.clone()).collect())
-                                .unwrap_or_default();
-                            if !expected.contains(&env.from) {
                                 return Ok(());
                             }
                             inf.accepts.insert(env.from.clone());
@@ -563,17 +527,20 @@ impl PeerBus {
                             let prompt = inf.prompt.clone();
                             let max_tokens = inf.max_tokens;
                             let model = inf.model.clone();
-                            // Ready only when every required shard has confirmed.
-                            let ready = !expected.is_empty()
-                                && expected.iter().all(|n| inf.accepts.contains(n));
+                            let want_hash = inf.plan_hash_hex.clone();
+                            let expected: HashSet<NodeId> = plan
+                                .as_ref()
+                                .map(|p| p.shards.iter().map(|s| s.node.clone()).collect())
+                                .unwrap_or_default();
                             let accepts: Vec<NodeId> = if ready {
                                 expected.into_iter().collect()
                             } else {
                                 vec![]
                             };
-                            (ready, plan, prompt, max_tokens, model, accepts)
+                            (plan, prompt, max_tokens, model, want_hash, accepts)
                         };
                         if ready {
+                            let mut g = self.inner.lock().await;
                             mesh_record_accepts(
                                 &mut g,
                                 request_id,
@@ -582,26 +549,26 @@ impl PeerBus {
                                 "all shards confirmed (peer-bus)",
                                 Some(&want_hash),
                             );
+                            drop(g);
+                            if let Some(plan) = plan {
+                                let tail = plan.shards.last().map(|s| s.node.clone());
+                                for s in &plan.shards {
+                                    let is_tail = Some(&s.node) == tail.as_ref();
+                                    let ir = Envelope::new(
+                                        local.clone(),
+                                        Message::InferRequest {
+                                            request_id,
+                                            model: model.clone(),
+                                            prompt: prompt.clone(),
+                                            max_tokens,
+                                            plan: plan.clone(),
+                                            is_tail,
+                                        },
+                                    );
+                                    let _ = self.send_to(&s.node, ir).await;
+                                }
+                            }
                         }
-                        (ready, plan, prompt, max_tokens, model)
-                    }
-                };
-                if let (true, Some(plan)) = (ready, plan) {
-                    let tail = plan.shards.last().map(|s| s.node.clone());
-                    for s in &plan.shards {
-                        let is_tail = Some(&s.node) == tail.as_ref();
-                        let ir = Envelope::new(
-                            local.clone(),
-                            Message::InferRequest {
-                                request_id,
-                                model: model.clone(),
-                                prompt: prompt.clone(),
-                                max_tokens,
-                                plan: plan.clone(),
-                                is_tail,
-                            },
-                        );
-                        let _ = self.send_to(&s.node, ir).await;
                     }
                 }
             }
@@ -1290,6 +1257,89 @@ mod tests {
             );
             assert_eq!(agreed.accepts.len(), 2, "need both real shards: {agreed:?}");
         }
+    }
+
+    /// Outsider with **invalid** confirm must not Abort (policy: membership before verify).
+    #[tokio::test]
+    async fn peer_outsider_bad_confirm_does_not_abort() {
+        let donors = donors_n(2);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        let outsider = NodeId::new();
+        let mut rxs = Vec::new();
+        for (id, mem) in &donors {
+            let (tx, rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+            rxs.push((id.clone(), rx));
+        }
+        for (id, rx) in rxs {
+            let b = bus.clone();
+            tokio::spawn(async move {
+                run_peer_actor(b, id, rx).await;
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let rid = bus
+            .request_infer("carol", "user: outsider-bad-confirm", 16)
+            .await
+            .expect("request");
+        let b = bus.clone();
+        let out = outsider.clone();
+        tokio::spawn(async move {
+            for _ in 0..40 {
+                let inject = {
+                    let g = b.inner.lock().await;
+                    g.inflight.get(&rid).and_then(|inf| {
+                        let plan = inf.plan.as_ref()?;
+                        let ph = inf.plan_hash_hex.clone();
+                        if ph.is_empty() {
+                            return None;
+                        }
+                        Some((
+                            inf.coordinator.clone(),
+                            Envelope::new(
+                                out.clone(),
+                                Message::PlanAccept {
+                                    plan_id: plan.plan_id,
+                                    request_id: rid,
+                                    accepted: true,
+                                    reason: "outsider bad confirm".into(),
+                                    plan_hash_hex: ph,
+                                    confirm_hex: "00".repeat(32),
+                                },
+                            ),
+                        ))
+                    })
+                };
+                if let Some((c, acc)) = inject {
+                    let _ = b.send_to(&c, acc).await;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let text = bus
+            .wait_completion(rid, Duration::from_secs(5))
+            .await
+            .expect("honest shards complete; outsider bad confirm ignored");
+        assert!(!text.is_empty());
+        assert!(
+            bus.abort_reason(rid).await.is_none(),
+            "must not abort on outsider bad confirm"
+        );
+        let trail = bus.audit_trail().await;
+        assert!(
+            !trail.iter().any(|e| e.event == "plan_accept_invalid"),
+            "outsider must not produce abort audit: {trail:?}"
+        );
+        assert!(trail.iter().any(|e| e.event == "plan_agreed"), "{trail:?}");
     }
 
     /// Outsider reject with valid self-confirm must not abort required-shard agreement.
