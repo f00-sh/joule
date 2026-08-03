@@ -141,7 +141,8 @@ async fn spawn_agent(
                             }
                         }
                         Message::RequestInfer { .. } => {
-                            // Coordinator handles plan; agents may log only.
+                            // Production `joule agent`: note only — never PlanAccept here.
+                            // Self-accept with a local plan hash poisons control mesh settle.
                         }
                         Message::InferRequest { .. } => {
                             let reply = joule_control::agent_handle_infer(&env, &stub)
@@ -2507,6 +2508,287 @@ async fn spawn_agent_bad_accept(
                                 .unwrap();
                             let reply = Envelope::new(node_id.clone(), reply.msg);
                             let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
+                        }
+                        Message::Challenge { .. } => {
+                            let reply = joule_control::agent_handle_challenge(&env, &stub)
+                                .await
+                                .unwrap();
+                            let reply = Envelope::new(node_id.clone(), reply.msg);
+                            let _ = writer.write_all(&encode_line(&reply).unwrap()).await;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+    (api_key, handle)
+}
+
+/// Old agent noise: PlanAccept on RequestInfer with a **local** plan_id/hash.
+/// Control ignores non-matching plan_id (no DoS-abort); PlanOffer still agrees.
+/// Production agents no longer emit this; this proves resilience if they did.
+#[tokio::test]
+async fn mesh_poison_request_infer_wrong_plan_id_is_ignored_plan_offer_still_agrees() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let (key_a, a) = spawn_agent_poison_request_infer(agent_addr, "poison-a", 8192).await;
+    let (_key_b, b) = spawn_agent_poison_request_infer(agent_addr, "poison-b", 8192).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let r = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", format!("Bearer {key_a}"))
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role":"user","content":"poison-mesh-test"}],
+            "max_tokens": 16
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = r.status();
+    let body: serde_json::Value = r.json().await.unwrap();
+    eprintln!("OBSERVE poison RequestInfer self-accept status={status} body={body}");
+    assert!(status.is_success(), "PlanOffer path must still succeed: {body}");
+    assert_eq!(
+        body["joule_coordination"].as_str().unwrap_or(""),
+        "mesh_request_infer",
+        "wrong plan_id early accepts ignored; real PlanOffer multi-party must win: {body}"
+    );
+    let leases: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/leases"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    eprintln!("OBSERVE poison-resilience audit={leases}");
+    let audit = leases["audit"].as_array().cloned().unwrap_or_default();
+    assert!(
+        audit.iter().any(|e| e["event"] == "plan_agreed"),
+        "trail={leases}"
+    );
+    // Wrong plan_id must not be recorded as plan_accept_invalid abort of the mesh.
+    assert!(
+        !audit.iter().any(|e| e["event"] == "plan_accept_invalid"),
+        "foreign plan_id should be ignored not abort: {leases}"
+    );
+    a.abort();
+    b.abort();
+}
+
+/// Production-like multi-donor mesh: RequestInfer is note-only; PlanOffer carries hash.
+#[tokio::test]
+async fn mesh_production_request_infer_plan_offer_only_agree() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    // spawn_agent mirrors fixed production: RequestInfer no PlanAccept.
+    let (key_a, a) = spawn_agent(agent_addr, "mesh-prod-a", 8192).await;
+    let (_key_b, b) = spawn_agent(agent_addr, "mesh-prod-b", 12288).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let r = client
+        .post(format!("{base}/v1/chat/completions"))
+        .header("Authorization", format!("Bearer {key_a}"))
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role":"user","content":"mesh-prod-agree"}],
+            "max_tokens": 16
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "status={}", r.status());
+    let body: serde_json::Value = r.json().await.unwrap();
+    eprintln!("OBSERVE production mesh chat body={body}");
+    assert_eq!(
+        body["joule_coordination"].as_str().unwrap_or(""),
+        "mesh_request_infer",
+        "fixed agents must complete real mesh multi-party agree: {body}"
+    );
+    let leases: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/leases"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    eprintln!("OBSERVE production mesh audit={leases}");
+    let audit = leases["audit"].as_array().cloned().unwrap_or_default();
+    assert!(audit.iter().any(|e| e["event"] == "plan_agreed"), "{leases}");
+    assert!(audit.iter().any(|e| e["event"] == "lease_released"), "{leases}");
+    assert_eq!(leases["stream_slots_used"].as_u64().unwrap_or(99), 0);
+    a.abort();
+    b.abort();
+}
+
+/// Old/buggy agent behavior: on RequestInfer build local plan and PlanAccept (wrong hash).
+async fn spawn_agent_poison_request_infer(
+    agent_addr: std::net::SocketAddr,
+    account: &str,
+    mem: u32,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let node_id = NodeId::new();
+    let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let hello = Envelope::new(
+        node_id.clone(),
+        Message::Hello {
+            account: account.into(),
+            caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
+            pubkey_hex: String::new(),
+            sig_hex: String::new(),
+            signed_at_unix_ms: 0,
+        },
+    );
+    writer
+        .write_all(&encode_line(&hello).unwrap())
+        .await
+        .unwrap();
+    let welcome_line = lines.next_line().await.unwrap().expect("welcome");
+    let welcome = decode_line(welcome_line.as_bytes()).unwrap();
+    let api_key = match welcome.msg {
+        Message::Welcome { api_key, .. } => api_key,
+        other => panic!("expected welcome, got {other:?}"),
+    };
+    writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::Heartbeat {
+                    load: 0.0,
+                    healthy: true,
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    writer
+        .write_all(
+            &encode_line(&Envelope::new(
+                node_id.clone(),
+                Message::PeerAlive {
+                    multiaddrs: vec![format!("tcp://127.0.0.1:{}", 20000 + (mem % 1000))],
+                    load: 0.05,
+                    healthy: true,
+                    blob_count: 0,
+                    mem_mib: mem,
+                    verified_mem_mib: 0,
+                    throughput_class: 40,
+                },
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let handle = tokio::spawn(async move {
+        let stub = StubEngine::new();
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let hb = Envelope::new(
+                        node_id.clone(),
+                        Message::Heartbeat { load: 0.05, healthy: true },
+                    );
+                    if writer.write_all(&encode_line(&hb).unwrap()).await.is_err() {
+                        break;
+                    }
+                }
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { break; };
+                    if line.trim().is_empty() { continue; }
+                    let env = decode_line(line.as_bytes()).unwrap();
+                    match &env.msg {
+                        Message::RequestInfer { request_id, .. } => {
+                            // POISON: local equal-unit plan + self PlanAccept (old agent bug).
+                            let donors = vec![(node_id.clone(), 1024u32)];
+                            if let Ok(plan) = joule_cluster::plan_from_mesh_donors(&donors) {
+                                let ph = joule_cluster::plan_hash_hex(&plan);
+                                let (ph2, confirm) = joule_cluster::plan_accept_fields(
+                                    &plan,
+                                    *request_id,
+                                    &node_id,
+                                    true,
+                                    Some(&ph),
+                                );
+                                let acc = Envelope::new(
+                                    node_id.clone(),
+                                    Message::PlanAccept {
+                                        plan_id: plan.plan_id,
+                                        request_id: *request_id,
+                                        accepted: true,
+                                        reason: "poison local mesh coordinator".into(),
+                                        plan_hash_hex: ph2,
+                                        confirm_hex: confirm,
+                                    },
+                                );
+                                if writer.write_all(&encode_line(&acc).unwrap()).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        Message::PlanOffer {
+                            plan,
+                            request_id,
+                            plan_hash_hex,
+                        } => {
+                            let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                            let (ph, confirm) = joule_cluster::plan_accept_fields(
+                                plan,
+                                *request_id,
+                                &node_id,
+                                accepted,
+                                Some(plan_hash_hex.as_str()).filter(|s| !s.is_empty()),
+                            );
+                            let reply = Envelope::new(
+                                node_id.clone(),
+                                Message::PlanAccept {
+                                    plan_id: plan.plan_id,
+                                    request_id: *request_id,
+                                    accepted,
+                                    reason: "poison-agent later offer".into(),
+                                    plan_hash_hex: ph,
+                                    confirm_hex: confirm,
+                                },
+                            );
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::InferRequest { .. } => {
+                            let reply = joule_control::agent_handle_infer(&env, &stub)
+                                .await
+                                .unwrap();
+                            let reply = Envelope::new(node_id.clone(), reply.msg);
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
                         }
                         Message::Challenge { .. } => {
                             let reply = joule_control::agent_handle_challenge(&env, &stub)

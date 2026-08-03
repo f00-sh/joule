@@ -658,20 +658,8 @@ pub async fn dispatch_mesh_infer(
         "mesh RequestInfer + stream lease"
     );
 
-    for (node, _) in &donors {
-        let env = Envelope::new(
-            node.clone(),
-            Message::RequestInfer {
-                request_id,
-                account: account.to_string(),
-                model: model.clone(),
-                prompt: prompt.to_string(),
-                max_tokens,
-            },
-        );
-        let _ = send_to_agent(&app.routes, node, env).await;
-    }
-
+    // Register accept wait **before** RequestInfer so early/poison PlanAccepts
+    // (wrong local plan_hash) fail closed against want_hash instead of racing.
     let expected: std::collections::HashSet<NodeId> =
         plan.shards.iter().map(|s| s.node.clone()).collect();
     let (accept_tx, accept_rx) = oneshot::channel();
@@ -687,6 +675,20 @@ pub async fn dispatch_mesh_infer(
                 tx: Some(accept_tx),
             },
         );
+    }
+
+    for (node, _) in &donors {
+        let env = Envelope::new(
+            node.clone(),
+            Message::RequestInfer {
+                request_id,
+                account: account.to_string(),
+                model: model.clone(),
+                prompt: prompt.to_string(),
+                max_tokens,
+            },
+        );
+        let _ = send_to_agent(&app.routes, node, env).await;
     }
 
     for shard in &plan.shards {

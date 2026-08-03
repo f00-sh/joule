@@ -1633,63 +1633,23 @@ async fn run_agent(
                         prompt: _,
                         max_tokens: _,
                     } => {
-                        // Phase D peer path: equal-unit donors from gossip (no claim/self-attest).
-                        // Weighted VRAM geometry is control-only (mesh_plan_donors / cluster verified).
-                        let donors = {
+                        // Coordination signal only. **Do not** PlanOffer/PlanAccept here.
+                        // Control (or peer-bus coordinator) owns geometry + plan_hash; emitting a
+                        // self-built equal-unit plan hash poisons settle_plan_accept against the
+                        // coordinator's want_hash and aborts multi-party mesh agreement.
+                        // Agreement is only via PlanOffer → hashed PlanAccept.
+                        let gossip_peers = {
                             let g = local_mesh.lock().await;
-                            let mut d = g.plan_donors();
-                            d.push((
-                                node_id.clone(),
-                                peer_net::LocalMesh::PEER_GOSSIP_UNIT_MIB,
-                            ));
-                            d
+                            g.plan_donors().len()
                         };
-                        match joule_cluster::plan_from_mesh_donors(&donors) {
-                            Ok(plan) => {
-                                info!(
-                                    %request_id,
-                                    %req_account,
-                                    %req_model,
-                                    shards = plan.shards.len(),
-                                    "mesh RequestInfer → PlanOffer"
-                                );
-                                let plan_hash_hex = joule_cluster::plan_hash_hex(&plan);
-                                let offer = Envelope::new(
-                                    node_id.clone(),
-                                    Message::PlanOffer {
-                                        plan: plan.clone(),
-                                        request_id,
-                                        plan_hash_hex: plan_hash_hex.clone(),
-                                    },
-                                );
-                                writer.write_all(&encode_line(&offer)?).await?;
-                                // Self-accept as shard if we are in the plan.
-                                if plan.shards.iter().any(|s| s.node == node_id) {
-                                    let (ph, confirm) = joule_cluster::plan_accept_fields(
-                                        &plan,
-                                        request_id,
-                                        &node_id,
-                                        true,
-                                        Some(&plan_hash_hex),
-                                    );
-                                    let acc = Envelope::new(
-                                        node_id.clone(),
-                                        Message::PlanAccept {
-                                            plan_id: plan.plan_id,
-                                            request_id,
-                                            accepted: true,
-                                            reason: "local mesh coordinator".into(),
-                                            plan_hash_hex: ph,
-                                            confirm_hex: confirm,
-                                        },
-                                    );
-                                    writer.write_all(&encode_line(&acc)?).await?;
-                                }
-                            }
-                            Err(e) => {
-                                warn!(error = %e, "mesh PlanOffer failed");
-                            }
-                        }
+                        info!(
+                            %request_id,
+                            %req_account,
+                            %req_model,
+                            gossip_peers,
+                            equal_unit_mib = peer_net::LocalMesh::PEER_GOSSIP_UNIT_MIB,
+                            "RequestInfer noted; waiting for PlanOffer"
+                        );
                     }
                     Message::PlanOffer {
                         plan,

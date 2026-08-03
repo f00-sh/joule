@@ -985,13 +985,23 @@ impl ControlState {
         plan_hash_hex: &str,
         confirm_hex: &str,
     ) {
-        let expected_hash = self
-            .pending_plan_accepts
-            .get(&request_id)
-            .map(|p| p.plan_hash_hex.clone());
-        let Some(want_hash) = expected_hash else {
-            return;
+        let (want_hash, plan_ok, expected_member) = {
+            let Some(p) = self.pending_plan_accepts.get(&request_id) else {
+                return;
+            };
+            (
+                p.plan_hash_hex.clone(),
+                p.plan_id == plan_id,
+                p.expected.contains(from),
+            )
         };
+        if !plan_ok {
+            return;
+        }
+        // Non-shard senders cannot pad quorum or DoS-abort (ignore).
+        if !expected_member {
+            return;
+        }
         // Require content confirmation (fail closed on missing/tamper).
         if let Err(e) = joule_cluster::verify_plan_accept_confirm(
             plan_id,
@@ -1035,12 +1045,6 @@ impl ControlState {
         let Some(p) = self.pending_plan_accepts.get_mut(&request_id) else {
             return;
         };
-        if p.plan_id != plan_id {
-            return;
-        }
-        if !p.expected.contains(from) {
-            return;
-        }
         if accepted {
             p.accepted.insert(from.clone());
         } else {
@@ -1058,9 +1062,11 @@ impl ControlState {
             );
             return;
         }
-        if p.accepted.len() >= p.expected.len() {
+        // Ready only when every expected shard has accepted (not mere count padding).
+        let ready = p.expected.iter().all(|n| p.accepted.contains(n));
+        if ready {
             if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
-                let accepts: Vec<NodeId> = p.accepted.iter().cloned().collect();
+                let accepts: Vec<NodeId> = p.expected.iter().cloned().collect();
                 let agreed_hash = p.plan_hash_hex.clone();
                 self.leases.record_accepts(
                     request_id,

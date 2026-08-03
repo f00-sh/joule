@@ -492,15 +492,35 @@ impl PeerBus {
                             detail,
                             want_hash,
                         )))
-                    } else if !accepted {
-                        Some(Err((
-                            "plan_rejected".to_string(),
-                            env.from.to_string(),
-                            format!("plan rejected by {}", env.from),
-                            want_hash,
-                        )))
                     } else {
-                        Some(Ok(want_hash))
+                        // Only shards in the plan may accept/reject (outsiders ignored).
+                        let expected = inf
+                            .plan
+                            .as_ref()
+                            .map(|p| {
+                                p.shards
+                                    .iter()
+                                    .map(|s| s.node.clone())
+                                    .collect::<HashSet<_>>()
+                            })
+                            .unwrap_or_default();
+                        if !expected.contains(&env.from) {
+                            warn!(
+                                %request_id,
+                                from = %env.from,
+                                "peer PlanAccept from non-shard ignored"
+                            );
+                            None
+                        } else if !accepted {
+                            Some(Err((
+                                "plan_rejected".to_string(),
+                                env.from.to_string(),
+                                format!("plan rejected by {}", env.from),
+                                want_hash,
+                            )))
+                        } else {
+                            Some(Ok(want_hash))
+                        }
                     }
                 };
                 let Some(decision) = decision else {
@@ -530,15 +550,24 @@ impl PeerBus {
                             if &inf.coordinator != local || inf.aborted.is_some() {
                                 return Ok(());
                             }
+                            let expected: HashSet<NodeId> = inf
+                                .plan
+                                .as_ref()
+                                .map(|p| p.shards.iter().map(|s| s.node.clone()).collect())
+                                .unwrap_or_default();
+                            if !expected.contains(&env.from) {
+                                return Ok(());
+                            }
                             inf.accepts.insert(env.from.clone());
                             let plan = inf.plan.clone();
                             let prompt = inf.prompt.clone();
                             let max_tokens = inf.max_tokens;
                             let model = inf.model.clone();
-                            let need = plan.as_ref().map(|p| p.shards.len()).unwrap_or(0);
-                            let ready = plan.is_some() && inf.accepts.len() >= need && need > 0;
+                            // Ready only when every required shard has confirmed.
+                            let ready = !expected.is_empty()
+                                && expected.iter().all(|n| inf.accepts.contains(n));
                             let accepts: Vec<NodeId> = if ready {
-                                inf.accepts.iter().cloned().collect()
+                                expected.into_iter().collect()
                             } else {
                                 vec![]
                             };
@@ -1168,6 +1197,180 @@ mod tests {
             "free→used→free not observed; trail={trail:?}"
         );
         let _ = (total0, free0);
+    }
+
+    /// Outsider PlanAccept must not pad quorum (inject after plan is set).
+    #[tokio::test]
+    async fn peer_outsider_accept_does_not_pad_quorum() {
+        let donors = donors_n(2);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        let outsider = NodeId::new();
+        let mut rxs = Vec::new();
+        for (id, mem) in &donors {
+            let (tx, rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+            rxs.push((id.clone(), rx));
+        }
+        for (id, rx) in rxs {
+            let b = bus.clone();
+            tokio::spawn(async move {
+                run_peer_actor(b, id, rx).await;
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let rid = bus
+            .request_infer("alice", "user: outsider-pad", 16)
+            .await
+            .expect("request");
+        // Inject outsider accepts while honest shards also confirm.
+        let b = bus.clone();
+        let out = outsider.clone();
+        tokio::spawn(async move {
+            for _ in 0..40 {
+                let inject = {
+                    let g = b.inner.lock().await;
+                    g.inflight.get(&rid).and_then(|inf| {
+                        let plan = inf.plan.as_ref()?;
+                        let ph = inf.plan_hash_hex.clone();
+                        if ph.is_empty() {
+                            return None;
+                        }
+                        let confirm = joule_cluster::plan_accept_confirm_hex(
+                            plan.plan_id,
+                            rid,
+                            &out,
+                            true,
+                            &ph,
+                        );
+                        Some((
+                            inf.coordinator.clone(),
+                            Envelope::new(
+                                out.clone(),
+                                Message::PlanAccept {
+                                    plan_id: plan.plan_id,
+                                    request_id: rid,
+                                    accepted: true,
+                                    reason: "outsider".into(),
+                                    plan_hash_hex: ph,
+                                    confirm_hex: confirm,
+                                },
+                            ),
+                        ))
+                    })
+                };
+                if let Some((c, acc)) = inject {
+                    let _ = b.send_to(&c, acc).await;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let text = bus
+            .wait_completion(rid, Duration::from_secs(5))
+            .await
+            .expect("honest shards must still complete despite outsider");
+        assert!(!text.is_empty());
+        let trail = bus.audit_trail().await;
+        assert!(
+            trail.iter().any(|e| e.event == "plan_agreed"),
+            "trail={trail:?}"
+        );
+        if let Some(agreed) = trail.iter().find(|e| e.event == "plan_agreed") {
+            assert!(
+                !agreed.accepts.iter().any(|a| a == &outsider.to_string()),
+                "outsider padded accepts: {agreed:?}"
+            );
+            assert_eq!(agreed.accepts.len(), 2, "need both real shards: {agreed:?}");
+        }
+    }
+
+    /// Outsider reject with valid self-confirm must not abort required-shard agreement.
+    #[tokio::test]
+    async fn peer_outsider_reject_does_not_abort() {
+        let donors = donors_n(2);
+        let client_id = donors[0].0.clone();
+        let bus = PeerBus::new(client_id.clone());
+        let outsider = NodeId::new();
+        let mut rxs = Vec::new();
+        for (id, mem) in &donors {
+            let (tx, rx) = mpsc::unbounded_channel();
+            bus.register_peer(
+                MeshDonor {
+                    node: id.clone(),
+                    verified_mem_mib: *mem,
+                    healthy: true,
+                },
+                tx,
+            )
+            .await;
+            rxs.push((id.clone(), rx));
+        }
+        for (id, rx) in rxs {
+            let b = bus.clone();
+            tokio::spawn(async move {
+                run_peer_actor(b, id, rx).await;
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let rid = bus
+            .request_infer("bob", "user: outsider-reject", 16)
+            .await
+            .expect("request");
+        let b = bus.clone();
+        let out = outsider.clone();
+        tokio::spawn(async move {
+            for _ in 0..40 {
+                let inject = {
+                    let g = b.inner.lock().await;
+                    g.inflight.get(&rid).and_then(|inf| {
+                        let plan = inf.plan.as_ref()?;
+                        let ph = inf.plan_hash_hex.clone();
+                        if ph.is_empty() {
+                            return None;
+                        }
+                        let confirm = joule_cluster::plan_accept_confirm_hex(
+                            plan.plan_id,
+                            rid,
+                            &out,
+                            false,
+                            &ph,
+                        );
+                        Some((
+                            inf.coordinator.clone(),
+                            Envelope::new(
+                                out.clone(),
+                                Message::PlanAccept {
+                                    plan_id: plan.plan_id,
+                                    request_id: rid,
+                                    accepted: false,
+                                    reason: "outsider reject".into(),
+                                    plan_hash_hex: ph,
+                                    confirm_hex: confirm,
+                                },
+                            ),
+                        ))
+                    })
+                };
+                if let Some((c, acc)) = inject {
+                    let _ = b.send_to(&c, acc).await;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let text = bus
+            .wait_completion(rid, Duration::from_secs(5))
+            .await
+            .expect("must complete; outsider reject ignored");
+        assert!(!text.is_empty());
+        assert!(bus.abort_reason(rid).await.is_none());
     }
 
     /// Mid-flight death: first coordinator is **alive and elected**, then silenced
