@@ -2239,6 +2239,7 @@ version = "0.1.10"
 dependencies = [
  "async-trait",
  "hex",
+ "joule-cluster",
  "joule-proto",
  "memmap2",
  "reqwest",

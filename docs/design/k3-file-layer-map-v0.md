@@ -39,13 +39,14 @@ Even partition of 93 layers across 16 files (last file absorbs remainder):
 
 **Formula (v0):**  
 `base = floor(93/16) = 5`, remainder distributed so first 15 bands span 6 layers and last spans 3 — total 15×6+3 = 93.  
-(Use `joule_cluster` / future `file_layer_map` pure helpers when wiring fetch-by-band.)
+**Shipped helpers:** `joule_cluster::{layers_for_file, files_intersecting_layers, preferred_weight_files, order_digests_for_layer_fetch}` and runtime `WeightsStore::{required_weight_files_for_band, band_files_ready}` + `load_model_for_band`.
 
 ## Placement vs fetch
 
 - **Placement** still assigns donors by **verified VRAM** to continuous layer bands (may cross file boundaries).  
-- **Fetch preference:** a donor owning layers `[Ls, Le]` should prefer files whose map intersects that interval (union of file ranges).  
-- **Activation handoff** (v0): domain-separated commitments per donor band — independent of file packing until tensor PP lands.
+- **Fetch preference:** a donor owning layers `[Ls, Le]` prefers files whose map intersects that interval (`preferred_weight_files` / `order_digests_for_layer_fetch` on model_update).  
+- **Band weight gate:** `stage_layers` with `require_band_weights` fails closed unless preferred files for `[Ls, Le]` are staged/loaded (`load_model_for_band` / ClusterEngine). Lab/stub paths may leave the gate off.  
+- **Activation handoff:** real stage tensor payloads (`payload_b64` / JST1 lab tensors) after weight gate.
 
 ## Real content path
 

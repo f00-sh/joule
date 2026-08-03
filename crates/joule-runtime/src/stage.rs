@@ -19,6 +19,37 @@ pub struct StageRequest {
     pub is_tail: bool,
     /// When multi-shard, tail must see non-empty upstream.
     pub require_upstream: bool,
+    /// When true, engine must have staged preferred weight files for this band.
+    /// StubEngine ignores this; ClusterEngine fails closed if weights missing.
+    pub require_band_weights: bool,
+    /// Explicit basenames required (override / test). Empty + `require_band_weights`
+    /// → derive from file↔layer map at the engine.
+    pub required_weight_files: Vec<String>,
+}
+
+impl StageRequest {
+    /// Lab/mesh default: no weight gate (StubEngine path).
+    pub fn lab(
+        model: impl Into<String>,
+        prompt: impl Into<String>,
+        layer_start: u32,
+        layer_end: u32,
+        upstream: Vec<u8>,
+        is_tail: bool,
+        require_upstream: bool,
+    ) -> Self {
+        Self {
+            model: model.into(),
+            prompt: prompt.into(),
+            layer_start,
+            layer_end,
+            upstream,
+            is_tail,
+            require_upstream,
+            require_band_weights: false,
+            required_weight_files: vec![],
+        }
+    }
 }
 
 /// Output of a layer-band stage.
@@ -109,15 +140,7 @@ mod tests {
 
     #[test]
     fn stage_depends_on_upstream_and_layers() {
-        let base = StageRequest {
-            model: "kimi-open".into(),
-            prompt: "hello".into(),
-            layer_start: 0,
-            layer_end: 10,
-            upstream: vec![],
-            is_tail: false,
-            require_upstream: false,
-        };
+        let base = StageRequest::lab("kimi-open", "hello", 0, 10, vec![], false, false);
         let a = lab_stage_activation(&base).unwrap();
         assert!(a.activation.starts_with(b"JST1"));
         assert!(a.activation.len() >= 48);

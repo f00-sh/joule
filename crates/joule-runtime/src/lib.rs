@@ -23,7 +23,7 @@ pub use k3_pipeline::{
     pipeline_from_quant, pipelines_for_model, shard_cache_path, synthetic_k3_shard_template,
     validate_k3_scale, PipelineShard, WeightPipeline,
 };
-pub use load::{load_model, LoadError, LoadReport, LoadedModel, TensorInfo};
+pub use load::{load_model, load_model_for_band, LoadError, LoadReport, LoadedModel, TensorInfo};
 pub use manifest::{
     InferenceMode, ManifestFile, MilestoneStatus, ModelReadiness, ModelSpec, QuantSpec,
     RuntimeFlags, EMBEDDED_MANIFEST,
@@ -38,6 +38,7 @@ pub use weights::{
     digests_verified_for_quant, is_lab_fixture_quant, is_synthetic_placeholder_digest,
     quant_can_unlock_service_digests, BlobAnnounce, PrepareStatus, WeightsStore,
 };
+// band helpers live on WeightsStore::required_weight_files_for_band / band_files_ready
 
 /// Gate: digests verified for a **lab fixture** quant of the default manifest model.
 /// Never unlocks on `kimi-k3-shards` / placeholder peer pins (CI has no full K3 weights).
@@ -90,6 +91,7 @@ pub trait Engine: Send + Sync {
     async fn infer(&self, req: InferRequest) -> Result<InferResponse, RuntimeError>;
     /// Layer-band pipeline stage: emits real activation tensor bytes.
     async fn stage_layers(&self, req: StageRequest) -> Result<StageOutput, RuntimeError> {
+        // Default / StubEngine: ignore weight gate (mesh tests, lab PP without files).
         lab_stage_activation(&req).map_err(RuntimeError::Infer)
     }
 }
@@ -235,6 +237,39 @@ impl Engine for ClusterEngine {
         }
         *self.plan_model.lock().expect("lock") = Some(plan.model.clone());
         Ok(())
+    }
+
+    async fn stage_layers(&self, req: StageRequest) -> Result<StageOutput, RuntimeError> {
+        // Weight gate: only when require_band_weights (production / tests).
+        // required_weight_files is the explicit list; empty → map preferred basenames.
+        if req.require_band_weights {
+            let need = if !req.required_weight_files.is_empty() {
+                req.required_weight_files.clone()
+            } else {
+                joule_cluster::preferred_weight_files(req.layer_start, req.layer_end)
+                    .map_err(RuntimeError::Infer)?
+            };
+            let loaded = self.loaded.lock().expect("lock").clone();
+            let Some(lm) = loaded else {
+                return Err(RuntimeError::Infer(format!(
+                    "missing band weights: model not loaded (need layers {}-{} files {need:?})",
+                    req.layer_start, req.layer_end
+                )));
+            };
+            for f in &need {
+                if !lm
+                    .loaded_file_basenames
+                    .iter()
+                    .any(|b| b == f || b.ends_with(f.as_str()))
+                {
+                    return Err(RuntimeError::Infer(format!(
+                        "missing band weights: {f} not loaded for layers {}-{} (have {:?})",
+                        req.layer_start, req.layer_end, lm.loaded_file_basenames
+                    )));
+                }
+            }
+        }
+        lab_stage_activation(&req).map_err(RuntimeError::Infer)
     }
 
     async fn infer(&self, req: InferRequest) -> Result<InferResponse, RuntimeError> {
@@ -407,6 +442,65 @@ mod tests {
         std::env::remove_var("JOULE_BLOBS_DIR");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&blob);
+    }
+
+    #[tokio::test]
+    async fn cluster_engine_stage_requires_band_weights() {
+        use crate::manifest::WeightFile;
+        use sha2::{Digest, Sha256};
+
+        let eng = ClusterEngine::new();
+        eng.load_plan(&demo_plan()).await.unwrap();
+        let req = StageRequest {
+            model: CLUSTER_MODEL.into(),
+            prompt: "band-gate".into(),
+            layer_start: 0,
+            layer_end: 5,
+            upstream: vec![],
+            is_tail: false,
+            require_upstream: false,
+            require_band_weights: true,
+            required_weight_files: vec!["model-00001-of-00016.safetensors".into()],
+        };
+        let err = eng.stage_layers(req.clone()).await.unwrap_err();
+        assert!(
+            format!("{err}").contains("missing band weights"),
+            "got {err}"
+        );
+
+        // Install band stand-in via load_model_for_band (real tiny safetensors).
+        let dir = std::env::temp_dir().join(format!("joule-ce-band-{}", Uuid::new_v4()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = WeightsStore::new(&dir);
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.model("kimi-open").unwrap();
+        let md = store.model_dir(&spec.id, "kimi-k3-ce-band");
+        std::fs::create_dir_all(&md).unwrap();
+        let path = md.join("model-00001-of-00016.safetensors");
+        load::write_tiny_safetensors_fixture(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let hash = hex::encode(Sha256::digest(&bytes));
+        let quant = QuantSpec {
+            id: "kimi-k3-ce-band".into(),
+            min_node_vram_mib: 256,
+            approx_file_mib: 1,
+            files: vec![WeightFile {
+                path: "model-00001-of-00016.safetensors".into(),
+                sha256: hash,
+                url: "peer://1".into(),
+                size_bytes: bytes.len() as u64,
+            }],
+        };
+        let lm = load_model_for_band(&store, spec, &quant, 0, 5).unwrap();
+        eng.install_loaded(lm);
+        let out = eng.stage_layers(req).await.expect("stage with weights");
+        assert!(out.activation.starts_with(b"JST1"));
+        assert!(!out.activation.is_empty());
+        eprintln!(
+            "OBSERVE stage-weight-gate: fail_closed then ok act_len={}",
+            out.activation.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

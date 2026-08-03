@@ -1473,6 +1473,7 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
             let ls = shard.layer_start.unwrap_or(0);
             let le = shard.layer_end.unwrap_or(ls);
             if !*is_tail {
+                let required = joule_cluster::preferred_weight_files(ls, le).unwrap_or_default();
                 let stage = engine
                     .stage_layers(joule_runtime::StageRequest {
                         model: model.clone(),
@@ -1482,6 +1483,10 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
                         upstream: vec![],
                         is_tail: false,
                         require_upstream: false,
+                        // Prefer files for this shard band always (call site).
+                        // Gate is off for StubEngine unit/e2e; ClusterEngine tests set true.
+                        require_band_weights: false,
+                        required_weight_files: required,
                     })
                     .await
                     .context("stage_layers non-tail")?;
@@ -1551,6 +1556,7 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
             let upstream_bytes =
                 joule_cluster::concat_upstream_payloads(plan, &env.from, upstream_activations)
                     .map_err(|e| anyhow::anyhow!(e))?;
+            let required = joule_cluster::preferred_weight_files(ls, le).unwrap_or_default();
             let stage = engine
                 .stage_layers(joule_runtime::StageRequest {
                     model: model.clone(),
@@ -1560,6 +1566,8 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
                     upstream: upstream_bytes,
                     is_tail: true,
                     require_upstream: true,
+                    require_band_weights: false,
+                    required_weight_files: required,
                 })
                 .await
                 .context("stage_layers tail")?;
@@ -1701,9 +1709,21 @@ mod tests {
             }
             other => panic!("expected InferDone, got {other:?}"),
         }
+        // Call site: non-tail StageRequest carries preferred weight basenames for the band.
+        let ls = plan.shards[0].layer_start.unwrap_or(0);
+        let le = plan.shards[0].layer_end.unwrap_or(ls);
+        let prefs = joule_cluster::preferred_weight_files(ls, le).unwrap();
+        assert!(
+            !prefs.is_empty(),
+            "shard band must map to preferred weight files"
+        );
         eprintln!(
-            "OBSERVE pipeline-handoff: non-tail activation_hex set; model_layers={}",
-            plan.model_layers
+            "OBSERVE pipeline-handoff: non-tail activation_hex set; model_layers={} band={}-{} preferred_n={} first={}",
+            plan.model_layers,
+            ls,
+            le,
+            prefs.len(),
+            prefs.first().map(|s| s.as_str()).unwrap_or("")
         );
     }
 
@@ -1723,6 +1743,12 @@ mod tests {
                 upstream: vec![],
                 is_tail: false,
                 require_upstream: false,
+                require_band_weights: false,
+                required_weight_files: joule_cluster::preferred_weight_files(
+                    0,
+                    plan.model_layers / 2,
+                )
+                .unwrap_or_default(),
             })
             .await
             .unwrap();

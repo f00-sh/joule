@@ -129,6 +129,82 @@ impl WeightsStore {
         })
     }
 
+    /// Preferred weight basenames for a layer band, intersected with this quant's files.
+    ///
+    /// - K3-class (preferred names ⊆ quant): require those preferred basenames.
+    /// - K3 preferred ∩ quant empty but quant looks like 16-shard K3: require preferred list.
+    /// - Lab / other: require all quant basenames (band gate still means "weights present").
+    pub fn required_weight_files_for_band(
+        quant: &QuantSpec,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Result<Vec<String>, String> {
+        let preferred = joule_cluster::preferred_weight_files(layer_start, layer_end)?;
+        let quant_bases: Vec<String> = quant.files.iter().map(|f| path_basename(&f.path)).collect();
+        let inter: Vec<String> = preferred
+            .iter()
+            .filter(|p| quant_bases.iter().any(|q| q == *p))
+            .cloned()
+            .collect();
+        if !inter.is_empty() {
+            return Ok(inter);
+        }
+        let k3_class = quant.id.contains("k3")
+            || quant.files.len() >= joule_cluster::K3_FILE_COUNT as usize
+            || quant
+                .files
+                .iter()
+                .any(|f| f.path.contains("model-00001-of-00016"));
+        if k3_class {
+            return Ok(preferred);
+        }
+        // Lab fixture: all listed files are required for any band gate.
+        Ok(quant_bases)
+    }
+
+    /// Fail closed unless every required band file is on disk with matching sha256.
+    pub fn band_files_ready(
+        &self,
+        model: &str,
+        quant: &QuantSpec,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Result<(), String> {
+        let required = Self::required_weight_files_for_band(quant, layer_start, layer_end)?;
+        if required.is_empty() {
+            if quant.files.is_empty() {
+                return if self.is_armed(model, &quant.id) {
+                    Ok(())
+                } else {
+                    Err("band weights: quant has no files and cache not armed".into())
+                };
+            }
+            return Err("band weights: empty required file set".into());
+        }
+        let dir = self.model_dir(model, &quant.id);
+        for base in &required {
+            let file = quant
+                .files
+                .iter()
+                .find(|f| path_basename(&f.path) == *base)
+                .ok_or_else(|| format!("band weights: quant missing listed file {base}"))?;
+            let path = dir.join(&file.path);
+            if !path.is_file() {
+                return Err(format!(
+                    "band weights: missing staged file {} (need for layers {layer_start}-{layer_end})",
+                    path.display()
+                ));
+            }
+            let got = file_sha256(&path)?;
+            if got != file.sha256.to_ascii_lowercase() {
+                return Err(format!(
+                    "band weights: hash mismatch for {base} (layers {layer_start}-{layer_end})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// True when every MANIFEST-listed file for `quant` is present and sha256 matches.
     /// This is the content-addressed gate for `RuntimeFlags::digests_verified`.
     ///
@@ -475,6 +551,10 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+fn path_basename(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
+}
+
 fn file_sha256(path: &Path) -> Result<String, String> {
     let mut f = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut hasher = Sha256::new();
@@ -660,6 +740,61 @@ mod tests {
 
     /// #2 Real K3 path: non-synthetic digests + staged stand-in bytes → unlock;
     /// synthetic `a100…` placeholders stay fail-closed even if bytes planted.
+    #[test]
+    fn band_files_ready_fail_closed_and_pass() {
+        use crate::manifest::WeightFile;
+        use uuid::Uuid;
+
+        let root = std::env::temp_dir().join(format!("joule-band-ready-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        let store = WeightsStore::new(&root);
+        let preferred = joule_cluster::preferred_weight_files(40, 50).unwrap();
+        assert!(preferred.iter().any(|p| p.contains("00008")));
+        assert!(preferred.iter().any(|p| p.contains("00009")));
+        eprintln!("OBSERVE band-weights: layers 40-50 preferred={preferred:?}");
+
+        let mut files = Vec::new();
+        for name in &preferred {
+            let bytes = format!("standin-{name}").into_bytes();
+            let hash = hex::encode(Sha256::digest(&bytes));
+            files.push((name.clone(), bytes, hash));
+        }
+        let quant = QuantSpec {
+            id: "kimi-k3-band-ready".into(),
+            min_node_vram_mib: 256,
+            approx_file_mib: 1,
+            files: files
+                .iter()
+                .map(|(n, b, h)| WeightFile {
+                    path: n.clone(),
+                    sha256: h.clone(),
+                    url: format!("peer://{n}"),
+                    size_bytes: b.len() as u64,
+                })
+                .collect(),
+        };
+        // Empty cache → fail.
+        assert!(store.band_files_ready("kimi-open", &quant, 40, 50).is_err());
+        // Plant only first preferred → still fail.
+        let dir = store.model_dir("kimi-open", &quant.id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(&files[0].0), &files[0].1).unwrap();
+        assert!(store.band_files_ready("kimi-open", &quant, 40, 50).is_err());
+        // Plant all → ready.
+        for (n, b, _) in &files {
+            fs::write(dir.join(n), b).unwrap();
+        }
+        store.band_files_ready("kimi-open", &quant, 40, 50).unwrap();
+        let req = WeightsStore::required_weight_files_for_band(&quant, 40, 50).unwrap();
+        assert_eq!(req.len(), preferred.len());
+        eprintln!(
+            "OBSERVE band-weights: ready=true required_n={} first={}",
+            req.len(),
+            req.first().map(|s| s.as_str()).unwrap_or("")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn k3_class_real_digests_stage_and_unlock() {
         let _env = test_env::lock();

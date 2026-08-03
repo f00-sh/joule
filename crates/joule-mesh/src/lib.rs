@@ -835,6 +835,13 @@ impl PeerBus {
                                 upstream: up,
                                 is_tail: true,
                                 require_upstream: true,
+                                // Mesh StubEngine path: pass preferred names for call-site honesty;
+                                // weight gate stays off (no multi-GB K3 in peer-bus unit tests).
+                                require_band_weights: false,
+                                required_weight_files: joule_cluster::preferred_weight_files(
+                                    ls, le,
+                                )
+                                .unwrap_or_default(),
                             })
                             .await
                         {
@@ -868,6 +875,9 @@ impl PeerBus {
                             upstream: vec![],
                             is_tail: false,
                             require_upstream: false,
+                            require_band_weights: false,
+                            required_weight_files: joule_cluster::preferred_weight_files(ls, le)
+                                .unwrap_or_default(),
                         })
                         .await
                     {

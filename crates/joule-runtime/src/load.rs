@@ -35,6 +35,8 @@ pub struct LoadedModel {
     pub tensor_info: Vec<TensorInfo>,
     pub bytes_resident: u64,
     pub loaded_at_unix: u64,
+    /// Basenames of weight files that contributed tensors (band gate).
+    pub loaded_file_basenames: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +99,7 @@ pub fn load_model(
     let mut tensors = HashMap::new();
     let mut tensor_info = Vec::new();
     let mut bytes_resident = 0u64;
+    let mut loaded_file_basenames = Vec::new();
 
     // 1) Explicit manifest files (raw or safetensors by extension).
     for file in &quant.files {
@@ -107,6 +110,7 @@ pub fn load_model(
                 path.display()
             )));
         }
+        let base = path_basename(&file.path);
         if file.path.ends_with(".safetensors") {
             let (t, info, n) = load_safetensors_file(&path)?;
             bytes_resident = bytes_resident.saturating_add(n);
@@ -127,6 +131,7 @@ pub fn load_model(
             });
             tensors.insert(name, data);
         }
+        loaded_file_basenames.push(base);
     }
 
     // 2) Auto-discover safetensors in the quant dir (published drop layout).
@@ -141,6 +146,9 @@ pub fn load_model(
                         tensors.insert(k, v);
                     }
                     tensor_info.extend(info);
+                    if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                        loaded_file_basenames.push(name.to_string());
+                    }
                 }
             }
         }
@@ -176,7 +184,94 @@ pub fn load_model(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
+        loaded_file_basenames,
     })
+}
+
+/// Load only weight files required for layer band `[layer_start, layer_end]`.
+///
+/// Uses the file↔layer map + quant intersection (see
+/// [`WeightsStore::required_weight_files_for_band`]). Fails closed if any
+/// required file is missing from the quant list or disk.
+pub fn load_model_for_band(
+    store: &WeightsStore,
+    spec: &ModelSpec,
+    quant: &QuantSpec,
+    layer_start: u32,
+    layer_end: u32,
+) -> Result<LoadedModel, LoadError> {
+    store
+        .band_files_ready(&spec.id, quant, layer_start, layer_end)
+        .map_err(LoadError::NotPrepared)?;
+    let required = WeightsStore::required_weight_files_for_band(quant, layer_start, layer_end)
+        .map_err(LoadError::NotPrepared)?;
+    let dir = store.model_dir(&spec.id, &quant.id);
+    let mut tensors = HashMap::new();
+    let mut tensor_info = Vec::new();
+    let mut bytes_resident = 0u64;
+    let mut loaded_file_basenames = Vec::new();
+
+    for base in &required {
+        let file = quant
+            .files
+            .iter()
+            .find(|f| path_basename(&f.path) == *base)
+            .ok_or_else(|| {
+                LoadError::NotPrepared(format!("band load: quant missing file {base}"))
+            })?;
+        let path = dir.join(&file.path);
+        if !path.is_file() {
+            return Err(LoadError::NotPrepared(format!(
+                "band load: missing {}",
+                path.display()
+            )));
+        }
+        if file.path.ends_with(".safetensors") {
+            let (t, info, n) = load_safetensors_file(&path)?;
+            bytes_resident = bytes_resident.saturating_add(n);
+            for (k, v) in t {
+                tensors.insert(k, v);
+            }
+            tensor_info.extend(info);
+        } else {
+            let data = fs::read(&path).map_err(|e| LoadError::Io(e.to_string()))?;
+            let n = data.len() as u64;
+            bytes_resident = bytes_resident.saturating_add(n);
+            let name = file.path.clone();
+            tensor_info.push(TensorInfo {
+                name: name.clone(),
+                dtype: "bytes".into(),
+                shape: vec![data.len()],
+                nbytes: n,
+            });
+            tensors.insert(name, data);
+        }
+        loaded_file_basenames.push(base.clone());
+    }
+
+    if tensors.is_empty() && loaded_file_basenames.is_empty() {
+        return Err(LoadError::NotPrepared(
+            "band load: no weight files for layer band".into(),
+        ));
+    }
+
+    Ok(LoadedModel {
+        model_id: spec.id.clone(),
+        quant: quant.id.clone(),
+        source_dir: dir,
+        tensors,
+        tensor_info,
+        bytes_resident,
+        loaded_at_unix: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        loaded_file_basenames,
+    })
+}
+
+fn path_basename(path: &str) -> String {
+    path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
 type SafetensorsLoad = (HashMap<String, Vec<u8>>, Vec<TensorInfo>, u64);
@@ -212,7 +307,7 @@ fn load_safetensors_file(path: &Path) -> Result<SafetensorsLoad, LoadError> {
 
 /// Write a tiny safetensors fixture for tests / CI load path.
 #[cfg(test)]
-pub fn write_tiny_safetensors_fixture(path: &Path) -> Result<(), LoadError> {
+pub(crate) fn write_tiny_safetensors_fixture(path: &Path) -> Result<(), LoadError> {
     use safetensors::tensor::{serialize, TensorView};
     use safetensors::Dtype;
     use std::collections::BTreeMap;
@@ -263,6 +358,70 @@ mod tests {
             loaded.tensors.keys().collect::<Vec<_>>()
         );
         assert!(loaded.bytes_resident >= 64);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_model_for_band_standin_and_fail_closed() {
+        use crate::manifest::{QuantSpec, WeightFile};
+        use sha2::{Digest, Sha256};
+        use uuid::Uuid;
+
+        let dir = std::env::temp_dir().join(format!("joule-band-load-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = WeightsStore::new(&dir);
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.model("kimi-open").unwrap();
+
+        let model_dir = store.model_dir(&spec.id, "kimi-k3-band-test");
+        fs::create_dir_all(&model_dir).unwrap();
+        let f1 = model_dir.join("model-00001-of-00016.safetensors");
+        let f2 = model_dir.join("model-00002-of-00016.safetensors");
+        write_tiny_safetensors_fixture(&f1).unwrap();
+        write_tiny_safetensors_fixture(&f2).unwrap();
+        let h1 = {
+            let mut hasher = Sha256::new();
+            hasher.update(fs::read(&f1).unwrap());
+            hex::encode(hasher.finalize())
+        };
+        let h2 = {
+            let mut hasher = Sha256::new();
+            hasher.update(fs::read(&f2).unwrap());
+            hex::encode(hasher.finalize())
+        };
+        let quant = QuantSpec {
+            id: "kimi-k3-band-test".into(),
+            min_node_vram_mib: 256,
+            approx_file_mib: 1,
+            files: vec![
+                WeightFile {
+                    path: "model-00001-of-00016.safetensors".into(),
+                    sha256: h1,
+                    url: "peer://k3/1".into(),
+                    size_bytes: fs::metadata(&f1).unwrap().len(),
+                },
+                WeightFile {
+                    path: "model-00002-of-00016.safetensors".into(),
+                    sha256: h2,
+                    url: "peer://k3/2".into(),
+                    size_bytes: fs::metadata(&f2).unwrap().len(),
+                },
+            ],
+        };
+        // Remove file 2 → band 6-11 fails; 0-5 (file 1) ready.
+        fs::remove_file(&f2).unwrap();
+        assert!(store.band_files_ready(&spec.id, &quant, 0, 5).is_ok());
+        assert!(store.band_files_ready(&spec.id, &quant, 6, 11).is_err());
+        let loaded = load_model_for_band(&store, spec, &quant, 0, 5).unwrap();
+        assert_eq!(
+            loaded.loaded_file_basenames,
+            vec!["model-00001-of-00016.safetensors"]
+        );
+        assert!(load_model_for_band(&store, spec, &quant, 6, 11).is_err());
+        eprintln!(
+            "OBSERVE band-load: ready_0_5 basenames={:?} bytes={}",
+            loaded.loaded_file_basenames, loaded.bytes_resident
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
