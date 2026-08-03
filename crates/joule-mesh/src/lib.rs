@@ -122,6 +122,11 @@ struct PeerBusInner {
     leases: LeaseBook,
     /// Per-node ed25519 device keys (not derived from NodeId).
     device_keys: std::collections::HashMap<NodeId, ed25519_dalek::SigningKey>,
+    /// Pipeline stage activations collected per request (node → activation).
+    pipeline_activations: std::collections::HashMap<
+        Uuid,
+        std::collections::HashMap<NodeId, joule_proto::ShardActivation>,
+    >,
 }
 
 impl PeerBus {
@@ -138,6 +143,7 @@ impl PeerBus {
                 cluster: Cluster::default(),
                 leases: LeaseBook::default(),
                 device_keys: std::collections::HashMap::new(),
+                pipeline_activations: std::collections::HashMap::new(),
             })),
         }
     }
@@ -693,13 +699,24 @@ impl PeerBus {
                                     .last()
                                     .map(|s| s.node.clone())
                                     .expect("plan non-empty");
-                                // Phase 1: non-tail activations (real handoff material).
-                                let mut upstream = Vec::new();
-                                for node in joule_cluster::non_tail_nodes(&plan, &tail) {
-                                    if let Some(act) = joule_cluster::activation_for_node(
-                                        &plan, request_id, &node, &prompt,
-                                    ) {
-                                        upstream.push(act.clone());
+                                // Single-shard: go straight to tail.
+                                if joule_cluster::non_tail_nodes(&plan, &tail).is_empty() {
+                                    let ir = Envelope::new(
+                                        local.clone(),
+                                        Message::InferRequest {
+                                            request_id,
+                                            model: model.clone(),
+                                            prompt: prompt.clone(),
+                                            max_tokens,
+                                            plan: plan.clone(),
+                                            is_tail: true,
+                                            upstream_activations: vec![],
+                                        },
+                                    );
+                                    let _ = self.send_to(&tail, ir).await;
+                                } else {
+                                    // Phase 1 only: non-tails run stage_layers; InferDone collects then tail.
+                                    for node in joule_cluster::non_tail_nodes(&plan, &tail) {
                                         let ir = Envelope::new(
                                             local.clone(),
                                             Message::InferRequest {
@@ -715,20 +732,6 @@ impl PeerBus {
                                         let _ = self.send_to(&node, ir).await;
                                     }
                                 }
-                                // Phase 2: tail with verified activations.
-                                let ir = Envelope::new(
-                                    local.clone(),
-                                    Message::InferRequest {
-                                        request_id,
-                                        model: model.clone(),
-                                        prompt: prompt.clone(),
-                                        max_tokens,
-                                        plan: plan.clone(),
-                                        is_tail: true,
-                                        upstream_activations: upstream,
-                                    },
-                                );
-                                let _ = self.send_to(&tail, ir).await;
                             }
                         }
                     }
@@ -738,14 +741,45 @@ impl PeerBus {
                 request_id,
                 model,
                 prompt,
-                max_tokens,
+                max_tokens: _,
                 plan,
                 is_tail,
                 upstream_activations,
             } => {
                 engine.load_plan(&plan).await.ok();
-                let (text, pt, ct, act_hex, act_ls, act_le) = if is_tail {
-                    if plan.shards.len() > 1 {
+                let shard = plan.shards.iter().find(|s| &s.node == local);
+                let ls = shard.and_then(|s| s.layer_start).unwrap_or(0);
+                let le = shard.and_then(|s| s.layer_end).unwrap_or(ls);
+                let (text, pt, ct, act_hex, act_ls, act_le, act_payload) = if is_tail {
+                    if plan.shards.len() == 1 {
+                        match engine
+                            .infer(InferRequest {
+                                model: model.clone(),
+                                prompt: prompt.clone(),
+                                max_tokens: 256,
+                            })
+                            .await
+                        {
+                            Ok(o) => (
+                                o.text,
+                                o.prompt_tokens,
+                                o.completion_tokens,
+                                String::new(),
+                                None,
+                                None,
+                                String::new(),
+                            ),
+                            Err(e) => (
+                                format!("[error] {e}"),
+                                0,
+                                0,
+                                String::new(),
+                                None,
+                                None,
+                                String::new(),
+                            ),
+                        }
+                    } else {
                         if let Err(e) = joule_cluster::verify_upstream_activations(
                             &plan,
                             request_id,
@@ -764,38 +798,92 @@ impl PeerBus {
                             self.broadcast(err, None).await;
                             return Ok(());
                         }
+                        let up = joule_cluster::concat_upstream_payloads(
+                            &plan,
+                            local,
+                            &upstream_activations,
+                        )
+                        .unwrap_or_default();
+                        match engine
+                            .stage_layers(joule_runtime::StageRequest {
+                                model: model.clone(),
+                                prompt: prompt.clone(),
+                                layer_start: ls,
+                                layer_end: le,
+                                upstream: up,
+                                is_tail: true,
+                                require_upstream: true,
+                            })
+                            .await
+                        {
+                            Ok(o) => (
+                                o.text.unwrap_or_default(),
+                                o.prompt_tokens,
+                                o.completion_tokens,
+                                String::new(),
+                                None,
+                                None,
+                                String::new(),
+                            ),
+                            Err(e) => (
+                                format!("[error] {e}"),
+                                0,
+                                0,
+                                String::new(),
+                                None,
+                                None,
+                                String::new(),
+                            ),
+                        }
                     }
+                } else {
                     match engine
-                        .infer(InferRequest {
-                            model,
-                            prompt,
-                            max_tokens,
+                        .stage_layers(joule_runtime::StageRequest {
+                            model: model.clone(),
+                            prompt: prompt.clone(),
+                            layer_start: ls,
+                            layer_end: le,
+                            upstream: vec![],
+                            is_tail: false,
+                            require_upstream: false,
                         })
                         .await
                     {
-                        Ok(o) => (
-                            o.text,
-                            o.prompt_tokens,
-                            o.completion_tokens,
+                        Ok(o) => match joule_cluster::activation_from_payload(
+                            local.clone(),
+                            ls,
+                            le,
+                            &o.activation,
+                        ) {
+                            Ok(act) => (
+                                String::new(),
+                                o.prompt_tokens,
+                                0,
+                                act.activation_hex,
+                                Some(ls),
+                                Some(le),
+                                act.payload_b64,
+                            ),
+                            Err(e) => (
+                                format!("[error] {e}"),
+                                0,
+                                0,
+                                String::new(),
+                                None,
+                                None,
+                                String::new(),
+                            ),
+                        },
+                        Err(e) => (
+                            format!("[error] {e}"),
+                            0,
+                            0,
                             String::new(),
                             None,
                             None,
+                            String::new(),
                         ),
-                        Err(e) => (format!("[error] {e}"), 0, 0, String::new(), None, None),
                     }
-                } else if let Some(act) =
-                    joule_cluster::activation_for_node(&plan, request_id, local, &prompt)
-                {
-                    (
-                        String::new(),
-                        0,
-                        0,
-                        act.activation_hex,
-                        Some(act.layer_start),
-                        Some(act.layer_end),
-                    )
-                } else {
-                    (String::new(), 0, 0, String::new(), None, None)
                 };
                 let done = Envelope::new(
                     local.clone(),
@@ -805,13 +893,87 @@ impl PeerBus {
                         prompt_tokens: pt,
                         completion_tokens: ct,
                         shard_ok: true,
-                        activation_hex: act_hex,
+                        activation_hex: act_hex.clone(),
                         activation_layer_start: act_ls,
                         activation_layer_end: act_le,
+                        activation_payload_b64: act_payload.clone(),
                     },
                 );
-                // Deliver completion to all (client listens on any)
                 self.broadcast(done, None).await;
+                // Coordinator collects non-tail activations then dispatches tail.
+                // Clone plan/prompt first so we never hold inflight get_mut while
+                // mutating pipeline_activations (borrowck).
+                if !is_tail && !act_payload.is_empty() {
+                    let maybe_tail = {
+                        let mut g = self.inner.lock().await;
+                        let meta = g.inflight.get(&request_id).and_then(|inf| {
+                            inf.plan.as_ref().map(|plan| {
+                                (
+                                    plan.clone(),
+                                    inf.prompt.clone(),
+                                    inf.max_tokens,
+                                    plan.shards.last().map(|s| s.node.clone()),
+                                )
+                            })
+                        });
+                        if let Some((plan, prompt, max_tokens, tail)) = meta {
+                            g.pipeline_activations
+                                .entry(request_id)
+                                .or_default()
+                                .insert(
+                                    local.clone(),
+                                    joule_proto::ShardActivation {
+                                        node: local.clone(),
+                                        layer_start: act_ls.unwrap_or(0),
+                                        layer_end: act_le.unwrap_or(0),
+                                        activation_hex: act_hex,
+                                        payload_b64: act_payload,
+                                    },
+                                );
+                            let need = joule_cluster::non_tail_nodes(
+                                &plan,
+                                tail.as_ref().unwrap_or(local),
+                            );
+                            let got = g
+                                .pipeline_activations
+                                .get(&request_id)
+                                .map(|m| m.len())
+                                .unwrap_or(0);
+                            if got >= need.len() && !need.is_empty() {
+                                let upstream: Vec<_> = need
+                                    .iter()
+                                    .filter_map(|n| {
+                                        g.pipeline_activations
+                                            .get(&request_id)
+                                            .and_then(|m| m.get(n).cloned())
+                                    })
+                                    .collect();
+                                Some((tail, plan, prompt, max_tokens, model.clone(), upstream))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((Some(tail), plan, prompt, max_tokens, model, upstream)) =
+                        maybe_tail
+                    {
+                        let ir = Envelope::new(
+                            local.clone(),
+                            Message::InferRequest {
+                                request_id,
+                                model,
+                                prompt,
+                                max_tokens,
+                                plan,
+                                is_tail: true,
+                                upstream_activations: upstream,
+                            },
+                        );
+                        let _ = self.send_to(&tail, ir).await;
+                    }
+                }
                 if is_tail && !text.is_empty() {
                     let mut g = self.inner.lock().await;
                     let dead = |id: &NodeId| {
@@ -829,8 +991,91 @@ impl PeerBus {
                 }
             }
             Message::InferDone {
-                request_id, text, ..
-            } if !text.is_empty() => {
+                request_id,
+                text,
+                activation_hex,
+                activation_layer_start,
+                activation_layer_end,
+                activation_payload_b64,
+                ..
+            } => {
+                // Non-tail: collect real stage tensor activation, dispatch tail when ready.
+                if text.is_empty() && !activation_payload_b64.is_empty() {
+                    let from = env.from.clone();
+                    let maybe_tail = {
+                        let mut g = self.inner.lock().await;
+                        let meta = g.inflight.get(&request_id).and_then(|inf| {
+                            inf.plan.as_ref().map(|plan| {
+                                (
+                                    plan.clone(),
+                                    inf.prompt.clone(),
+                                    inf.max_tokens,
+                                    plan.shards.last().map(|s| s.node.clone()),
+                                    inf.model.clone(),
+                                )
+                            })
+                        });
+                        if let Some((plan, prompt, max_tokens, tail, model)) = meta {
+                            g.pipeline_activations
+                                .entry(request_id)
+                                .or_default()
+                                .insert(
+                                    from.clone(),
+                                    joule_proto::ShardActivation {
+                                        node: from,
+                                        layer_start: activation_layer_start.unwrap_or(0),
+                                        layer_end: activation_layer_end.unwrap_or(0),
+                                        activation_hex,
+                                        payload_b64: activation_payload_b64,
+                                    },
+                                );
+                            let need_tail =
+                                tail.clone().unwrap_or_else(|| plan.shards[0].node.clone());
+                            let need = joule_cluster::non_tail_nodes(&plan, &need_tail);
+                            let got = g
+                                .pipeline_activations
+                                .get(&request_id)
+                                .map(|m| m.len())
+                                .unwrap_or(0);
+                            if got >= need.len() && !need.is_empty() {
+                                let upstream: Vec<_> = need
+                                    .iter()
+                                    .filter_map(|n| {
+                                        g.pipeline_activations
+                                            .get(&request_id)
+                                            .and_then(|m| m.get(n).cloned())
+                                    })
+                                    .collect();
+                                Some((tail, plan, prompt, max_tokens, model, upstream))
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some((Some(tail), plan, prompt, max_tokens, model, upstream)) =
+                        maybe_tail
+                    {
+                        let ir = Envelope::new(
+                            local.clone(),
+                            Message::InferRequest {
+                                request_id,
+                                model,
+                                prompt,
+                                max_tokens,
+                                plan,
+                                is_tail: true,
+                                upstream_activations: upstream,
+                            },
+                        );
+                        let _ = self.send_to(&tail, ir).await;
+                    }
+                    return Ok(());
+                }
+                if text.is_empty() {
+                    return Ok(());
+                }
                 let mut g = self.inner.lock().await;
                 let dead = |id: &NodeId| {
                     g.dead_coordinators.contains(id) || g.donors.get(id).is_some_and(|d| !d.healthy)
@@ -859,7 +1104,6 @@ impl PeerBus {
                     }
                 }
             }
-            Message::InferDone { .. } => {}
             _ => {}
         }
         Ok(())
@@ -1419,6 +1663,7 @@ mod tests {
                 activation_hex: String::new(),
                 activation_layer_start: None,
                 activation_layer_end: None,
+                activation_payload_b64: String::new(),
             },
         );
         let engine = StubEngine::new();

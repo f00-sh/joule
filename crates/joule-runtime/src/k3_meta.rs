@@ -139,7 +139,10 @@ mod tests {
             "discovery doc must not oversell full PP"
         );
         let map = include_str!("../../../docs/design/k3-file-layer-map-v0.md");
-        assert!(map.contains("93") && map.contains("16"), "file-layer map present");
+        assert!(
+            map.contains("93") && map.contains("16"),
+            "file-layer map present"
+        );
         eprintln!(
             "OBSERVE no-fake-pp: docs ok cluster-v0 + discovery + k3-file-layer-map; layers={}",
             placement_model_layers()

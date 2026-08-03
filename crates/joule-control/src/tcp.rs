@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use joule_proto::{
     decode_line, encode_line, resolve_cluster_model, Envelope, Message, NodeId, CLUSTER_MODEL,
 };
-use joule_runtime::{Engine, InferRequest};
+use joule_runtime::Engine;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -509,6 +509,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 activation_hex,
                 activation_layer_start,
                 activation_layer_end,
+                activation_payload_b64,
             } => {
                 // Phase-1 pipeline: fulfill non-tail activation waiter if present.
                 let ack_tx = {
@@ -516,16 +517,18 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     w.remove(&(request_id, env.from.clone()))
                 };
                 if let Some(tx) = ack_tx {
-                    let activation = if activation_hex.is_empty() {
-                        None
-                    } else {
-                        Some(joule_proto::ShardActivation {
-                            node: env.from.clone(),
-                            layer_start: activation_layer_start.unwrap_or(0),
-                            layer_end: activation_layer_end.unwrap_or(0),
-                            activation_hex,
-                        })
-                    };
+                    let activation =
+                        if activation_hex.is_empty() || activation_payload_b64.is_empty() {
+                            None
+                        } else {
+                            Some(joule_proto::ShardActivation {
+                                node: env.from.clone(),
+                                layer_start: activation_layer_start.unwrap_or(0),
+                                layer_end: activation_layer_end.unwrap_or(0),
+                                activation_hex,
+                                payload_b64: activation_payload_b64,
+                            })
+                        };
                     let _ = tx.send(Ok(crate::state::ShardAck {
                         activation,
                         shard_ok,
@@ -1097,16 +1100,21 @@ async fn fanout_infer(
                         activation_hex,
                         activation_layer_start,
                         activation_layer_end,
+                        activation_payload_b64,
                         shard_ok,
                         ..
                     } = done.msg
                     {
-                        if shard_ok && !activation_hex.is_empty() {
+                        if shard_ok
+                            && !activation_hex.is_empty()
+                            && !activation_payload_b64.is_empty()
+                        {
                             got_act = Some(joule_proto::ShardActivation {
                                 node: node.clone(),
                                 layer_start: activation_layer_start.unwrap_or(0),
                                 layer_end: activation_layer_end.unwrap_or(0),
                                 activation_hex,
+                                payload_b64: activation_payload_b64,
                             });
                         }
                         let mut g = app.state.write().await;
@@ -1441,67 +1449,76 @@ pub async fn challenge_loop(app: App) {
     }
 }
 
-/// Agent-side: run this node's **shard** of a distributed inference.
+/// Agent-side: run this node's **layer-band pipeline stage**.
 ///
-/// Non-tail: produces a **pipeline activation commitment** (domain-separated hex)
-/// for handoff — not an empty no-op ACK. Tail: verifies upstream activations then
-/// runs full `engine.infer`. Geometry labels remain VRAM-proportional layer bands.
+/// Non-tail: `engine.stage_layers` → real activation tensor payload + commitment.
+/// Tail: verify upstream payloads, then stage with concatenated upstream (layer-sliced).
 pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
     match &env.msg {
         Message::InferRequest {
             request_id,
             model,
             prompt,
-            max_tokens,
+            max_tokens: _,
             plan,
             is_tail,
             upstream_activations,
         } => {
             engine.load_plan(plan).await.context("engine load_plan")?;
+            let shard = plan
+                .shards
+                .iter()
+                .find(|s| s.node == env.from)
+                .ok_or_else(|| anyhow::anyhow!("node not in plan"))?;
+            let ls = shard.layer_start.unwrap_or(0);
+            let le = shard.layer_end.unwrap_or(ls);
             if !*is_tail {
-                let act = joule_cluster::activation_for_node(plan, *request_id, &env.from, prompt)
-                    .ok_or_else(|| anyhow::anyhow!("node not in plan for activation"))?;
+                let stage = engine
+                    .stage_layers(joule_runtime::StageRequest {
+                        model: model.clone(),
+                        prompt: prompt.clone(),
+                        layer_start: ls,
+                        layer_end: le,
+                        upstream: vec![],
+                        is_tail: false,
+                        require_upstream: false,
+                    })
+                    .await
+                    .context("stage_layers non-tail")?;
+                let act = joule_cluster::activation_from_payload(
+                    env.from.clone(),
+                    ls,
+                    le,
+                    &stage.activation,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
                 return Ok(Envelope::new(
                     env.from.clone(),
                     Message::InferDone {
                         request_id: *request_id,
                         text: String::new(),
-                        prompt_tokens: 0,
+                        prompt_tokens: stage.prompt_tokens,
                         completion_tokens: 0,
                         shard_ok: true,
                         activation_hex: act.activation_hex,
-                        activation_layer_start: Some(act.layer_start),
-                        activation_layer_end: Some(act.layer_end),
+                        activation_layer_start: Some(ls),
+                        activation_layer_end: Some(le),
+                        activation_payload_b64: act.payload_b64,
                     },
                 ));
             }
-            // Tail: verify pipeline handoff when multi-shard.
-            if plan.shards.len() > 1 {
-                if let Err(e) = joule_cluster::verify_upstream_activations(
-                    plan,
-                    *request_id,
-                    prompt,
-                    &env.from,
-                    upstream_activations,
-                ) {
-                    return Ok(Envelope::new(
-                        env.from.clone(),
-                        Message::InferError {
-                            request_id: *request_id,
-                            error: format!("pipeline activation: {e}"),
-                        },
-                    ));
-                }
-            }
-            match engine
-                .infer(InferRequest {
-                    model: model.clone(),
-                    prompt: prompt.clone(),
-                    max_tokens: *max_tokens,
-                })
-                .await
-            {
-                Ok(out) => Ok(Envelope::new(
+            // Tail: multi-shard verifies real upstream tensors then layer-sliced stage;
+            // single-shard runs full engine.infer (tensor path when ClusterEngine loaded).
+            if plan.shards.len() == 1 {
+                let out = engine
+                    .infer(joule_runtime::InferRequest {
+                        model: model.clone(),
+                        prompt: prompt.clone(),
+                        max_tokens: 256,
+                    })
+                    .await
+                    .context("single-shard tail infer")?;
+                return Ok(Envelope::new(
                     env.from.clone(),
                     Message::InferDone {
                         request_id: *request_id,
@@ -1512,16 +1529,55 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
                         activation_hex: String::new(),
                         activation_layer_start: None,
                         activation_layer_end: None,
+                        activation_payload_b64: String::new(),
                     },
-                )),
-                Err(e) => Ok(Envelope::new(
+                ));
+            }
+            if let Err(e) = joule_cluster::verify_upstream_activations(
+                plan,
+                *request_id,
+                prompt,
+                &env.from,
+                upstream_activations,
+            ) {
+                return Ok(Envelope::new(
                     env.from.clone(),
                     Message::InferError {
                         request_id: *request_id,
-                        error: e.to_string(),
+                        error: format!("pipeline activation: {e}"),
                     },
-                )),
+                ));
             }
+            let upstream_bytes =
+                joule_cluster::concat_upstream_payloads(plan, &env.from, upstream_activations)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+            let stage = engine
+                .stage_layers(joule_runtime::StageRequest {
+                    model: model.clone(),
+                    prompt: prompt.clone(),
+                    layer_start: ls,
+                    layer_end: le,
+                    upstream: upstream_bytes,
+                    is_tail: true,
+                    require_upstream: true,
+                })
+                .await
+                .context("stage_layers tail")?;
+            let text = stage.text.unwrap_or_default();
+            Ok(Envelope::new(
+                env.from.clone(),
+                Message::InferDone {
+                    request_id: *request_id,
+                    text,
+                    prompt_tokens: stage.prompt_tokens,
+                    completion_tokens: stage.completion_tokens,
+                    shard_ok: true,
+                    activation_hex: String::new(),
+                    activation_layer_start: None,
+                    activation_layer_end: None,
+                    activation_payload_b64: String::new(),
+                },
+            ))
         }
         _ => anyhow::bail!("not an infer request"),
     }
@@ -1631,15 +1687,16 @@ mod tests {
                 completion_tokens,
                 shard_ok,
                 activation_hex,
+                activation_payload_b64,
                 ..
             } => {
                 assert!(text.is_empty(), "non-tail must not run full infer: {text}");
-                assert_eq!(prompt_tokens, 0);
+                let _ = prompt_tokens; // stage may report prompt token count
                 assert_eq!(completion_tokens, 0);
                 assert!(shard_ok);
                 assert!(
-                    !activation_hex.is_empty(),
-                    "non-tail must produce activation handoff"
+                    !activation_hex.is_empty() && !activation_payload_b64.is_empty(),
+                    "non-tail must produce real stage tensor payload"
                 );
             }
             other => panic!("expected InferDone, got {other:?}"),
@@ -1657,11 +1714,25 @@ mod tests {
         eng.load_plan(&plan).await.unwrap();
         let rid = Uuid::new_v4();
         let prompt = "tail-full-infer";
-        let upstream =
-            vec![
-                joule_cluster::activation_for_node(&plan, rid, &plan.shards[0].node, prompt)
-                    .expect("act"),
-            ];
+        let stage = eng
+            .stage_layers(joule_runtime::StageRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: prompt.into(),
+                layer_start: 0,
+                layer_end: plan.model_layers / 2,
+                upstream: vec![],
+                is_tail: false,
+                require_upstream: false,
+            })
+            .await
+            .unwrap();
+        let upstream = vec![joule_cluster::activation_from_payload(
+            plan.shards[0].node.clone(),
+            0,
+            plan.model_layers / 2,
+            &stage.activation,
+        )
+        .unwrap()];
         let env = Envelope::new(
             plan.shards[1].node.clone(),
             Message::InferRequest {

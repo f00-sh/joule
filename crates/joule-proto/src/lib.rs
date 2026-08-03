@@ -165,15 +165,19 @@ pub struct ClusterPlan {
 
 /// Pipeline activation handoff from a non-tail shard to later stages / tail.
 ///
-/// v0 commitment is domain-separated SHA-256 of plan+band+prompt (not full tensor
-/// blobs). Real tensor PP can replace the payload later without changing the bus shape.
+/// Carries **real stage tensor bytes** (`payload_b64`) from a layer-band engine stage,
+/// plus `activation_hex` = sha256(payload). Hash-only commitments without payload
+/// are rejected by verify.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShardActivation {
     pub node: NodeId,
     pub layer_start: u32,
     pub layer_end: u32,
-    /// Lowercase hex SHA-256 commitment for this stage.
+    /// Lowercase hex SHA-256 of `payload_b64` decoded bytes.
     pub activation_hex: String,
+    /// Base64 of intermediate activation tensor bytes from the stage API.
+    #[serde(default)]
+    pub payload_b64: String,
 }
 
 fn default_model_layers() -> u32 {
@@ -376,7 +380,7 @@ pub enum Message {
         /// Non-tail shards may return empty text with shard_ok.
         #[serde(default = "default_true")]
         shard_ok: bool,
-        /// Non-tail: domain-separated activation commitment (hex). Empty for pure tail.
+        /// Non-tail: sha256 of activation payload (hex). Empty for pure tail.
         #[serde(default)]
         activation_hex: String,
         /// Layer band this activation covers (geometry).
@@ -384,6 +388,9 @@ pub enum Message {
         activation_layer_start: Option<u32>,
         #[serde(default)]
         activation_layer_end: Option<u32>,
+        /// Non-tail: base64 stage tensor bytes (required for real PP handoff).
+        #[serde(default)]
+        activation_payload_b64: String,
     },
     InferError {
         request_id: Uuid,

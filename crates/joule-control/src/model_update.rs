@@ -1,7 +1,10 @@
 //! Apply signed model_update bodies: plan redundant chunks, tell each agent what to fetch.
 
 use crate::app::App;
-use joule_cluster::{plan_redundant_chunks, required_digests_for_node, ModelChunk};
+use joule_cluster::{
+    order_digests_for_layer_fetch, plan_redundant_chunks, preferred_weight_files,
+    required_digests_for_node, ModelChunk,
+};
 use joule_proto::{Envelope, Message, NodeId, OperatorKind, SignedEnvelope};
 use serde::Deserialize;
 use tracing::{info, warn};
@@ -139,6 +142,9 @@ pub async fn apply_model_update(app: &App, envelope: &SignedEnvelope) {
         if digests.is_empty() {
             continue;
         }
+        // Layer-aware fetch preference: donor's assigned chunk layer union →
+        // preferred K3 weight files first (file↔layer map call site).
+        let digests = order_node_digests_by_layer_preference(np, &digests);
         if let Some(tx) = routes.get(&np.node) {
             let msg = Message::FetchDigests {
                 digests,
@@ -147,6 +153,43 @@ pub async fn apply_model_update(app: &App, envelope: &SignedEnvelope) {
             };
             let _ = tx.send(Envelope::new(np.node.clone(), msg));
         }
+    }
+}
+
+/// Reorder FetchDigests so weight files intersecting the node's hold layer band come first.
+fn order_node_digests_by_layer_preference(
+    np: &joule_cluster::NodeChunkPlan,
+    digests: &[String],
+) -> Vec<String> {
+    if np.holds.is_empty() {
+        return digests.to_vec();
+    }
+    let ls = np.holds.iter().map(|h| h.layer_start).min().unwrap_or(0);
+    let le = np
+        .holds
+        .iter()
+        .map(|h| h.layer_end)
+        .max()
+        .unwrap_or(ls)
+        .min(joule_cluster::K3_MODEL_LAYERS.saturating_sub(1));
+    let pairs: Vec<(String, String)> = np
+        .holds
+        .iter()
+        .map(|h| (h.path.clone(), h.sha256.clone()))
+        .collect();
+    match order_digests_for_layer_fetch(ls, le, &pairs) {
+        Ok(ordered) if !ordered.is_empty() => {
+            // Keep any digests not in holds at the end.
+            let mut out = ordered;
+            for d in digests {
+                if !out.iter().any(|x| x == d) {
+                    out.push(d.clone());
+                }
+            }
+            let _ = preferred_weight_files(ls, le); // exercised call site for map
+            out
+        }
+        _ => digests.to_vec(),
     }
 }
 

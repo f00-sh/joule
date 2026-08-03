@@ -6,6 +6,7 @@
 mod capacity_challenge;
 mod chunks;
 mod erasure;
+mod file_layer_map;
 mod lease;
 mod pipeline;
 mod plan_agree;
@@ -25,14 +26,20 @@ pub use erasure::{
     content_sha256, encode as erasure_encode, place_erasure_shards, placement_survives,
     reconstruct as erasure_reconstruct, DurablePlacement, ErasureSet,
 };
+pub use file_layer_map::{
+    files_intersecting_layers, layers_for_file, layers_for_weight_path, map_covers_all_layers,
+    order_digests_for_layer_fetch, preferred_weight_files, LayerRange, K3_FILE_COUNT,
+    K3_MODEL_LAYERS,
+};
 pub use lease::{
     lease_receipt_hex, plan_accept_confirm_hex, plan_accept_fields, plan_hash_hex,
     verify_plan_accept_confirm, LeaseAuditEntry, LeaseBook, StreamLease, DOMAIN_ACCEPT,
     DOMAIN_LEASE, DOMAIN_PLAN,
 };
 pub use pipeline::{
-    activation_for_node, activation_hex, activation_preimage, non_tail_nodes,
-    verify_upstream_activations, DOMAIN_ACTIVATION,
+    activation_from_payload, activation_hex, activation_preimage, commitment_hex,
+    concat_upstream_payloads, decode_payload, non_tail_nodes, verify_upstream_activations,
+    DOMAIN_ACTIVATION,
 };
 pub use plan_agree::{on_accept, PlanAcceptEffect, PlanAgreeView};
 pub use plan_sign::{

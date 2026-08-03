@@ -10,6 +10,7 @@ mod k3_pipeline;
 mod load;
 mod manifest;
 mod software;
+mod stage;
 mod weights;
 
 pub use decode::generate as generate_from_loaded;
@@ -32,6 +33,7 @@ pub use software::{
     apply_staged, current_arch, current_os, match_target, parse_software_update, read_stage,
     stage_blob, SoftwareTarget, SoftwareUpdateBody, StageStatus,
 };
+pub use stage::{activation_commitment_hex, lab_stage_activation, StageOutput, StageRequest};
 pub use weights::{
     digests_verified_for_quant, is_lab_fixture_quant, is_synthetic_placeholder_digest,
     quant_can_unlock_service_digests, BlobAnnounce, PrepareStatus, WeightsStore,
@@ -86,6 +88,10 @@ pub struct InferResponse {
 pub trait Engine: Send + Sync {
     async fn load_plan(&self, plan: &ClusterPlan) -> Result<(), RuntimeError>;
     async fn infer(&self, req: InferRequest) -> Result<InferResponse, RuntimeError>;
+    /// Layer-band pipeline stage: emits real activation tensor bytes.
+    async fn stage_layers(&self, req: StageRequest) -> Result<StageOutput, RuntimeError> {
+        lab_stage_activation(&req).map_err(RuntimeError::Infer)
+    }
 }
 
 pub struct StubEngine {

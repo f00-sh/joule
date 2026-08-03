@@ -658,6 +658,94 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// #2 Real K3 path: non-synthetic digests + staged stand-in bytes → unlock;
+    /// synthetic `a100…` placeholders stay fail-closed even if bytes planted.
+    #[test]
+    fn k3_class_real_digests_stage_and_unlock() {
+        let _env = test_env::lock();
+        let root = std::env::temp_dir().join(format!("joule-k3-real-{}", Uuid::new_v4()));
+        let blob_root = std::env::temp_dir().join(format!("joule-k3-blobs-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&blob_root);
+        fs::create_dir_all(&blob_root).unwrap();
+        std::env::set_var("JOULE_BLOBS_DIR", &blob_root);
+        let store = WeightsStore::new(&root);
+
+        // Stand-in shards: real content hashes (not a100… placeholders).
+        let payloads: Vec<(&[u8], &str)> = vec![
+            (
+                b"JST1-k3-standin-shard-00001-of-00002-real-bytes",
+                "model-00001-of-00002.safetensors",
+            ),
+            (
+                b"JST1-k3-standin-shard-00002-of-00002-real-bytes!!",
+                "model-00002-of-00002.safetensors",
+            ),
+        ];
+        let mut files = Vec::new();
+        for (bytes, path) in &payloads {
+            let hash = hex::encode(Sha256::digest(*bytes));
+            assert!(
+                !is_synthetic_placeholder_digest(&hash),
+                "stand-in must not look synthetic"
+            );
+            WeightsStore::store_blob(&hash, bytes).unwrap();
+            let dest_dir = store.model_dir("kimi-open", "kimi-k3-real-standin");
+            fs::create_dir_all(&dest_dir).unwrap();
+            let dest = dest_dir.join(path);
+            fs::write(&dest, bytes).unwrap();
+            files.push(WeightFile {
+                path: (*path).into(),
+                sha256: hash,
+                url: format!("peer://kimi-open/k3/{path}"),
+                size_bytes: bytes.len() as u64,
+            });
+        }
+        let real_quant = QuantSpec {
+            id: "kimi-k3-real-standin".into(),
+            min_node_vram_mib: 256,
+            approx_file_mib: 1,
+            files,
+        };
+        assert!(
+            quant_can_unlock_service_digests(&real_quant),
+            "non-synthetic K3-class digests must be allowed to unlock"
+        );
+        assert!(
+            digests_verified_for_quant(&store, "kimi-open", &real_quant),
+            "staged matching bytes must unlock digests_verified"
+        );
+        assert!(store.digests_verified("kimi-open", &real_quant));
+
+        // Synthetic placeholders: plant matching bytes under a100… digests — still fail closed.
+        let syn_bytes = b"planted-but-still-placeholder-pattern";
+        let syn_hash = "a100000000000000000000000000000000000000000000000000000000000001";
+        assert!(is_synthetic_placeholder_digest(syn_hash));
+        let syn_quant = QuantSpec {
+            id: "kimi-k3-synthetic-plant".into(),
+            min_node_vram_mib: 256,
+            approx_file_mib: 1,
+            files: vec![WeightFile {
+                path: "model-00001-of-00001.safetensors".into(),
+                sha256: syn_hash.into(),
+                url: "peer://k3/placeholder".into(),
+                size_bytes: syn_bytes.len() as u64,
+            }],
+        };
+        // Even if we plant a file named with the synthetic digest path, unlock refuses.
+        assert!(!quant_can_unlock_service_digests(&syn_quant));
+        assert!(!digests_verified_for_quant(&store, "kimi-open", &syn_quant));
+        eprintln!(
+            "OBSERVE k3-real-path: real_unlock={} synthetic_unlock={} files={}",
+            digests_verified_for_quant(&store, "kimi-open", &real_quant),
+            digests_verified_for_quant(&store, "kimi-open", &syn_quant),
+            real_quant.files.len()
+        );
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&blob_root);
+    }
+
     #[test]
     fn store_and_list_blob_roundtrip() {
         let _env = test_env::lock();
