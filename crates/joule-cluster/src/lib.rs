@@ -6,6 +6,7 @@
 mod capacity_challenge;
 mod chunks;
 mod erasure;
+mod lease;
 mod scheduler;
 
 pub use capacity_challenge::{
@@ -20,6 +21,11 @@ pub use chunks::{
 pub use erasure::{
     content_sha256, encode as erasure_encode, place_erasure_shards, placement_survives,
     reconstruct as erasure_reconstruct, DurablePlacement, ErasureSet,
+};
+pub use lease::{
+    lease_receipt_hex, plan_accept_confirm_hex, plan_accept_fields, plan_hash_hex,
+    verify_plan_accept_confirm, LeaseAuditEntry, LeaseBook, StreamLease, DOMAIN_ACCEPT,
+    DOMAIN_LEASE, DOMAIN_PLAN,
 };
 pub use scheduler::{
     compute_state, free_slots, free_stream_slots, max_slots, max_streams, pool_max_streams,

@@ -429,6 +429,8 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 request_id,
                 accepted,
                 reason,
+                plan_hash_hex,
+                confirm_hex,
             } => {
                 tracing::debug!(
                     %plan_id,
@@ -438,10 +440,14 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                     from = %env.from,
                     "PlanAccept"
                 );
-                app.state
-                    .write()
-                    .await
-                    .settle_plan_accept(request_id, &env.from, plan_id, accepted);
+                app.state.write().await.settle_plan_accept(
+                    request_id,
+                    &env.from,
+                    plan_id,
+                    accepted,
+                    &plan_hash_hex,
+                    &confirm_hex,
+                );
             }
             Message::InferDone {
                 request_id,
@@ -588,8 +594,8 @@ pub async fn mesh_donors_ready(app: &App) -> bool {
     donors.iter().any(|(id, _)| routes.contains_key(id))
 }
 
-/// Phase D mesh coordination: RequestInfer → plan_from_mesh_donors → PlanOffer →
-/// PlanAccept → InferRequest → InferDone. Does **not** call try_acquire_stream.
+/// Phase D mesh coordination: **stream lease** → RequestInfer → PlanOffer →
+/// hashed PlanAccept (all shards) → InferRequest → InferDone → **lease release**.
 pub async fn dispatch_mesh_infer(
     app: &App,
     account: &str,
@@ -621,18 +627,36 @@ pub async fn dispatch_mesh_infer(
         return Err("mesh has no connected donors with verified capacity".into());
     }
 
-    let plan = joule_cluster::plan_from_mesh_donors(&donors).map_err(|e| e.to_string())?;
+    // Geometry from mesh; capacity truth still requires a stream lease.
+    let plan_geometry =
+        joule_cluster::plan_from_mesh_donors(&donors).map_err(|e| e.to_string())?;
     let request_id = Uuid::new_v4();
+    let lease = {
+        let mut g = app.state.write().await;
+        g.admit_stream_lease(account, request_id, Duration::from_secs(90))?
+    };
+    // Prefer lease plan shards (registry) when they match mesh geometry size;
+    // mesh plan is used for PlanOffer agreement among mesh donors.
+    let plan = plan_geometry;
+    let plan_hash_hex = joule_cluster::plan_hash_hex(&plan);
+    // Capacity lease may have been granted against registry geometry; bind the
+    // **mesh** plan hash every donor will confirm.
+    {
+        let mut g = app.state.write().await;
+        g.leases
+            .bind_agreement_hash(request_id, plan_hash_hex.clone());
+    }
 
     info!(
         %request_id,
+        lease_id = %lease.lease_id,
         shards = plan.shards.len(),
         pool_mem_mib = plan.pool_mem_mib,
         donors = donors.len(),
-        "mesh RequestInfer coordination (plan_from_mesh_donors)"
+        %plan_hash_hex,
+        "mesh RequestInfer + stream lease"
     );
 
-    // Emit RequestInfer to all connected donors (protocol honesty / agent logs).
     for (node, _) in &donors {
         let env = Envelope::new(
             node.clone(),
@@ -647,7 +671,6 @@ pub async fn dispatch_mesh_infer(
         let _ = send_to_agent(&app.routes, node, env).await;
     }
 
-    // Collect PlanAccept from every shard in the mesh plan.
     let expected: std::collections::HashSet<NodeId> =
         plan.shards.iter().map(|s| s.node.clone()).collect();
     let (accept_tx, accept_rx) = oneshot::channel();
@@ -657,6 +680,7 @@ pub async fn dispatch_mesh_infer(
             request_id,
             PendingPlanAccept {
                 plan_id: plan.plan_id,
+                plan_hash_hex: plan_hash_hex.clone(),
                 expected: expected.clone(),
                 accepted: std::collections::HashSet::new(),
                 tx: Some(accept_tx),
@@ -670,45 +694,32 @@ pub async fn dispatch_mesh_infer(
             Message::PlanOffer {
                 plan: plan.clone(),
                 request_id,
+                plan_hash_hex: plan_hash_hex.clone(),
             },
         );
         if !send_to_agent(&app.routes, &shard.node, env).await {
             let mut g = app.state.write().await;
             g.pending_plan_accepts.remove(&request_id);
+            g.release_stream_lease(request_id, "lease_released", "plan offer fail");
             return Err(format!("PlanOffer: shard {} not connected", shard.node));
         }
     }
 
-    match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
-        Ok(Ok(Ok(()))) => {}
-        Ok(Ok(Err(e))) => {
-            app.state
-                .write()
-                .await
-                .pending_plan_accepts
-                .remove(&request_id);
-            return Err(e);
-        }
-        Ok(Err(_)) => {
-            app.state
-                .write()
-                .await
-                .pending_plan_accepts
-                .remove(&request_id);
-            return Err("PlanAccept channel closed".into());
-        }
-        Err(_) => {
-            app.state
-                .write()
-                .await
-                .pending_plan_accepts
-                .remove(&request_id);
-            return Err("timed out waiting for PlanAccept from mesh shards".into());
-        }
+    let agree = match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(e))) => Err(e),
+        Ok(Err(_)) => Err("PlanAccept channel closed".into()),
+        Err(_) => Err("timed out waiting for PlanAccept from mesh shards".into()),
+    };
+    if let Err(e) = agree {
+        let mut g = app.state.write().await;
+        g.pending_plan_accepts.remove(&request_id);
+        g.release_stream_lease(request_id, "lease_released", &e);
+        return Err(e);
     }
 
-    // Fan-out InferRequest (no control stream reservation).
-    fanout_infer(
+    // Lease holds cluster inflight; fanout does NOT double-reserve.
+    let out = fanout_infer(
         app,
         account,
         &model,
@@ -720,10 +731,20 @@ pub async fn dispatch_mesh_infer(
         false,
         CoordinationPath::MeshRequestInfer,
     )
-    .await
+    .await;
+    // Always release lease (success, error, or timeout inside fanout).
+    {
+        let mut g = app.state.write().await;
+        let detail = match &out {
+            Ok(_) => "infer ok",
+            Err(e) => e.as_str(),
+        };
+        g.release_stream_lease(request_id, "lease_released", detail);
+    }
+    out
 }
 
-/// Classic control path: try_acquire_stream + InferRequest.
+/// Classic control path: stream **lease** + multi-shard PlanOffer agree + InferRequest.
 async fn dispatch_control_stream(
     app: &App,
     account: &str,
@@ -732,14 +753,65 @@ async fn dispatch_control_stream(
     max_tokens: u32,
     charge: bool,
 ) -> Result<InferOutcome, String> {
-    let plan = acquire_stream_with_wait(app, Duration::from_secs(20)).await?;
     let request_id = Uuid::new_v4();
+    let lease = acquire_lease_with_wait(app, account, request_id, Duration::from_secs(20)).await?;
+    let plan = lease.plan.clone();
+    let plan_hash_hex = lease.plan_hash_hex.clone();
     info!(
         %request_id,
+        lease_id = %lease.lease_id,
         shards = plan.shards.len(),
         pool_mem_mib = plan.pool_mem_mib,
-        "control_dispatch sharded infer (try_acquire_stream)"
+        %plan_hash_hex,
+        "control_dispatch sharded infer (stream lease)"
     );
+
+    // Multi-party agreement even on control path: PlanOffer → hashed PlanAccept.
+    let expected: std::collections::HashSet<NodeId> =
+        plan.shards.iter().map(|s| s.node.clone()).collect();
+    let (accept_tx, accept_rx) = oneshot::channel();
+    {
+        let mut g = app.state.write().await;
+        g.pending_plan_accepts.insert(
+            request_id,
+            PendingPlanAccept {
+                plan_id: plan.plan_id,
+                plan_hash_hex: plan_hash_hex.clone(),
+                expected,
+                accepted: std::collections::HashSet::new(),
+                tx: Some(accept_tx),
+            },
+        );
+    }
+    for shard in &plan.shards {
+        let env = Envelope::new(
+            shard.node.clone(),
+            Message::PlanOffer {
+                plan: plan.clone(),
+                request_id,
+                plan_hash_hex: plan_hash_hex.clone(),
+            },
+        );
+        if !send_to_agent(&app.routes, &shard.node, env).await {
+            let mut g = app.state.write().await;
+            g.pending_plan_accepts.remove(&request_id);
+            g.release_stream_lease(request_id, "lease_released", "plan offer fail");
+            return Err(format!("PlanOffer: shard {} not connected", shard.node));
+        }
+    }
+    let agree = match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(e))) => Err(e),
+        Ok(Err(_)) => Err("PlanAccept channel closed".into()),
+        Err(_) => Err("timed out waiting for PlanAccept from control shards".into()),
+    };
+    if let Err(e) = agree {
+        let mut g = app.state.write().await;
+        g.pending_plan_accepts.remove(&request_id);
+        g.release_stream_lease(request_id, "lease_released", &e);
+        return Err(e);
+    }
+
     let out = fanout_infer(
         app,
         account,
@@ -749,10 +821,21 @@ async fn dispatch_control_stream(
         plan,
         request_id,
         charge,
-        true,
+        false,
         CoordinationPath::ControlDispatch,
     )
-    .await?;
+    .await;
+
+    {
+        let mut g = app.state.write().await;
+        let detail = match &out {
+            Ok(_) => "infer ok",
+            Err(e) => e.as_str(),
+        };
+        g.release_stream_lease(request_id, "lease_released", detail);
+    }
+
+    let out = out?;
 
     if charge {
         let dual = {
@@ -890,11 +973,13 @@ async fn fanout_infer(
     }
 }
 
-/// Wait until a shared stream can be reserved on the whole mesh.
-async fn acquire_stream_with_wait(
+/// Wait until a stream **lease** can be admitted (fail closed after timeout).
+async fn acquire_lease_with_wait(
     app: &App,
+    account: &str,
+    request_id: Uuid,
     timeout: Duration,
-) -> Result<joule_proto::ClusterPlan, String> {
+) -> Result<joule_cluster::StreamLease, String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         {
@@ -904,14 +989,18 @@ async fn acquire_stream_with_wait(
                     "no healthy workers for cluster model {CLUSTER_MODEL}"
                 ));
             }
-            if let Some(plan) = g.cluster.try_acquire_stream() {
-                return Ok(plan);
+            match g.admit_stream_lease(account, request_id, Duration::from_secs(90)) {
+                Ok(lease) => return Ok(lease),
+                Err(e) if e.contains("pool full") => {
+                    // wait for release
+                }
+                Err(e) => return Err(e),
             }
         }
 
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
-                "timed out waiting for free stream capacity on {CLUSTER_MODEL} pool"
+                "pool full: no free stream slots for {CLUSTER_MODEL} (timed out waiting)"
             ));
         }
 

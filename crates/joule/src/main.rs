@@ -1653,16 +1653,25 @@ async fn run_agent(
                                     shards = plan.shards.len(),
                                     "mesh RequestInfer → PlanOffer"
                                 );
+                                let plan_hash_hex = joule_cluster::plan_hash_hex(&plan);
                                 let offer = Envelope::new(
                                     node_id.clone(),
                                     Message::PlanOffer {
                                         plan: plan.clone(),
                                         request_id,
+                                        plan_hash_hex: plan_hash_hex.clone(),
                                     },
                                 );
                                 writer.write_all(&encode_line(&offer)?).await?;
                                 // Self-accept as shard if we are in the plan.
                                 if plan.shards.iter().any(|s| s.node == node_id) {
+                                    let (ph, confirm) = joule_cluster::plan_accept_fields(
+                                        &plan,
+                                        request_id,
+                                        &node_id,
+                                        true,
+                                        Some(&plan_hash_hex),
+                                    );
                                     let acc = Envelope::new(
                                         node_id.clone(),
                                         Message::PlanAccept {
@@ -1670,6 +1679,8 @@ async fn run_agent(
                                             request_id,
                                             accepted: true,
                                             reason: "local mesh coordinator".into(),
+                                            plan_hash_hex: ph,
+                                            confirm_hex: confirm,
                                         },
                                     );
                                     writer.write_all(&encode_line(&acc)?).await?;
@@ -1683,6 +1694,7 @@ async fn run_agent(
                     Message::PlanOffer {
                         plan,
                         request_id: plan_req_id,
+                        plan_hash_hex,
                     } => {
                         info!(
                             plan_id = %plan.plan_id,
@@ -1692,6 +1704,13 @@ async fn run_agent(
                             "received PlanOffer"
                         );
                         let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                        let (ph, confirm) = joule_cluster::plan_accept_fields(
+                            &plan,
+                            plan_req_id,
+                            &node_id,
+                            accepted,
+                            Some(plan_hash_hex.as_str()).filter(|s| !s.is_empty()),
+                        );
                         let acc = Envelope::new(
                             node_id.clone(),
                             Message::PlanAccept {
@@ -1703,6 +1722,8 @@ async fn run_agent(
                                 } else {
                                     "not in plan".into()
                                 },
+                                plan_hash_hex: ph,
+                                confirm_hex: confirm,
                             },
                         );
                         writer.write_all(&encode_line(&acc)?).await?;
@@ -1712,6 +1733,7 @@ async fn run_agent(
                         request_id,
                         accepted,
                         reason,
+                        ..
                     } => {
                         tracing::debug!(
                             %plan_id,

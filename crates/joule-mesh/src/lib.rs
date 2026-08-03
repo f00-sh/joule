@@ -282,19 +282,37 @@ impl PeerBus {
                     }
                 }
                 info!(%request_id, shards = plan.shards.len(), "peer-bus PlanOffer");
+                let plan_hash_hex = joule_cluster::plan_hash_hex(&plan);
                 let offer = Envelope::new(
                     local.clone(),
                     Message::PlanOffer {
                         plan: plan.clone(),
                         request_id,
+                        plan_hash_hex: plan_hash_hex.clone(),
                     },
                 );
                 for s in &plan.shards {
                     let _ = self.send_to(&s.node, offer.clone()).await;
                 }
             }
-            Message::PlanOffer { plan, request_id } => {
+            Message::PlanOffer {
+                plan,
+                request_id,
+                plan_hash_hex,
+            } => {
                 let accepted = plan.shards.iter().any(|s| &s.node == local);
+                let ph = if plan_hash_hex.is_empty() {
+                    joule_cluster::plan_hash_hex(&plan)
+                } else {
+                    plan_hash_hex.clone()
+                };
+                let confirm_hex = joule_cluster::plan_accept_confirm_hex(
+                    plan.plan_id,
+                    request_id,
+                    local,
+                    accepted,
+                    &ph,
+                );
                 let acc = Envelope::new(
                     local.clone(),
                     Message::PlanAccept {
@@ -306,6 +324,8 @@ impl PeerBus {
                         } else {
                             "not in plan".into()
                         },
+                        plan_hash_hex: ph,
+                        confirm_hex,
                     },
                 );
                 // Send accept to coordinator

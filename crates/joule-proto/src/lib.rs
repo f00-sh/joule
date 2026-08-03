@@ -307,6 +307,9 @@ pub enum Message {
         /// Correlates with RequestInfer / PlanAccept / InferRequest.
         #[serde(default = "Uuid::nil")]
         request_id: Uuid,
+        /// Canonical plan body hash (hex). Empty = legacy offer (lab only).
+        #[serde(default)]
+        plan_hash_hex: String,
     },
     CapacitySnapshot {
         capacity: ClusterCapacity,
@@ -395,12 +398,27 @@ pub enum Message {
         max_tokens: u32,
     },
     /// Shard peer → coordinator: accept or reject a PlanOffer for a request.
+    ///
+    /// `plan_hash_hex` + `confirm_hex` are **content confirmations** (hashed
+    /// agreement). Recipients verify with `joule_cluster::verify_plan_accept_confirm`.
     PlanAccept {
         plan_id: Uuid,
         request_id: Uuid,
         accepted: bool,
         #[serde(default)]
         reason: String,
+        /// SHA-256 hex of the plan body (must match coordinator's plan).
+        #[serde(default)]
+        plan_hash_hex: String,
+        /// Domain-separated accept confirmation hash (see lease module).
+        #[serde(default)]
+        confirm_hex: String,
+    },
+    /// Coordinator → shards: hashed plan body for agreement (optional; PlanOffer still carries full plan).
+    PlanHash {
+        plan_id: Uuid,
+        request_id: Uuid,
+        plan_hash_hex: String,
     },
     /// Agent → control / peer: content-addressed blobs this node can seed.
     /// f00 does **not** host these; peers do. See docs/design/distribution-v0.md.

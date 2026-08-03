@@ -122,6 +122,17 @@ joule capacity --peers 5 --json
 
 Same schema as the HTTP endpoint will use.
 
+## 5b. Stream leases + multi-party plan agreement
+
+Distributed admission is **not** "control decides alone." Clients (agents) and control **talk and agree** with hashed, auditable messages:
+
+1. **Stream lease** (`joule_cluster::LeaseBook`): chat/infer only proceeds after a stream slot is taken against verified pool capacity (`try_acquire_stream`). Lifecycle is always **free → used → free** (release on success, error, timeout, or stale deadline). Pool full → fail closed (`503` + `code: pool_full`).
+2. **PlanOffer** carries `plan_hash_hex` (domain-separated SHA-256 of the plan body).
+3. **PlanAccept** from each required shard carries the same `plan_hash_hex` plus `confirm_hex` = `SHA256(DOMAIN_ACCEPT ‖ plan_id ‖ request_id ‖ node ‖ accepted ‖ plan_hash)`. Missing or mismatched confirmation **fails closed**.
+4. Audit trail: grant / plan_agreed / lease_released (and reject events) via `GET /v1/cluster/leases`. Receipt: `lease_receipt_hex`.
+
+Mesh path (`RequestInfer`) and classic control path both take a lease, require multi-shard agreement, fan out with `stream_reserved=false` (lease owns capacity), and **always** release.
+
 ## 6. Placement (distributed, medium-agnostic)
 
 ### Plan types

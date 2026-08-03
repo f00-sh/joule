@@ -33,6 +33,7 @@ pub fn router(app: App) -> Router {
         .route("/healthz", get(healthz))
         .route("/v1/cluster/capacity", get(capacity))
         .route("/v1/cluster/scheduler", get(scheduler))
+        .route("/v1/cluster/leases", get(lease_audit))
         .route("/v1/cluster/nodes", get(nodes))
         .route("/v1/models", get(models))
         .route("/v1/models/readiness", get(readiness))
@@ -228,6 +229,40 @@ async fn scheduler(State(app): State<App>) -> impl IntoResponse {
     let mut g = app.state.write().await;
     g.prune();
     Json(g.cluster.scheduler_snapshot())
+}
+
+/// Auditable stream-lease trail: active holds + recent grant/agree/release events.
+async fn lease_audit(State(app): State<App>) -> impl IntoResponse {
+    let g = app.state.read().await;
+    let sched = g.cluster.scheduler_snapshot();
+    let active: Vec<Value> = g
+        .leases
+        .audit_trail()
+        .iter()
+        .rev()
+        .take(64)
+        .map(|e| {
+            json!({
+                "lease_id": e.lease_id.to_string(),
+                "request_id": e.request_id.to_string(),
+                "account": e.account,
+                "plan_hash_hex": e.plan_hash_hex,
+                "accepts": e.accepts,
+                "event": e.event,
+                "detail": e.detail,
+                "unix_secs": e.unix_secs,
+            })
+        })
+        .collect();
+    Json(json!({
+        "ok": true,
+        "law": "stream lease free→used→free; PlanAccept confirm_hex fail-closed (joule-cluster::lease)",
+        "stream_slots_total": sched.stream_slots_total,
+        "stream_slots_used": sched.stream_slots_used,
+        "stream_slots_free": sched.stream_slots_free,
+        "active_leases": g.leases.active_count(),
+        "audit": active,
+    }))
 }
 
 #[derive(Serialize)]
@@ -662,14 +697,29 @@ fn now_secs() -> u64 {
 fn map_err(e: String) -> (StatusCode, Json<Value>) {
     let status = if e.contains("contribution required") {
         StatusCode::FORBIDDEN
-    } else if e.contains("no healthy workers") || e.contains("agent not connected") {
+    } else if e.contains("pool full")
+        || e.contains("no free stream")
+        || e.contains("no healthy workers")
+        || e.contains("agent not connected")
+        || e.contains("timed out waiting")
+        || e.contains("PlanAccept")
+        || e.contains("plan ")
+    {
         StatusCode::SERVICE_UNAVAILABLE
     } else if e.contains("insufficient balance") {
         StatusCode::PAYMENT_REQUIRED
     } else {
         StatusCode::BAD_REQUEST
     };
-    (status, Json(json!({"error": e})))
+    let mut body = json!({"error": e});
+    if status == StatusCode::SERVICE_UNAVAILABLE && e.contains("pool full") {
+        body = json!({
+            "error": e,
+            "code": "pool_full",
+            "retryable": true,
+        });
+    }
+    (status, Json(body))
 }
 
 async fn chat_completions(

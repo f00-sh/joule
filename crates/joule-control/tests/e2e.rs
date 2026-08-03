@@ -111,8 +111,16 @@ async fn spawn_agent(
                         Message::PlanOffer {
                             plan,
                             request_id,
+                            plan_hash_hex,
                         } => {
                             let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                            let (ph, confirm) = joule_cluster::plan_accept_fields(
+                                plan,
+                                *request_id,
+                                &node_id,
+                                accepted,
+                                Some(plan_hash_hex.as_str()).filter(|s| !s.is_empty()),
+                            );
                             let reply = Envelope::new(
                                 node_id.clone(),
                                 Message::PlanAccept {
@@ -124,6 +132,8 @@ async fn spawn_agent(
                                     } else {
                                         "not in plan".into()
                                     },
+                                    plan_hash_hex: ph,
+                                    confirm_hex: confirm,
                                 },
                             );
                             if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
@@ -686,8 +696,19 @@ async fn local_pool_lab_mid_tensor_infer() {
                         if line.trim().is_empty() { continue; }
                         let env = decode_line(line.as_bytes()).unwrap();
                         match &env.msg {
-                            Message::PlanOffer { plan, request_id } => {
+                            Message::PlanOffer {
+                                plan,
+                                request_id,
+                                plan_hash_hex,
+                            } => {
                                 let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                                let (ph, confirm) = joule_cluster::plan_accept_fields(
+                                    plan,
+                                    *request_id,
+                                    &node_id,
+                                    accepted,
+                                    Some(plan_hash_hex.as_str()).filter(|s| !s.is_empty()),
+                                );
                                 let reply = Envelope::new(
                                     node_id.clone(),
                                     Message::PlanAccept {
@@ -699,6 +720,8 @@ async fn local_pool_lab_mid_tensor_infer() {
                                         } else {
                                             "not in plan".into()
                                         },
+                                        plan_hash_hex: ph,
+                                        confirm_hex: confirm,
                                     },
                                 );
                                 let _ = writer.write_all(&encode_line(&reply).unwrap()).await;

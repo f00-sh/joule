@@ -130,6 +130,8 @@ pub struct PendingInfer {
 #[derive(Debug)]
 pub struct PendingPlanAccept {
     pub plan_id: Uuid,
+    /// Canonical plan hash required on every PlanAccept.
+    pub plan_hash_hex: String,
     pub expected: std::collections::HashSet<NodeId>,
     pub accepted: std::collections::HashSet<NodeId>,
     pub tx: Option<oneshot::Sender<Result<(), String>>>,
@@ -210,6 +212,8 @@ pub struct ControlState {
     /// Per-node notary ed25519 secret keys (32 bytes). Generated at join with OS RNG.
     /// Checkpoints only sign with these — never deterministic lab keys.
     pub notary_secret_keys: HashMap<String, [u8; 32]>,
+    /// Stream leases for chat admission (free/used truth + audit trail).
+    pub leases: joule_cluster::LeaseBook,
     dirty: bool,
 }
 
@@ -250,6 +254,7 @@ impl ControlState {
             active_replica_factor: joule_cluster::DEFAULT_REPLICA_FACTOR,
             last_rebalance: None,
             notary_secret_keys: HashMap::new(),
+            leases: joule_cluster::LeaseBook::default(),
             dirty: false,
         }
     }
@@ -489,6 +494,40 @@ impl ControlState {
     pub fn release_slot(&mut self, id: &NodeId) {
         self.cluster.release_worker(id);
         self.wake_scheduler();
+    }
+
+    /// Admit a stream lease (expires stale first). Fail closed when pool full.
+    pub fn admit_stream_lease(
+        &mut self,
+        account: &str,
+        request_id: Uuid,
+        ttl: std::time::Duration,
+    ) -> Result<joule_cluster::StreamLease, String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut book = std::mem::take(&mut self.leases);
+        book.expire_stale(&mut self.cluster, now);
+        let r = book.try_admit(&mut self.cluster, account, request_id, ttl);
+        self.leases = book;
+        r
+    }
+
+    /// Release lease by request id (idempotent).
+    pub fn release_stream_lease(
+        &mut self,
+        request_id: Uuid,
+        event: &str,
+        detail: &str,
+    ) -> bool {
+        let mut book = std::mem::take(&mut self.leases);
+        let ok = book.release_by_request(&mut self.cluster, request_id, event, detail);
+        self.leases = book;
+        if ok {
+            self.wake_scheduler();
+        }
+        ok
     }
 
     pub fn mark_dirty(&mut self) {
@@ -928,7 +967,56 @@ impl ControlState {
         from: &NodeId,
         plan_id: Uuid,
         accepted: bool,
+        plan_hash_hex: &str,
+        confirm_hex: &str,
     ) {
+        let expected_hash = self
+            .pending_plan_accepts
+            .get(&request_id)
+            .map(|p| p.plan_hash_hex.clone());
+        let Some(want_hash) = expected_hash else {
+            return;
+        };
+        // Require content confirmation (fail closed on missing/tamper).
+        if let Err(e) = joule_cluster::verify_plan_accept_confirm(
+            plan_id,
+            request_id,
+            from,
+            accepted,
+            &want_hash,
+            confirm_hex,
+        ) {
+            if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
+                if let Some(tx) = p.tx.take() {
+                    let _ = tx.send(Err(format!("plan accept from {from} rejected: {e}")));
+                }
+            }
+            self.leases.record_accepts(
+                request_id,
+                &[],
+                "plan_accept_invalid",
+                &format!("{from}: {e}"),
+                Some(&want_hash),
+            );
+            return;
+        }
+        if !plan_hash_hex.is_empty() && plan_hash_hex != want_hash {
+            if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
+                if let Some(tx) = p.tx.take() {
+                    let _ = tx.send(Err(format!(
+                        "plan hash mismatch from {from}: got {plan_hash_hex}"
+                    )));
+                }
+            }
+            self.leases.record_accepts(
+                request_id,
+                &[],
+                "plan_hash_mismatch",
+                &format!("{from}: got {plan_hash_hex}"),
+                Some(&want_hash),
+            );
+            return;
+        }
         let Some(p) = self.pending_plan_accepts.get_mut(&request_id) else {
             return;
         };
@@ -941,16 +1029,31 @@ impl ControlState {
         if accepted {
             p.accepted.insert(from.clone());
         } else {
-            // Hard reject: fail the wait.
             if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
                 if let Some(tx) = p.tx.take() {
                     let _ = tx.send(Err(format!("plan rejected by {from}")));
                 }
             }
+            self.leases.record_accepts(
+                request_id,
+                &[],
+                "plan_rejected",
+                &from.to_string(),
+                Some(&want_hash),
+            );
             return;
         }
         if p.accepted.len() >= p.expected.len() {
             if let Some(mut p) = self.pending_plan_accepts.remove(&request_id) {
+                let accepts: Vec<NodeId> = p.accepted.iter().cloned().collect();
+                let agreed_hash = p.plan_hash_hex.clone();
+                self.leases.record_accepts(
+                    request_id,
+                    &accepts,
+                    "plan_agreed",
+                    "all shards confirmed",
+                    Some(&agreed_hash),
+                );
                 if let Some(tx) = p.tx.take() {
                     let _ = tx.send(Ok(()));
                 }
