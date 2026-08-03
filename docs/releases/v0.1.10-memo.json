@@ -1,0 +1,36 @@
+{
+  "document_type": "nasa-memo",
+  "from": "joule implementer",
+  "to": "f00-sh / operators",
+  "cc": "donors",
+  "subject": "joule v0.1.10 — pipeline activation handoff + K3 pin path + file-layer map",
+  "ref": "CHANGELOG.md [0.1.10], tag v0.1.10",
+  "date": "auto",
+  "opening": "v0.1.10 ships real multi-donor activation commitments on the infer bus (not empty non-tail ACKs), a documented file↔layer map for Kimi-K3, and a pin script so operators can replace synthetic MANIFEST digests with real safetensors hashes without f00 hosting weights.",
+  "sections": [
+    {
+      "heading": "Summary",
+      "body": "Non-tail shards produce domain-separated activation_hex handoffs; the tail verifies the full upstream set before generation. Synthetic kimi-k3-shards digests remain fail-closed in CI; real digests after pin-k3-shards.sh may unlock when content is staged. Placement model_layers stays pinned to verified meta (93)."
+    },
+    {
+      "heading": "Added",
+      "body": "joule_cluster::pipeline activation helpers; ShardActivation on InferRequest/InferDone; docs/design/k3-file-layer-map-v0.md; scripts/pin-k3-shards.sh."
+    },
+    {
+      "heading": "Changed",
+      "body": "Control and mesh infer fanout is two-phase. quant_can_unlock_service_digests refuses only synthetic digests (not the quant id forever)."
+    },
+    {
+      "heading": "Not claimed",
+      "body": "Full floating-point tensor pipeline-parallel K3 across donors is not claimed. CI still does not download multi-hundred-GB weights."
+    },
+    {
+      "heading": "Verification",
+      "body": "cargo test --workspace; cargo clippy --workspace --all-targets -- -D warnings; cargo fmt --all -- --check."
+    },
+    {
+      "heading": "References",
+      "body": "docs/design/cluster-v0.md; docs/design/k3-file-layer-map-v0.md; CHANGELOG.md [0.1.10]."
+    }
+  ]
+}

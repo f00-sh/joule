@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-08-03
+
+Pipeline activation handoff, honest K3 pin path, file↔layer design map.
+
+### Added
+- Pipeline **activation handoff** on the wire: non-tail shards emit `activation_hex`; tail verifies upstream before full infer (`joule_cluster::pipeline`)
+- Design: [docs/design/k3-file-layer-map-v0.md](docs/design/k3-file-layer-map-v0.md) — 16 file shards ↔ 93 transformer layers
+- `scripts/pin-k3-shards.sh` — rewrite MANIFEST digests from real safetensors (peer path; never f00 CDN)
+
+### Changed
+- Multi-donor infer: two-phase fanout (non-tail activations → tail)
+- K3 digest unlock: real (non-synthetic) content hashes may unlock when staged; placeholders still fail closed
+- Placement `model_layers` pinned to verified Kimi-K3 meta (**93**)
+
+### Fixed
+- (none this cut beyond honesty/path improvements already on main)
+
+
 ## [0.1.9] — 2026-08-03
 
 Product icon on every package; Windows Authenticode pipeline ready.
