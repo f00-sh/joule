@@ -109,6 +109,13 @@ impl CoordinationPath {
     }
 }
 
+/// Non-tail InferDone payload for pipeline activation handoff (phase-1 collect).
+#[derive(Debug, Clone)]
+pub struct ShardAck {
+    pub activation: Option<joule_proto::ShardActivation>,
+    pub shard_ok: bool,
+}
+
 #[derive(Debug)]
 pub struct PendingInfer {
     pub account: String,

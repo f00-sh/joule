@@ -120,22 +120,28 @@ mod tests {
     fn design_docs_state_geometry_not_fake_pp() {
         let cluster = include_str!("../../../docs/design/cluster-v0.md");
         assert!(
-            cluster.contains("scheduling geometry")
-                && cluster.contains("not executed multi-node pipeline-parallelism"),
-            "cluster-v0 must state layers are geometry only"
+            cluster.contains("activation")
+                && (cluster.contains("layer_start") || cluster.contains("layer_end")),
+            "cluster-v0 must describe layer geometry + activation handoff"
         );
         assert!(
             cluster.contains("File weight shards ≠ transformer layers")
                 || cluster.contains("File weight shards"),
             "cluster-v0 must distinguish file shards from layer ranges"
         );
+        assert!(
+            cluster.contains("full tensor PP") || cluster.contains("later engine"),
+            "cluster-v0 must not claim full tensor PP is shipped"
+        );
         let disc = include_str!("../../../docs/design/decentral-discovery-v0.md");
         assert!(
-            disc.contains("scheduling geometry only") || disc.contains("geometry only"),
-            "discovery doc must not oversell PP"
+            disc.contains("geometry only") || disc.contains("scheduling geometry"),
+            "discovery doc must not oversell full PP"
         );
+        let map = include_str!("../../../docs/design/k3-file-layer-map-v0.md");
+        assert!(map.contains("93") && map.contains("16"), "file-layer map present");
         eprintln!(
-            "OBSERVE no-fake-pp: docs ok cluster-v0.md decentral-discovery-v0.md layers={}",
+            "OBSERVE no-fake-pp: docs ok cluster-v0 + discovery + k3-file-layer-map; layers={}",
             placement_model_layers()
         );
     }

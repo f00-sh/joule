@@ -1,14 +1,18 @@
 //! Process-wide control app: shared state + live agent routes + schedule wakeups.
 
 use crate::identity::PoolIdentity;
-use crate::state::{ControlState, SharedState};
+use crate::state::{ControlState, ShardAck, SharedState};
 use joule_proto::{Envelope, NodeId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, Notify};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
+use uuid::Uuid;
 
 pub type AgentRoutes = Arc<Mutex<HashMap<NodeId, mpsc::UnboundedSender<Envelope>>>>;
+/// Phase-1 pipeline: wait for non-tail InferDone (activation handoff).
+pub type ShardAckWaiters =
+    Arc<Mutex<HashMap<(Uuid, NodeId), oneshot::Sender<Result<ShardAck, String>>>>>;
 
 #[derive(Clone)]
 pub struct App {
@@ -18,6 +22,8 @@ pub struct App {
     pub schedule_notify: Arc<Notify>,
     /// Operator identity for signed public snapshots (multi-source decentralization).
     pub identity: Arc<PoolIdentity>,
+    /// Non-tail InferDone waiters for pipeline activation collect.
+    pub shard_acks: ShardAckWaiters,
 }
 
 impl App {
@@ -42,6 +48,7 @@ impl App {
             routes: Arc::new(Mutex::new(HashMap::new())),
             schedule_notify,
             identity: Arc::new(identity),
+            shard_acks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -57,6 +64,7 @@ impl App {
             routes: Arc::new(Mutex::new(HashMap::new())),
             schedule_notify: notify,
             identity,
+            shard_acks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }

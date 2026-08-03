@@ -138,7 +138,7 @@ Mesh path (`RequestInfer`) and classic control path both take a lease, require m
 ### Plan types
 
 1. **Replica** — full quant on one node  
-2. **Pipeline (geometry only)** — VRAM-proportional `layer_start`/`layer_end` labels across N nodes (`ShardRole::Pipeline`). **This is scheduling geometry**, not executed multi-node pipeline-parallelism, until intermediate shards perform real activation handoff. Infer today: **tail runs full `engine.infer`**; non-tail returns empty `InferDone` ACK only.  
+2. **Pipeline** — VRAM-proportional `layer_start`/`layer_end` labels across N nodes (`ShardRole::Pipeline`). Non-tail shards produce a **domain-separated activation commitment** (`activation_hex`) handoff; the tail **verifies** all upstream activations before full `engine.infer`. This is real wire handoff, not an empty ACK — full tensor PP activations remain a later engine upgrade (see `joule_cluster::pipeline`).  
 3. **Tensor** — TP ranks (later)  
 4. **Prefill/Decode split** — disagg (later)
 

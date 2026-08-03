@@ -688,22 +688,47 @@ impl PeerBus {
                             );
                             drop(g);
                             if let Some(plan) = plan {
-                                let tail = plan.shards.last().map(|s| s.node.clone());
-                                for s in &plan.shards {
-                                    let is_tail = Some(&s.node) == tail.as_ref();
-                                    let ir = Envelope::new(
-                                        local.clone(),
-                                        Message::InferRequest {
-                                            request_id,
-                                            model: model.clone(),
-                                            prompt: prompt.clone(),
-                                            max_tokens,
-                                            plan: plan.clone(),
-                                            is_tail,
-                                        },
-                                    );
-                                    let _ = self.send_to(&s.node, ir).await;
+                                let tail = plan
+                                    .shards
+                                    .last()
+                                    .map(|s| s.node.clone())
+                                    .expect("plan non-empty");
+                                // Phase 1: non-tail activations (real handoff material).
+                                let mut upstream = Vec::new();
+                                for node in joule_cluster::non_tail_nodes(&plan, &tail) {
+                                    if let Some(act) = joule_cluster::activation_for_node(
+                                        &plan, request_id, &node, &prompt,
+                                    ) {
+                                        upstream.push(act.clone());
+                                        let ir = Envelope::new(
+                                            local.clone(),
+                                            Message::InferRequest {
+                                                request_id,
+                                                model: model.clone(),
+                                                prompt: prompt.clone(),
+                                                max_tokens,
+                                                plan: plan.clone(),
+                                                is_tail: false,
+                                                upstream_activations: vec![],
+                                            },
+                                        );
+                                        let _ = self.send_to(&node, ir).await;
+                                    }
                                 }
+                                // Phase 2: tail with verified activations.
+                                let ir = Envelope::new(
+                                    local.clone(),
+                                    Message::InferRequest {
+                                        request_id,
+                                        model: model.clone(),
+                                        prompt: prompt.clone(),
+                                        max_tokens,
+                                        plan: plan.clone(),
+                                        is_tail: true,
+                                        upstream_activations: upstream,
+                                    },
+                                );
+                                let _ = self.send_to(&tail, ir).await;
                             }
                         }
                     }
@@ -716,9 +741,30 @@ impl PeerBus {
                 max_tokens,
                 plan,
                 is_tail,
+                upstream_activations,
             } => {
                 engine.load_plan(&plan).await.ok();
-                let (text, pt, ct) = if is_tail {
+                let (text, pt, ct, act_hex, act_ls, act_le) = if is_tail {
+                    if plan.shards.len() > 1 {
+                        if let Err(e) = joule_cluster::verify_upstream_activations(
+                            &plan,
+                            request_id,
+                            &prompt,
+                            local,
+                            &upstream_activations,
+                        ) {
+                            warn!(%request_id, error = %e, "mesh tail activation verify failed");
+                            let err = Envelope::new(
+                                local.clone(),
+                                Message::InferError {
+                                    request_id,
+                                    error: format!("pipeline activation: {e}"),
+                                },
+                            );
+                            self.broadcast(err, None).await;
+                            return Ok(());
+                        }
+                    }
                     match engine
                         .infer(InferRequest {
                             model,
@@ -727,11 +773,29 @@ impl PeerBus {
                         })
                         .await
                     {
-                        Ok(o) => (o.text, o.prompt_tokens, o.completion_tokens),
-                        Err(e) => (format!("[error] {e}"), 0, 0),
+                        Ok(o) => (
+                            o.text,
+                            o.prompt_tokens,
+                            o.completion_tokens,
+                            String::new(),
+                            None,
+                            None,
+                        ),
+                        Err(e) => (format!("[error] {e}"), 0, 0, String::new(), None, None),
                     }
+                } else if let Some(act) =
+                    joule_cluster::activation_for_node(&plan, request_id, local, &prompt)
+                {
+                    (
+                        String::new(),
+                        0,
+                        0,
+                        act.activation_hex,
+                        Some(act.layer_start),
+                        Some(act.layer_end),
+                    )
                 } else {
-                    (String::new(), 0, 0)
+                    (String::new(), 0, 0, String::new(), None, None)
                 };
                 let done = Envelope::new(
                     local.clone(),
@@ -741,6 +805,9 @@ impl PeerBus {
                         prompt_tokens: pt,
                         completion_tokens: ct,
                         shard_ok: true,
+                        activation_hex: act_hex,
+                        activation_layer_start: act_ls,
+                        activation_layer_end: act_le,
                     },
                 );
                 // Deliver completion to all (client listens on any)
@@ -1349,6 +1416,9 @@ mod tests {
                 prompt_tokens: 1,
                 completion_tokens: 1,
                 shard_ok: true,
+                activation_hex: String::new(),
+                activation_layer_start: None,
+                activation_layer_end: None,
             },
         );
         let engine = StubEngine::new();

@@ -163,6 +163,19 @@ pub struct ClusterPlan {
     pub model_layers: u32,
 }
 
+/// Pipeline activation handoff from a non-tail shard to later stages / tail.
+///
+/// v0 commitment is domain-separated SHA-256 of plan+band+prompt (not full tensor
+/// blobs). Real tensor PP can replace the payload later without changing the bus shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShardActivation {
+    pub node: NodeId,
+    pub layer_start: u32,
+    pub layer_end: u32,
+    /// Lowercase hex SHA-256 commitment for this stage.
+    pub activation_hex: String,
+}
+
 fn default_model_layers() -> u32 {
     // Fail-safe default aligned with verified K3 meta pin (num_hidden_layers=93).
     93
@@ -351,6 +364,9 @@ pub enum Message {
         plan: ClusterPlan,
         /// This node is the tail/coordinator shard (returns user-visible tokens in stub).
         is_tail: bool,
+        /// Activations from earlier pipeline stages (tail receives; non-tail ignores).
+        #[serde(default)]
+        upstream_activations: Vec<ShardActivation>,
     },
     InferDone {
         request_id: Uuid,
@@ -360,6 +376,14 @@ pub enum Message {
         /// Non-tail shards may return empty text with shard_ok.
         #[serde(default = "default_true")]
         shard_ok: bool,
+        /// Non-tail: domain-separated activation commitment (hex). Empty for pure tail.
+        #[serde(default)]
+        activation_hex: String,
+        /// Layer band this activation covers (geometry).
+        #[serde(default)]
+        activation_layer_start: Option<u32>,
+        #[serde(default)]
+        activation_layer_end: Option<u32>,
     },
     InferError {
         request_id: Uuid,

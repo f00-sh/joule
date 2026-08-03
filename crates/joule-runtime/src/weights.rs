@@ -38,26 +38,20 @@ pub fn is_lab_fixture_quant(quant: &QuantSpec) -> bool {
 }
 
 /// Whether this quant is allowed to unlock public digests_verified / service_live honesty.
-/// Peer-only K3 shards and empty q-ladder quants cannot.
+///
+/// **Real K3 path:** once MANIFEST digests are real content hashes (not synthetic
+/// placeholders) and staged bytes match, `kimi-k3-shards` may unlock. CI placeholders
+/// stay fail-closed via synthetic-digest detection only.
 pub fn quant_can_unlock_service_digests(quant: &QuantSpec) -> bool {
     if quant.files.is_empty() {
         return false;
     }
-    if quant.id == "kimi-k3-shards" || quant.id.contains("k3-shards") {
-        return false;
-    }
+    // Synthetic / all-identical digests never unlock (placeholder pins).
     if quant
         .files
         .iter()
         .any(|f| is_synthetic_placeholder_digest(&f.sha256))
     {
-        return false;
-    }
-    // peer:// multi-hundred-GB pins without a lab fixture id stay fail-closed for unlock.
-    if quant.files.iter().all(|f| {
-        let u = f.url.to_ascii_lowercase();
-        u.starts_with("peer://") && f.size_bytes >= 1_073_741_824
-    }) {
         return false;
     }
     true

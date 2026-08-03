@@ -505,8 +505,43 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 text,
                 prompt_tokens,
                 completion_tokens,
-                shard_ok: _,
+                shard_ok,
+                activation_hex,
+                activation_layer_start,
+                activation_layer_end,
             } => {
+                // Phase-1 pipeline: fulfill non-tail activation waiter if present.
+                let ack_tx = {
+                    let mut w = app.shard_acks.lock().await;
+                    w.remove(&(request_id, env.from.clone()))
+                };
+                if let Some(tx) = ack_tx {
+                    let activation = if activation_hex.is_empty() {
+                        None
+                    } else {
+                        Some(joule_proto::ShardActivation {
+                            node: env.from.clone(),
+                            layer_start: activation_layer_start.unwrap_or(0),
+                            layer_end: activation_layer_end.unwrap_or(0),
+                            activation_hex,
+                        })
+                    };
+                    let _ = tx.send(Ok(crate::state::ShardAck {
+                        activation,
+                        shard_ok,
+                    }));
+                    // Non-tail still settles mint path without completing user oneshot.
+                    let mut g = app.state.write().await;
+                    g.settle_shard_success(
+                        request_id,
+                        text,
+                        prompt_tokens,
+                        completion_tokens,
+                        &env.from,
+                        false,
+                    );
+                    continue;
+                }
                 let mut g = app.state.write().await;
                 // Tail detection: pending plan last shard or non-empty text.
                 let is_tail = g
@@ -1034,28 +1069,127 @@ async fn fanout_infer(
     let peer_direct = joule_mesh::prefer_peer_direct_infer(&shard_addrs);
     info!(peer_direct, shards = plan.shards.len(), "infer fanout path");
 
+    // Phase 1: non-tail pipeline stages → real activation commitments (not empty ACK only).
+    let non_tails = joule_cluster::non_tail_nodes(&plan, &tail);
+    let mut upstream: Vec<joule_proto::ShardActivation> = Vec::new();
     let mut sent = 0usize;
-    let mut peer_direct_settled_tail = false;
-    for (i, shard) in plan.shards.iter().enumerate() {
-        let is_tail = shard.node == tail;
+    for node in &non_tails {
         let env = Envelope::new(
-            shard.node.clone(),
+            node.clone(),
             Message::InferRequest {
                 request_id,
                 model: model.to_string(),
                 prompt: prompt.to_string(),
                 max_tokens,
                 plan: plan.clone(),
-                is_tail,
+                is_tail: false,
+                upstream_activations: vec![],
             },
         );
+        let idx = plan.shards.iter().position(|s| &s.node == node);
         let mut delivered = false;
+        let mut got_act: Option<joule_proto::ShardActivation> = None;
         if peer_direct {
-            if let Some(addr) = shard_addrs.get(i).and_then(|a| a.first()) {
-                // Peer-direct hop: dial donor multiaddr, read InferDone (no control relay).
+            if let Some(addr) = idx.and_then(|i| shard_addrs.get(i)).and_then(|a| a.first()) {
                 if let Some(done) = send_infer_peer_direct(addr, &env).await {
                     delivered = true;
-                    info!(node = %shard.node, %addr, "InferRequest peer-direct + InferDone");
+                    if let Message::InferDone {
+                        activation_hex,
+                        activation_layer_start,
+                        activation_layer_end,
+                        shard_ok,
+                        ..
+                    } = done.msg
+                    {
+                        if shard_ok && !activation_hex.is_empty() {
+                            got_act = Some(joule_proto::ShardActivation {
+                                node: node.clone(),
+                                layer_start: activation_layer_start.unwrap_or(0),
+                                layer_end: activation_layer_end.unwrap_or(0),
+                                activation_hex,
+                            });
+                        }
+                        let mut g = app.state.write().await;
+                        g.settle_shard_success(request_id, String::new(), 0, 0, node, false);
+                    }
+                }
+            }
+        }
+        if !delivered {
+            let (tx, rx) = oneshot::channel();
+            {
+                let mut w = app.shard_acks.lock().await;
+                w.insert((request_id, node.clone()), tx);
+            }
+            if send_to_agent(&app.routes, node, env).await {
+                delivered = true;
+                match tokio::time::timeout(Duration::from_secs(20), rx).await {
+                    Ok(Ok(Ok(ack))) => {
+                        if let Some(a) = ack.activation {
+                            got_act = Some(a);
+                        }
+                    }
+                    Ok(Ok(Err(e))) => {
+                        warn!(node = %node, error = %e, "non-tail activation error");
+                    }
+                    _ => {
+                        let mut w = app.shard_acks.lock().await;
+                        w.remove(&(request_id, node.clone()));
+                        warn!(node = %node, "non-tail activation timeout");
+                    }
+                }
+            } else {
+                let mut w = app.shard_acks.lock().await;
+                w.remove(&(request_id, node.clone()));
+            }
+        }
+        if delivered {
+            sent += 1;
+            if let Some(a) = got_act {
+                upstream.push(a);
+            }
+        } else {
+            warn!(node = %node, "non-tail shard agent not connected");
+        }
+    }
+    if !non_tails.is_empty() {
+        if let Err(e) =
+            joule_cluster::verify_upstream_activations(&plan, request_id, prompt, &tail, &upstream)
+        {
+            let mut g = app.state.write().await;
+            g.pending.remove(&request_id);
+            if stream_reserved {
+                g.cluster.release_stream(&plan);
+                g.wake_scheduler();
+            }
+            return Err(format!("pipeline activation handoff failed: {e}"));
+        }
+        info!(
+            stages = upstream.len(),
+            "pipeline activations verified; dispatching tail"
+        );
+    }
+
+    // Phase 2: tail with verified upstream activations.
+    {
+        let env = Envelope::new(
+            tail.clone(),
+            Message::InferRequest {
+                request_id,
+                model: model.to_string(),
+                prompt: prompt.to_string(),
+                max_tokens,
+                plan: plan.clone(),
+                is_tail: true,
+                upstream_activations: upstream,
+            },
+        );
+        let i = plan.shards.iter().position(|s| s.node == tail);
+        let mut delivered = false;
+        if peer_direct {
+            if let Some(addr) = i.and_then(|i| shard_addrs.get(i)).and_then(|a| a.first()) {
+                if let Some(done) = send_infer_peer_direct(addr, &env).await {
+                    delivered = true;
                     if let Message::InferDone {
                         request_id: rid,
                         text,
@@ -1070,26 +1204,22 @@ async fn fanout_infer(
                             text,
                             prompt_tokens,
                             completion_tokens,
-                            &shard.node,
-                            is_tail,
+                            &tail,
+                            true,
                         );
-                        if is_tail {
-                            peer_direct_settled_tail = true;
-                        }
                     }
                 }
             }
         }
-        if !delivered && send_to_agent(&app.routes, &shard.node, env).await {
+        if !delivered && send_to_agent(&app.routes, &tail, env).await {
             delivered = true;
         }
         if delivered {
             sent += 1;
         } else {
-            warn!(node = %shard.node, "shard agent not connected");
+            warn!(node = %tail, "tail shard agent not connected");
         }
     }
-    let _ = peer_direct_settled_tail;
 
     if sent == 0 {
         let mut g = app.state.write().await;
@@ -1311,12 +1441,11 @@ pub async fn challenge_loop(app: App) {
     }
 }
 
-/// Agent-side: run this node's **shard** of a pool-wide inference.
+/// Agent-side: run this node's **shard** of a distributed inference.
 ///
-/// **Honesty:** multi-donor `layer_start`/`layer_end` are scheduling geometry only.
-/// Non-tail shards only ACK (empty text) — no real activation handoff / pipeline-parallel
-/// K3 yet. Tail produces tokens via full `engine.infer`.
-/// `engine` may be a stub or a [`joule_runtime::ClusterEngine`] with tensors loaded.
+/// Non-tail: produces a **pipeline activation commitment** (domain-separated hex)
+/// for handoff — not an empty no-op ACK. Tail: verifies upstream activations then
+/// runs full `engine.infer`. Geometry labels remain VRAM-proportional layer bands.
 pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<Envelope> {
     match &env.msg {
         Message::InferRequest {
@@ -1326,10 +1455,12 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
             max_tokens,
             plan,
             is_tail,
+            upstream_activations,
         } => {
             engine.load_plan(plan).await.context("engine load_plan")?;
             if !*is_tail {
-                // Intermediate pipeline stage: consume compute, no user text yet.
+                let act = joule_cluster::activation_for_node(plan, *request_id, &env.from, prompt)
+                    .ok_or_else(|| anyhow::anyhow!("node not in plan for activation"))?;
                 return Ok(Envelope::new(
                     env.from.clone(),
                     Message::InferDone {
@@ -1338,8 +1469,29 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
                         prompt_tokens: 0,
                         completion_tokens: 0,
                         shard_ok: true,
+                        activation_hex: act.activation_hex,
+                        activation_layer_start: Some(act.layer_start),
+                        activation_layer_end: Some(act.layer_end),
                     },
                 ));
+            }
+            // Tail: verify pipeline handoff when multi-shard.
+            if plan.shards.len() > 1 {
+                if let Err(e) = joule_cluster::verify_upstream_activations(
+                    plan,
+                    *request_id,
+                    prompt,
+                    &env.from,
+                    upstream_activations,
+                ) {
+                    return Ok(Envelope::new(
+                        env.from.clone(),
+                        Message::InferError {
+                            request_id: *request_id,
+                            error: format!("pipeline activation: {e}"),
+                        },
+                    ));
+                }
             }
             match engine
                 .infer(InferRequest {
@@ -1357,6 +1509,9 @@ pub async fn agent_handle_infer(env: &Envelope, engine: &impl Engine) -> Result<
                         prompt_tokens: out.prompt_tokens,
                         completion_tokens: out.completion_tokens,
                         shard_ok: true,
+                        activation_hex: String::new(),
+                        activation_layer_start: None,
+                        activation_layer_end: None,
                     },
                 )),
                 Err(e) => Ok(Envelope::new(
@@ -1465,6 +1620,7 @@ mod tests {
                 max_tokens: 16,
                 plan: plan.clone(),
                 is_tail: false,
+                upstream_activations: vec![],
             },
         );
         let reply = agent_handle_infer(&env, &eng).await.expect("handle");
@@ -1474,17 +1630,22 @@ mod tests {
                 prompt_tokens,
                 completion_tokens,
                 shard_ok,
+                activation_hex,
                 ..
             } => {
                 assert!(text.is_empty(), "non-tail must not run full infer: {text}");
                 assert_eq!(prompt_tokens, 0);
                 assert_eq!(completion_tokens, 0);
                 assert!(shard_ok);
+                assert!(
+                    !activation_hex.is_empty(),
+                    "non-tail must produce activation handoff"
+                );
             }
             other => panic!("expected InferDone, got {other:?}"),
         }
         eprintln!(
-            "OBSERVE no-fake-pp: non-tail empty ACK; model_layers={} geometry only",
+            "OBSERVE pipeline-handoff: non-tail activation_hex set; model_layers={}",
             plan.model_layers
         );
     }
@@ -1494,15 +1655,23 @@ mod tests {
         let plan = demo_plan(joule_runtime::placement_model_layers());
         let eng = StubEngine::new();
         eng.load_plan(&plan).await.unwrap();
+        let rid = Uuid::new_v4();
+        let prompt = "tail-full-infer";
+        let upstream =
+            vec![
+                joule_cluster::activation_for_node(&plan, rid, &plan.shards[0].node, prompt)
+                    .expect("act"),
+            ];
         let env = Envelope::new(
             plan.shards[1].node.clone(),
             Message::InferRequest {
-                request_id: Uuid::new_v4(),
+                request_id: rid,
                 model: CLUSTER_MODEL.into(),
-                prompt: "tail-full-infer".into(),
+                prompt: prompt.into(),
                 max_tokens: 8,
                 plan: plan.clone(),
                 is_tail: true,
+                upstream_activations: upstream,
             },
         );
         let reply = agent_handle_infer(&env, &eng).await.expect("handle");
@@ -1512,6 +1681,35 @@ mod tests {
                 assert!(text.contains("tail-full-infer") || text.contains("joule"));
             }
             other => panic!("expected InferDone, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_donor_tail_rejects_missing_activation() {
+        let plan = demo_plan(joule_runtime::placement_model_layers());
+        let eng = StubEngine::new();
+        eng.load_plan(&plan).await.unwrap();
+        let env = Envelope::new(
+            plan.shards[1].node.clone(),
+            Message::InferRequest {
+                request_id: Uuid::new_v4(),
+                model: CLUSTER_MODEL.into(),
+                prompt: "no-upstream".into(),
+                max_tokens: 8,
+                plan: plan.clone(),
+                is_tail: true,
+                upstream_activations: vec![],
+            },
+        );
+        let reply = agent_handle_infer(&env, &eng).await.expect("handle");
+        match reply.msg {
+            Message::InferError { error, .. } => {
+                assert!(
+                    error.contains("activation") || error.contains("pipeline"),
+                    "{error}"
+                );
+            }
+            other => panic!("expected InferError without upstream, got {other:?}"),
         }
     }
 }

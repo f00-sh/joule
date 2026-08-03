@@ -7,6 +7,7 @@ mod capacity_challenge;
 mod chunks;
 mod erasure;
 mod lease;
+mod pipeline;
 mod plan_agree;
 mod plan_sign;
 mod scheduler;
@@ -28,6 +29,10 @@ pub use lease::{
     lease_receipt_hex, plan_accept_confirm_hex, plan_accept_fields, plan_hash_hex,
     verify_plan_accept_confirm, LeaseAuditEntry, LeaseBook, StreamLease, DOMAIN_ACCEPT,
     DOMAIN_LEASE, DOMAIN_PLAN,
+};
+pub use pipeline::{
+    activation_for_node, activation_hex, activation_preimage, non_tail_nodes,
+    verify_upstream_activations, DOMAIN_ACTIVATION,
 };
 pub use plan_agree::{on_accept, PlanAcceptEffect, PlanAgreeView};
 pub use plan_sign::{

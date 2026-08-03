@@ -706,6 +706,7 @@ mod tests {
                 max_tokens: 16,
                 plan,
                 is_tail: true,
+                upstream_activations: vec![],
             },
         );
         let sock = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr))
