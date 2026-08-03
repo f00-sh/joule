@@ -1,17 +1,12 @@
-# Maintainer: f00 joule packagers <william@theesfeld.net>
-# Binary package from GitHub Releases (prebuilt). Source build: use joule-git if published.
+# Maintainer: William Theesfeld <william@theesfeld.net>
+# Contributor: f00-sh
 #
-# Publish to AUR as package name `joule-bin` (or `joule`) by copying this directory
-# into the AUR repo and updating pkgver / sha256sums from the release SHA256SUMS.
-#
-#   curl -fsSL https://github.com/f00-sh/joule/releases/latest/download/SHA256SUMS
-#
-# Dummy-easy end user:
+# Prebuilt binary from GitHub Releases (f00-sh/joule).
 #   yay -S joule-bin
-#   # or once this PKGBUILD is on AUR
+#   https://aur.archlinux.org/packages/joule-bin
 
 pkgname=joule-bin
-pkgver=0.0.0
+pkgver=0.1.8
 pkgrel=1
 pkgdesc="Donate idle compute, earn millijoules, use open-weight AI (prebuilt binary)"
 arch=('x86_64' 'aarch64')
@@ -23,13 +18,11 @@ conflicts=('joule')
 options=('!strip')
 source_x86_64=("https://github.com/f00-sh/joule/releases/download/v${pkgver}/joule-${pkgver}-linux-x86_64.tar.gz")
 source_aarch64=("https://github.com/f00-sh/joule/releases/download/v${pkgver}/joule-${pkgver}-linux-aarch64.tar.gz")
-# Update from release SHA256SUMS when cutting a version:
-sha256sums_x86_64=('SKIP')
-sha256sums_aarch64=('SKIP')
+sha256sums_x86_64=('deca74b02998fb23963dcc02b48ab176a4eeb7f0f2e77ad6f1abf85a22024ed9')
+sha256sums_aarch64=('f4e62d238d01b29569241f233942a48e2810ebb57e6a876a852eab741551f8a8')
 
 package() {
   cd "${srcdir}"
-  # Tarball may extract as joule-${pkgver}-linux-* or flat
   local root
   root="$(find . -maxdepth 2 -type f -name joule | head -1 | xargs dirname)"
   install -Dm755 "${root}/joule" "${pkgdir}/usr/bin/joule"

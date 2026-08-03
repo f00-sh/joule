@@ -30,5 +30,9 @@
 	<string>Copyright © f00-sh. MIT License.</string>
 	<key>CFBundleGetInfoString</key>
 	<string>joule — idle GPUs → open cluster · pay in compute</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
 </dict>
 </plist>

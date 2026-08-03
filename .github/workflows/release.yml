@@ -139,6 +139,8 @@ jobs:
           fi
           cp man/joule.1.md "${STAGING}/man/" 2>/dev/null || true
           cp README.md LICENSE CHANGELOG.md "${STAGING}/" 2>/dev/null || true
+          mkdir -p "${STAGING}/icons"
+          cp packaging/icons/joule.png packaging/icons/joule.ico "${STAGING}/icons/" 2>/dev/null || true
           printf '%s\n' "${VER}" > "${STAGING}/VERSION"
           tar -C dist -czf "dist/${ASSET}" "${ASSET%.tar.gz}"
           (
@@ -165,6 +167,7 @@ jobs:
           cp "${BIN}" "${STAGING}/joule.exe"
           cp scripts/install.ps1 "${STAGING}/"
           cp packaging/windows/README.txt "${STAGING}/" 2>/dev/null || true
+          cp packaging/icons/joule.ico packaging/icons/joule.png "${STAGING}/" 2>/dev/null || true
           cp man/joule.1.md "${STAGING}/man/" 2>/dev/null || true
           cp README.md LICENSE CHANGELOG.md "${STAGING}/" 2>/dev/null || true
           printf '%s\n' "${VER}" > "${STAGING}/VERSION"
@@ -200,16 +203,30 @@ jobs:
             --out dist
           ls -la dist/
 
-      - name: Native Windows Setup.exe (Inno Setup)
+      - name: Native Windows Setup.exe (Inno Setup) + Authenticode
         if: matrix.native == 'inno'
         shell: pwsh
+        env:
+          # Optional org/repo secrets — if unset, ship unsigned (documented).
+          JOULE_WINDOWS_CERT_PFX_BASE64: ${{ secrets.JOULE_WINDOWS_CERT_PFX_BASE64 }}
+          JOULE_WINDOWS_CERT_PASSWORD: ${{ secrets.JOULE_WINDOWS_CERT_PASSWORD }}
+          JOULE_WINDOWS_TIMESTAMP_URL: ${{ secrets.JOULE_WINDOWS_TIMESTAMP_URL }}
         run: |
           choco install innosetup -y --no-progress
+          $bin = "target/${{ matrix.target }}/release/joule.exe"
+          # Sign the app binary first so the installer embeds the signed exe.
+          powershell -File packaging/windows/sign.ps1 -Files @($bin)
           powershell -File packaging/windows/build-native.ps1 `
-            -Bin "target/${{ matrix.target }}/release/joule.exe" `
+            -Bin $bin `
             -Version "${{ steps.ver.outputs.ver }}" `
             -Arch "${{ matrix.asset_arch }}" `
             -Out dist
+          $setup = Get-ChildItem dist -Filter "*-setup.exe" | Select-Object -First 1
+          if ($setup) {
+            powershell -File packaging/windows/sign.ps1 -Files @($setup.FullName)
+          }
+          # Also keep a signed copy of joule.exe next to the zip contents for portable
+          Copy-Item $bin "dist/joule.exe" -Force
           Get-ChildItem dist | Format-Table Name, Length
 
       - name: Upload artifact

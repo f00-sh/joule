@@ -42,6 +42,9 @@ LicenseFile=LICENSE
 InfoBeforeFile=packaging\windows\INSTALL-INFO.txt
 OutputDir={#MyOutDir}
 OutputBaseFilename=joule-{#MyAppVersion}-windows-{#MyAppArch}-setup
+SetupIconFile=packaging\icons\joule.ico
+UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayName=joule
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -49,8 +52,6 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-UninstallDisplayIcon={app}\{#MyAppExeName}
-UninstallDisplayName=joule
 VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=joule — donate idle compute, open-weight AI pool
@@ -59,6 +60,8 @@ CloseApplications=yes
 RestartApplications=no
 ChangesEnvironment=yes
 AllowNoIcons=yes
+; Authenticode: when JOULE_WINDOWS_CERT_PFX is available, release CI signs Setup.exe + joule.exe
+; (see packaging/windows/sign.ps1). Unsigned builds still ship if no cert secret is set.
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -69,6 +72,8 @@ Name: "addpath"; Description: "Add joule to user &PATH (recommended for CLI)"; G
 
 [Files]
 Source: "{#MyBinPath}"; DestDir: "{app}"; DestName: "joule.exe"; Flags: ignoreversion
+Source: "packaging\icons\joule.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "packaging\icons\joule.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist

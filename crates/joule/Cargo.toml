@@ -13,6 +13,10 @@ rust-version.workspace = true
 name = "joule"
 path = "src/main.rs"
 
+[target.'cfg(windows)'.build-dependencies]
+# Embed packaging/icons/joule.ico into joule.exe on Windows targets only.
+winres = "0.1"
+
 [dependencies]
 joule-proto = { workspace = true }
 joule-cluster = { workspace = true }

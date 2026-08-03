@@ -75,8 +75,8 @@ cargo run -p joule -- broadcast plan-chunks --chunks 12 --nodes 5
 - **Native installers (primary):** Windows `*-setup.exe`, macOS `.pkg`/`.dmg`/`joule.app`, Linux `.deb` from GitHub Releases.
 - Curl CLI: `scripts/install.sh` (man pages). Repo pin: **f00-sh/joule**.
 - Homebrew (live): `brew install f00-sh/tap/joule` — [f00-sh/homebrew-tap](https://github.com/f00-sh/homebrew-tap).
-- Arch (live f00 PKGBUILD): [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin) — `git clone` + `makepkg -si` (not necessarily on aur.archlinux.org).
-- Windows: **Setup.exe** + `install.ps1` / ZIP (unsigned until Authenticode cert).
+- Arch AUR: **`joule-bin`** on [aur.archlinux.org/packages/joule-bin](https://aur.archlinux.org/packages/joule-bin) — `yay -S joule-bin` (GitHub mirror: [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin)).
+- Windows: **Setup.exe** + `install.ps1` / ZIP; Authenticode when `JOULE_WINDOWS_CERT_PFX_BASE64` secret is set (else unsigned SmartScreen warn). Product icon embedded via `winres` + `packaging/icons/`.
 
 ## Releases
 

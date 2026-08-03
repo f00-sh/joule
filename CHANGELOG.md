@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - Permanent download links: versionless GitHub `latest` asset names + site `/current/*` redirects (GUI first, then CLI); release CI publishes stable aliases every tag
+- **AUR `joule-bin`** packaging pins for v0.1.8 (official aur.archlinux.org push when AUR git is up)
+- **Product icon** across packages: embedded Windows `.ico` (`winres`), macOS `AppIcon.icns`, Linux hicolor + desktop `Icon=joule`, Inno Setup icon
+- **Windows Authenticode pipeline**: `packaging/windows/sign.ps1` signs `joule.exe` + Setup.exe when `JOULE_WINDOWS_CERT_PFX_BASE64` secret is set
 
 ## [0.1.8] — 2026-08-02
 

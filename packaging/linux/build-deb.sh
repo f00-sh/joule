@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a native .deb package (GUI desktop entry + /usr/bin/joule).
+# Build a native .deb package (GUI desktop entry + /usr/bin/joule + hicolor icons).
 # Usage:
 #   packaging/linux/build-deb.sh --bin target/release/joule --version 0.1.8 --arch amd64 --out dist
 set -euo pipefail
@@ -23,7 +23,6 @@ done
 [[ -f "$BIN" ]] || { echo "missing --bin" >&2; exit 1; }
 [[ -n "$VERSION" && -n "$ARCH" ]] || { echo "need --version and --arch" >&2; exit 1; }
 
-# Map release arch names
 case "$ARCH" in
   x86_64|amd64) DEB_ARCH=amd64; ASSET_ARCH=x86_64 ;;
   aarch64|arm64) DEB_ARCH=arm64; ASSET_ARCH=aarch64 ;;
@@ -36,10 +35,25 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 PKG="$WORKDIR/joule_${VERSION}_${DEB_ARCH}"
 mkdir -p "$PKG/DEBIAN" "$PKG/usr/bin" "$PKG/usr/share/applications" \
-  "$PKG/usr/share/doc/joule" "$PKG/usr/share/man/man1"
+  "$PKG/usr/share/doc/joule" "$PKG/usr/share/man/man1" \
+  "$PKG/usr/share/icons/hicolor"
 
 cp "$BIN" "$PKG/usr/bin/joule"
 chmod 755 "$PKG/usr/bin/joule"
+
+# hicolor icons (product mark)
+for s in 16 32 48 64 128 256 512; do
+  src="$ROOT/packaging/icons/joule-${s}.png"
+  if [[ -f "$src" ]]; then
+    d="$PKG/usr/share/icons/hicolor/${s}x${s}/apps"
+    mkdir -p "$d"
+    install -m 0644 "$src" "$d/joule.png"
+  fi
+done
+if [[ -f "$ROOT/packaging/icons/joule.png" ]]; then
+  mkdir -p "$PKG/usr/share/pixmaps"
+  install -m 0644 "$ROOT/packaging/icons/joule.png" "$PKG/usr/share/pixmaps/joule.png"
+fi
 
 cat > "$PKG/usr/share/applications/joule.desktop" <<EOF
 [Desktop Entry]
@@ -48,11 +62,12 @@ Name=joule
 GenericName=Compute pool agent
 Comment=Donate idle GPUs to the open joule cluster
 Exec=joule
-Icon=utilities-terminal
+Icon=joule
 Terminal=false
 Categories=Network;Science;Utility;
 Keywords=gpu;ai;cluster;compute;
 StartupNotify=true
+StartupWMClass=joule
 EOF
 
 cp "$ROOT/README.md" "$PKG/usr/share/doc/joule/" 2>/dev/null || true

@@ -26,20 +26,46 @@ Built by `.github/workflows/release.yml` on every `v*` tag from:
 |----------|---------|
 | Linux / macOS | `curl -fsSL …/install.sh \| sh` |
 | Windows | `irm …/install.ps1 \| iex` (prefers Setup.exe when present) |
-| Arch (f00 PKGBUILD) | `git clone https://github.com/f00-sh/aur-joule-bin.git && makepkg -si` |
+| Arch AUR | `yay -S joule-bin` · https://aur.archlinux.org/packages/joule-bin |
+| Arch (f00 mirror) | `git clone https://github.com/f00-sh/aur-joule-bin.git && makepkg -si` |
 | Homebrew | `brew install f00-sh/tap/joule` |
+
+## Icons
+
+| Asset | Path |
+|-------|------|
+| Multi-size PNG + ICO | `packaging/icons/joule.ico`, `joule-*.png` |
+| macOS | `packaging/macos/AppIcon.icns` |
+| Linux | hicolor icons in `.deb` + `Icon=joule` desktop entry |
+| Windows | `winres` embeds `.ico` into `joule.exe`; Inno `SetupIconFile` |
+
+Regenerate: `python3 scripts/generate-icons.py` (needs Pillow).
 
 ## Signing reality
 
-- **Windows:** Setup.exe is **unsigned** until an Authenticode cert exists (SmartScreen may warn).
-- **macOS:** ad-hoc `codesign`; **not notarized** until Apple Developer cert (Gatekeeper: right-click → Open).
-- Still real native installers — not “just a zip.”
+### Windows Authenticode
+
+Release CI (`packaging/windows/sign.ps1`) signs **joule.exe** and **Setup.exe** when secrets exist:
+
+| Secret | Purpose |
+|--------|---------|
+| `JOULE_WINDOWS_CERT_PFX_BASE64` | Base64-encoded code-signing `.pfx` |
+| `JOULE_WINDOWS_CERT_PASSWORD` | PFX password (optional empty) |
+| `JOULE_WINDOWS_TIMESTAMP_URL` | Optional RFC3161 URL (default DigiCert) |
+
+Without those secrets, installers still ship **unsigned** (SmartScreen may warn).  
+This is not skippable theater: a real OV/EV Authenticode cert must be purchased and stored as the secret.
+
+### macOS
+
+- Ad-hoc `codesign` on `joule.app` always.
+- **Notarization / Developer ID** still need an Apple Developer cert (not configured here).
 
 ## Maintainer checklist (each SemVer tag)
 
 1. `git tag vX.Y.Z && git push origin vX.Y.Z`
 2. Wait for **release** workflow green (binaries + setup/pkg/dmg/deb)
-3. Pin `f00-sh/homebrew-tap` and `f00-sh/aur-joule-bin` digests
+3. Pin `f00-sh/homebrew-tap` and update AUR `joule-bin` (aur.archlinux.org + f00 mirror) digests
 4. Download page picks native installers from the GitHub API automatically
 
 ## Asset naming

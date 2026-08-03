@@ -71,7 +71,7 @@ irm https://joule.f00.sh/current/install.ps1 | iex
 |---------|--------|
 | **GitHub Releases** | Versioned + stable names — [releases](https://github.com/f00-sh/joule/releases) |
 | **Homebrew** | `brew install f00-sh/tap/joule` (optional; `.pkg`/`.dmg` also ship) |
-| **Arch PKGBUILD** | [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin) |
+| **AUR (`joule-bin`)** | `yay -S joule-bin` · [aur.archlinux.org/packages/joule-bin](https://aur.archlinux.org/packages/joule-bin) (mirror: [f00-sh/aur-joule-bin](https://github.com/f00-sh/aur-joule-bin)) |
 | **Windows** | **Setup.exe** via `/current/windows/setup.exe` (unsigned until cert) |
 
 ### Your joule code (multi-machine, no PII)

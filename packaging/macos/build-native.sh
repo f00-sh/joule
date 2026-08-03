@@ -53,12 +53,16 @@ chmod 755 "$MACOS/joule"
 sed "s/@VERSION@/${VERSION}/g" "$ROOT/packaging/macos/Info.plist.in" > "$CONTENTS/Info.plist"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
-# Optional icon later — ship without icns if none present.
+# Product icon (required for Finder / Dock).
 if [[ -f "$ROOT/packaging/macos/AppIcon.icns" ]]; then
   cp "$ROOT/packaging/macos/AppIcon.icns" "$RES/AppIcon.icns"
   /usr/libexec/PlistBuddy -c 'Add :CFBundleIconFile string AppIcon' "$CONTENTS/Info.plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c 'Set :CFBundleIconFile AppIcon' "$CONTENTS/Info.plist" 2>/dev/null \
     || true
+  /usr/libexec/PlistBuddy -c 'Add :CFBundleIconName string AppIcon' "$CONTENTS/Info.plist" 2>/dev/null \
+    || true
+else
+  echo "warning: packaging/macos/AppIcon.icns missing" >&2
 fi
 
 # Ad-hoc codesign so Gatekeeper has *something* (not notarized — no Apple cert).
