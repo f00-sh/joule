@@ -209,6 +209,220 @@ async fn spawn_agent(
     (api_key, handle)
 }
 
+/// Production-like agent: `ClusterEngine` + prepared weights + band gate on InferRequest.
+///
+/// Records non-tail activation payload prefixes into `stage_magics` for OBSERVE
+/// (expect `JST3` after lab-tiny prepare with f32 tensors).
+async fn spawn_agent_prepared_cluster(
+    agent_addr: std::net::SocketAddr,
+    account: &str,
+    mem: u32,
+    engine: Arc<ClusterEngine>,
+    stage_magics: Arc<Mutex<Vec<String>>>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let node_id = NodeId::new();
+    let device_sk = e2e_device_key();
+    let device_pk = hex::encode(device_sk.verifying_key().as_bytes());
+    let sock = TcpStream::connect(agent_addr).await.expect("agent connect");
+    let (reader, mut writer) = sock.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    let hello = Envelope::new(
+        node_id.clone(),
+        Message::Hello {
+            account: account.into(),
+            caps: NodeCaps::for_cluster(DeviceClass::Gpu, mem, 40),
+            pubkey_hex: device_pk,
+            sig_hex: String::new(),
+            signed_at_unix_ms: 0,
+        },
+    );
+    writer
+        .write_all(&encode_line(&hello).unwrap())
+        .await
+        .unwrap();
+
+    let welcome_line = lines.next_line().await.unwrap().expect("welcome");
+    let welcome = decode_line(welcome_line.as_bytes()).unwrap();
+    let api_key = match welcome.msg {
+        Message::Welcome { api_key, .. } => api_key,
+        other => panic!("expected welcome, got {other:?}"),
+    };
+
+    let hb = Envelope::new(
+        node_id.clone(),
+        Message::Heartbeat {
+            load: 0.0,
+            healthy: true,
+        },
+    );
+    writer.write_all(&encode_line(&hb).unwrap()).await.unwrap();
+    let alive = Envelope::new(
+        node_id.clone(),
+        Message::PeerAlive {
+            multiaddrs: vec![format!("tcp://127.0.0.1:{}", 18000 + (mem % 1000))],
+            load: 0.05,
+            healthy: true,
+            blob_count: 1,
+            mem_mib: mem,
+            verified_mem_mib: 0,
+            throughput_class: 40,
+        },
+    );
+    writer
+        .write_all(&encode_line(&alive).unwrap())
+        .await
+        .unwrap();
+
+    let require_band = engine.has_resident_weights() || engine.is_model_loaded();
+    let opts = joule_control::InferAgentOpts {
+        require_band_weights: require_band,
+    };
+    assert!(
+        opts.require_band_weights,
+        "prepared cluster agent must enable production band gate"
+    );
+
+    let handle = tokio::spawn(async move {
+        let eng = engine;
+        let stage_magics = stage_magics;
+        let device_sk = device_sk;
+        let mut tick = tokio::time::interval(Duration::from_millis(200));
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let hb = Envelope::new(
+                        node_id.clone(),
+                        Message::Heartbeat { load: 0.05, healthy: true },
+                    );
+                    if writer.write_all(&encode_line(&hb).unwrap()).await.is_err() {
+                        break;
+                    }
+                    let alive = Envelope::new(
+                        node_id.clone(),
+                        Message::PeerAlive {
+                            multiaddrs: vec![format!("tcp://127.0.0.1:{}", 18000 + (mem % 1000))],
+                            load: 0.05,
+                            healthy: true,
+                            blob_count: 1,
+                            mem_mib: mem,
+                            verified_mem_mib: 0,
+                            throughput_class: 40,
+                        },
+                    );
+                    let _ = writer.write_all(&encode_line(&alive).unwrap()).await;
+                }
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { break; };
+                    if line.trim().is_empty() { continue; }
+                    let env = decode_line(line.as_bytes()).unwrap();
+                    match &env.msg {
+                        Message::PlanOffer {
+                            plan,
+                            request_id,
+                            plan_hash_hex, .. } => {
+                            let accepted = plan.shards.iter().any(|s| s.node == node_id);
+                            let (ph, confirm) = joule_cluster::plan_accept_fields(
+                                plan,
+                                *request_id,
+                                &node_id,
+                                accepted,
+                                Some(plan_hash_hex.as_str()).filter(|s| !s.is_empty()),
+                            );
+                            let reply = Envelope::new(
+                                node_id.clone(),
+                                Message::PlanAccept {
+                                    plan_id: plan.plan_id,
+                                    request_id: *request_id,
+                                    accepted,
+                                    reason: if accepted {
+                                        "e2e prepared shard ok".into()
+                                    } else {
+                                        "not in plan".into()
+                                    },
+                                    auth: e2e_plan_auth_sk(
+                                        &device_sk,
+                                        &node_id,
+                                        plan.plan_id,
+                                        *request_id,
+                                        accepted,
+                                        &ph,
+                                        &confirm,
+                                    ),
+                                    plan_hash_hex: ph,
+                                    confirm_hex: confirm,
+                                },
+                            );
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::RequestInfer { .. } => {
+                            // Production: note only — never PlanAccept on RequestInfer.
+                        }
+                        Message::InferRequest { is_tail, .. } => {
+                            let reply = joule_control::agent_handle_infer_with(
+                                &env,
+                                eng.as_ref(),
+                                opts,
+                            )
+                            .await
+                            .expect("prepared infer");
+                            if let Message::InferDone {
+                                activation_hex,
+                                activation_payload_b64,
+                                activation_layer_start,
+                                activation_layer_end,
+                                text,
+                                ..
+                            } = &reply.msg
+                            {
+                                if !*is_tail && !activation_payload_b64.is_empty() {
+                                    let act = joule_proto::ShardActivation {
+                                        node: node_id.clone(),
+                                        layer_start: activation_layer_start.unwrap_or(0),
+                                        layer_end: activation_layer_end.unwrap_or(0),
+                                        activation_hex: activation_hex.clone(),
+                                        payload_b64: activation_payload_b64.clone(),
+                                    };
+                                    if let Ok(raw) = joule_cluster::decode_payload(&act) {
+                                        let magic = raw
+                                            .get(..4)
+                                            .map(|b| String::from_utf8_lossy(b).into_owned())
+                                            .unwrap_or_default();
+                                        stage_magics.lock().unwrap().push(magic);
+                                    }
+                                } else if *is_tail && !text.is_empty() {
+                                    stage_magics
+                                        .lock()
+                                        .unwrap()
+                                        .push(format!("tail:{text}"));
+                                }
+                            }
+                            let reply = Envelope::new(node_id.clone(), reply.msg);
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Message::Challenge { .. } => {
+                            let reply = joule_control::agent_handle_challenge(&env, eng.as_ref())
+                                .await
+                                .expect("challenge");
+                            let reply = Envelope::new(node_id.clone(), reply.msg);
+                            if writer.write_all(&encode_line(&reply).unwrap()).await.is_err() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+
+    (api_key, handle)
+}
+
 #[tokio::test]
 async fn pool_capacity_and_chat() {
     let app = load_or_init_app(None).expect("app");
@@ -2293,6 +2507,279 @@ async fn lease_chat_free_used_free_and_audit() {
     );
 
     agent.abort();
+}
+
+/// Formal e2e: 3 prepared ClusterEngine agents → sequential JST3 chain + lease audit OBSERVE.
+///
+/// Combines production prepare (lab-tiny), `require_band_weights` after resident weights,
+/// multi-donor sequential fanout (≥3 shards), chat completion with matmul/pipeline markers,
+/// and free→used→free stream lease + GET `/v1/cluster/leases` audit trail.
+#[tokio::test]
+async fn control_e2e_three_agents_prepare_sequential_jst3_lease_audit() {
+    use std::fs;
+
+    let dir = std::env::temp_dir().join(format!(
+        "joule-e2e-jst3-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let store = WeightsStore::new(&dir);
+    let m = ManifestFile::load_default().expect("manifest");
+    let spec = m.model("kimi-open").expect("kimi-open");
+    let lab = spec
+        .weights
+        .quants
+        .iter()
+        .find(|q| q.id == "lab-tiny")
+        .expect("lab-tiny");
+
+    // Three independent engines, each prepared like a production donor after Welcome.
+    let mut engines = Vec::new();
+    for i in 0..3 {
+        let eng = ClusterEngine::new();
+        let report = prepare_and_install(&store, &eng, spec, lab)
+            .unwrap_or_else(|e| panic!("prepare agent {i}: {e}"));
+        assert!(
+            eng.has_resident_weights() || eng.is_model_loaded(),
+            "agent {i} must have resident weights after prepare tensors={}",
+            report.tensors
+        );
+        assert!(
+            report.tensors >= 1,
+            "prepare must load tensors, got {}",
+            report.tensors
+        );
+        eprintln!(
+            "OBSERVE prepare agent={i} tensors={} bytes={} loaded={}",
+            report.tensors,
+            report.bytes_resident,
+            eng.is_model_loaded()
+        );
+        engines.push(Arc::new(eng));
+    }
+
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    let stage_magics: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // Distinct mem → multi-shard plan (8+12+16 GiB-style pool).
+    let (key_a, a) = spawn_agent_prepared_cluster(
+        agent_addr,
+        "jst3-alice",
+        8192,
+        engines[0].clone(),
+        stage_magics.clone(),
+    )
+    .await;
+    let (_kb, b) = spawn_agent_prepared_cluster(
+        agent_addr,
+        "jst3-bob",
+        12288,
+        engines[1].clone(),
+        stage_magics.clone(),
+    )
+    .await;
+    let (_kc, c) = spawn_agent_prepared_cluster(
+        agent_addr,
+        "jst3-carol",
+        16384,
+        engines[2].clone(),
+        stage_magics.clone(),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+
+    let sched_before: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let free_before = sched_before["stream_slots_free"].as_u64().unwrap();
+    let used_before = sched_before["stream_slots_used"].as_u64().unwrap();
+    assert!(free_before >= 1, "sched_before={sched_before}");
+    assert_eq!(used_before, 0, "sched_before={sched_before}");
+    assert!(
+        sched_before["shards"].as_u64().unwrap_or(0) >= 3,
+        "need ≥3 shards for sequential chain: {sched_before}"
+    );
+    eprintln!(
+        "OBSERVE before free={free_before} used={used_before} shards={} pool_mem_mib={}",
+        sched_before["shards"], sched_before["pool_mem_mib"]
+    );
+
+    // Mid-chat used sampling.
+    let chat_fut = {
+        let client = client.clone();
+        let base = base.clone();
+        let key = key_a.clone();
+        async move {
+            client
+                .post(format!("{base}/v1/chat/completions"))
+                .bearer_auth(&key)
+                .json(&serde_json::json!({
+                    "model": CLUSTER_MODEL,
+                    "messages": [{"role": "user", "content": "e2e-jst3-sequential-chain"}],
+                    "max_tokens": 32
+                }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let chat_handle = tokio::spawn(chat_fut);
+
+    let mut mid_used = 0u64;
+    for _ in 0..80 {
+        let s: serde_json::Value = client
+            .get(format!("{base}/v1/cluster/scheduler"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        mid_used = mid_used.max(s["stream_slots_used"].as_u64().unwrap_or(0));
+        if chat_handle.is_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    eprintln!("OBSERVE mid max_used={mid_used}");
+
+    let resp = chat_handle.await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "chat status={} body={}",
+        resp.status(),
+        resp.text().await.unwrap_or_default()
+    );
+    let chat: serde_json::Value = resp.json().await.unwrap();
+    let content = chat["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    let coord = chat["joule_coordination"].as_str().unwrap_or("");
+    let shards = chat["joule_shard_count"].as_u64().unwrap_or(0);
+    eprintln!(
+        "OBSERVE chat coord={coord} shards={shards} content_len={} content={content}",
+        content.len()
+    );
+
+    assert!(
+        shards >= 3,
+        "sequential multi-stage needs ≥3 shards, got {shards} chat={chat}"
+    );
+    assert!(
+        coord == "mesh_request_infer" || coord == "control_dispatch",
+        "unexpected coordination path {coord}"
+    );
+    assert!(
+        !content.contains("joule-stub"),
+        "must not be StubEngine path: {content}"
+    );
+    // Tail stage text carries pure-Rust matmul / pipeline markers (JST3 path).
+    assert!(
+        content.contains("matmul")
+            || content.contains("joule-pipeline-stage")
+            || content.contains("upstream_bytes="),
+        "tail must show matmul/pipeline stage markers (JST3 chain), content={content}"
+    );
+
+    // Non-tail stages recorded JST3 magics on the wire (production sequential handoff).
+    let magics = stage_magics.lock().unwrap().clone();
+    eprintln!("OBSERVE stage_magics={magics:?}");
+    let jst3_count = magics.iter().filter(|m| m.as_str() == "JST3").count();
+    assert!(
+        jst3_count >= 2,
+        "expect ≥2 non-tail JST3 activations in 3-shard sequential chain, magics={magics:?}"
+    );
+    let tail_ok = magics.iter().any(|m| {
+        m.starts_with("tail:")
+            && (m.contains("matmul")
+                || m.contains("joule-pipeline-stage")
+                || m.contains("upstream_bytes="))
+    });
+    assert!(
+        tail_ok,
+        "tail stage must record matmul/pipeline text, magics={magics:?}"
+    );
+
+    let sched_after: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        sched_after["stream_slots_used"].as_u64().unwrap(),
+        0,
+        "lease must free after chat: {sched_after}"
+    );
+    assert_eq!(
+        sched_after["stream_slots_free"].as_u64().unwrap(),
+        free_before,
+        "free slots restore: before={free_before} after={sched_after}"
+    );
+    eprintln!(
+        "OBSERVE after free={} used={}",
+        sched_after["stream_slots_free"], sched_after["stream_slots_used"]
+    );
+
+    let leases: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/leases"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(leases["ok"], true);
+    assert_eq!(leases["active_leases"].as_u64().unwrap(), 0);
+    let audit = leases["audit"].as_array().expect("audit array");
+    assert!(
+        audit.iter().any(|e| e["event"] == "lease_granted"),
+        "audit={leases}"
+    );
+    assert!(
+        audit.iter().any(|e| e["event"] == "lease_released"),
+        "audit={leases}"
+    );
+    assert!(
+        audit.iter().any(|e| e["event"] == "plan_agreed"),
+        "audit must show multi-party agree: {leases}"
+    );
+    eprintln!("OBSERVE lease audit trail: {leases}");
+    assert!(
+        mid_used > 0
+            || audit
+                .iter()
+                .filter(|e| e["event"] == "lease_granted")
+                .count()
+                >= 1,
+        "mid_used={mid_used} audit={leases}"
+    );
+
+    a.abort();
+    b.abort();
+    c.abort();
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Pool full → HTTP 503 + code pool_full; used never exceeds total.
