@@ -16,6 +16,8 @@ pub enum ServicePlatform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceKind {
+    /// Local control plane (HTTP :7700 + agent listen :7701). First machine / home pool.
+    Control,
     /// Donor agent (background compute).
     Agent,
     /// Status tray UI (user session).
@@ -63,6 +65,10 @@ impl Default for InstallSpec {
 /// systemd unit body (user or system).
 pub fn generate_systemd_unit(spec: &InstallSpec) -> String {
     let exec = match spec.kind {
+        ServiceKind::Control => format!(
+            "{} control --http-listen 127.0.0.1:7700 --agent-listen 127.0.0.1:7701",
+            shell_escape(&spec.binary_path)
+        ),
         ServiceKind::Agent => format!(
             "{} agent --account {} --control {} --mem-mib {}",
             shell_escape(&spec.binary_path),
@@ -112,11 +118,21 @@ WantedBy={wanted}
 /// macOS launchd plist (LaunchAgents / user domain).
 pub fn generate_launchd_plist(spec: &InstallSpec) -> String {
     let label = match spec.kind {
+        ServiceKind::Control => "sh.f00.joule.control",
         ServiceKind::Agent => "sh.f00.joule.agent",
         ServiceKind::Tray => "sh.f00.joule.tray",
     };
     let mut args: Vec<String> = vec![spec.binary_path.clone()];
     match spec.kind {
+        ServiceKind::Control => {
+            args.extend([
+                "control".into(),
+                "--http-listen".into(),
+                "127.0.0.1:7700".into(),
+                "--agent-listen".into(),
+                "127.0.0.1:7701".into(),
+            ]);
+        }
         ServiceKind::Agent => {
             args.extend([
                 "agent".into(),
@@ -175,6 +191,10 @@ pub fn generate_launchd_plist(spec: &InstallSpec) -> String {
 /// [`String`] as UTF-8 — Task Scheduler will reject it.
 pub fn generate_windows_task_xml(spec: &InstallSpec) -> String {
     let (name, args) = match spec.kind {
+        ServiceKind::Control => (
+            "joule-control",
+            "control --http-listen 127.0.0.1:7700 --agent-listen 127.0.0.1:7701".into(),
+        ),
         ServiceKind::Agent => (
             "joule-agent",
             format!(
@@ -263,6 +283,123 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// Default on-disk path for a unit (user session).
+pub fn default_unit_path(platform: ServicePlatform, kind: ServiceKind) -> String {
+    match (platform, kind) {
+        (ServicePlatform::LinuxSystemd, ServiceKind::Control) => {
+            "~/.config/systemd/user/joule-control.service".into()
+        }
+        (ServicePlatform::LinuxSystemd, ServiceKind::Agent) => {
+            "~/.config/systemd/user/joule-agent.service".into()
+        }
+        (ServicePlatform::LinuxSystemd, ServiceKind::Tray) => {
+            "~/.config/systemd/user/joule-tray.service".into()
+        }
+        (ServicePlatform::MacosLaunchd, ServiceKind::Control) => {
+            "~/Library/LaunchAgents/sh.f00.joule.control.plist".into()
+        }
+        (ServicePlatform::MacosLaunchd, ServiceKind::Agent) => {
+            "~/Library/LaunchAgents/sh.f00.joule.agent.plist".into()
+        }
+        (ServicePlatform::MacosLaunchd, ServiceKind::Tray) => {
+            "~/Library/LaunchAgents/sh.f00.joule.tray.plist".into()
+        }
+        (ServicePlatform::WindowsTask, ServiceKind::Control) => {
+            "%LOCALAPPDATA%\\joule\\joule-control.xml".into()
+        }
+        (ServicePlatform::WindowsTask, ServiceKind::Agent) => {
+            "%LOCALAPPDATA%\\joule\\joule-agent.xml".into()
+        }
+        (ServicePlatform::WindowsTask, ServiceKind::Tray) => {
+            "%LOCALAPPDATA%\\joule\\joule-tray.xml".into()
+        }
+    }
+}
+
+/// Human unit/task name for enable commands.
+pub fn unit_name(kind: ServiceKind) -> &'static str {
+    match kind {
+        ServiceKind::Control => "joule-control",
+        ServiceKind::Agent => "joule-agent",
+        ServiceKind::Tray => "joule-tray",
+    }
+}
+
+/// Shell commands to enable + start after the unit file is written.
+/// Paths in commands use expanded absolute forms when `unit_path` is absolute.
+pub fn enable_commands(
+    platform: ServicePlatform,
+    kind: ServiceKind,
+    unit_path: &str,
+) -> Vec<String> {
+    let name = unit_name(kind);
+    match platform {
+        ServicePlatform::LinuxSystemd => vec![
+            "systemctl --user daemon-reload".into(),
+            format!("systemctl --user enable --now {name}.service"),
+        ],
+        ServicePlatform::MacosLaunchd => {
+            // Prefer bootstrap when available; load works on older macOS.
+            vec![
+                format!("launchctl bootout gui/$(id -u) {unit_path} 2>/dev/null || true"),
+                format!(
+                    "launchctl bootstrap gui/$(id -u) {unit_path} || launchctl load -w {unit_path}"
+                ),
+            ]
+        }
+        ServicePlatform::WindowsTask => vec![format!(
+            "schtasks /Create /TN {name} /XML \"{unit_path}\" /F"
+        )],
+    }
+}
+
+/// Generate unit body text (or UTF-16 note for Windows preview).
+pub fn generate_unit_body(spec: &InstallSpec) -> String {
+    match spec.platform {
+        ServicePlatform::LinuxSystemd => generate_systemd_unit(spec),
+        ServicePlatform::MacosLaunchd => generate_launchd_plist(spec),
+        ServicePlatform::WindowsTask => generate_windows_task_xml(spec),
+    }
+}
+
+/// Stupid-user numbered steps for local home pool (first machine).
+pub fn dumb_user_get_started() -> &'static str {
+    r#"GET STARTED (do this in order — no cleverness required)
+
+  1) Install joule (pick one):
+       curl -fsSL https://joule.f00.sh/current/install.sh | sh
+       # Windows PowerShell:
+       irm https://joule.f00.sh/current/install.ps1 | iex
+       # macOS: brew install f00-sh/tap/joule
+
+  2) Open the app (easiest):
+       joule
+       # or: joule gui
+     Click the big green button:  ★ DO EVERYTHING (local pool)
+     That starts control + agent for you.
+
+  3) OR one-command local pool (no GUI):
+       joule start
+     Wait until it prints OK. Then chat:
+       joule connect
+       joule chat --prompt "hi"
+
+  4) Make it come back after reboot (user session, tray-friendly):
+       joule service install
+     That writes + enables control + agent autostart on THIS OS.
+
+  5) Donate only (join someone else's control later):
+       joule agent --account YOU --control HOST:7701
+
+  6) Stuck?
+       joule status --api http://127.0.0.1:7700
+       joule service install-help --platform linux|macos|windows
+
+Honest note: full multi-TB Kimi needs many machines + weight seeds.
+A single PC still forms a real local pool and runs lab/production engine path.
+"#
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +420,33 @@ mod tests {
         assert!(u.contains("--account alice"));
         assert!(u.contains("Restart=on-failure"));
         assert!(u.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn systemd_control_and_enable_commands() {
+        let spec = InstallSpec {
+            kind: ServiceKind::Control,
+            binary_path: "/usr/bin/joule".into(),
+            ..Default::default()
+        };
+        let u = generate_systemd_unit(&spec);
+        assert!(u.contains("control"));
+        assert!(u.contains("7700"));
+        assert!(u.contains("7701"));
+        let cmds = enable_commands(
+            ServicePlatform::LinuxSystemd,
+            ServiceKind::Control,
+            "~/.config/systemd/user/joule-control.service",
+        );
+        assert!(cmds
+            .iter()
+            .any(|c| c.contains("enable --now joule-control")));
+        assert!(
+            default_unit_path(ServicePlatform::LinuxSystemd, ServiceKind::Agent)
+                .contains("joule-agent")
+        );
+        assert!(dumb_user_get_started().contains("DO EVERYTHING"));
+        assert!(dumb_user_get_started().contains("joule service install"));
     }
 
     #[test]

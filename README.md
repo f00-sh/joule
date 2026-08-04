@@ -99,18 +99,29 @@ cargo build --release -p joule
 ./target/release/joule lab
 ```
 
-## Quick start (normie / GUI first)
+## Quick start (stupid-easy — do this)
 
 ```text
-joule            # opens the graphical dashboard (graphs + buttons)
-# or:
-joule gui
+joule get-started          # print the checklist anytime
+joule                      # GUI (default) — click ★ DO EVERYTHING (local pool)
+joule service install      # reboot-safe: control + agent + tray autostart
+joule connect              # Base URL + joule_… key for Cursor / OpenAI clients
+joule chat --prompt "hi"
 ```
 
-In the GUI: **Start control** → **Start agent (donate)** → **Overview/Graphs** tabs
-(zoom/pan/box-zoom, series toggles, sparklines), **Donor** (pause/cap/schedule/thermal),
-**Chat** against the pool.
-No separate “open a terminal and guess ports” required for the happy path.
+Headless (no GUI):
+
+```text
+joule start                # control + agent in background, waits until healthy
+joule status --api http://127.0.0.1:7700
+```
+
+GUI also auto-starts a local pool on first open if nothing is on `:7700`
+(set `JOULE_GUI_NO_AUTO=1` to skip). Graphs / Donor / Chat tabs remain for power users.
+
+**Autostart:** `joule service install` enables **user-session** services (systemd `--user`,
+LaunchAgents, Task Scheduler at logon) so control + agent come back after reboot.
+Not a silent root system service (tray/GPU need a user session).
 
 ### Advanced: Terminal 1 — control plane (localhost)
 

@@ -157,6 +157,8 @@ struct JouleGuiApp {
     chat_busy: bool,
     chat_err: Option<String>,
     link_time_axes: bool,
+    /// One-shot first-frame local pool boot for dumb users.
+    auto_started: bool,
 }
 
 impl JouleGuiApp {
@@ -197,9 +199,12 @@ impl JouleGuiApp {
             sched_start,
             sched_end,
             log: vec![
-                "joule GUI ready — Start control, then Start agent.".into(),
-                "Graphs: scroll zoom · drag pan · box-zoom · double-click reset.".into(),
+                "joule GUI ready.".into(),
+                "STUPID-EASY: click ★ DO EVERYTHING (local pool) once.".into(),
+                "Or: Start control → Start agent (donate) → Chat tab.".into(),
+                "Survive reboot: run  joule service install  in a terminal.".into(),
             ],
+            auto_started: false,
             rt: tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -320,6 +325,18 @@ impl JouleGuiApp {
             }
             Err(e) => self.push_log(format!("failed to start agent: {e}")),
         }
+    }
+
+    /// One click: control → wait → agent. For people who will not read docs.
+    fn do_everything_local(&mut self) {
+        self.push_log("★ DO EVERYTHING: starting local control + agent…");
+        self.spawn_control();
+        // Brief settle so agent can connect.
+        std::thread::sleep(Duration::from_millis(600));
+        self.spawn_agent();
+        self.push_log("Done. Wait ~10s for challenges, then open Chat tab.");
+        self.push_log("Survive reboot: open a terminal and run:  joule service install");
+        self.push_log("CLI checklist anytime:  joule get-started");
     }
 
     fn stop_agent(&mut self) {
@@ -581,10 +598,30 @@ impl JouleGuiApp {
             );
         });
 
+        ui.label(
+            RichText::new("1) Click green button  2) Wait 10s  3) Chat tab  4) Terminal: joule service install")
+                .small()
+                .color(Color32::LIGHT_GRAY),
+        );
+        if ui
+            .add_sized(
+                [240.0, 40.0],
+                egui::Button::new(
+                    RichText::new("★ DO EVERYTHING (local pool)")
+                        .strong()
+                        .size(15.0),
+                )
+                .fill(Color32::from_rgb(40, 120, 60)),
+            )
+            .on_hover_text("Starts control + agent. One click. No thinking.")
+            .clicked()
+        {
+            self.do_everything_local();
+        }
         if ui
             .add_sized(
                 [240.0, 34.0],
-                egui::Button::new(RichText::new("▶ Start control").strong()),
+                egui::Button::new(RichText::new("▶ Start control only").strong()),
             )
             .on_hover_text("Local control plane on :7700 HTTP / :7701 agents")
             .clicked()
@@ -609,6 +646,19 @@ impl JouleGuiApp {
                 self.stop_control();
             }
         });
+        if ui
+            .button("Enable autostart (reboot-safe)")
+            .on_hover_text("Runs: joule service install (control+agent+tray user session)")
+            .clicked()
+        {
+            self.push_log("running: joule service install …");
+            let bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("joule"));
+            match Command::new(&bin).args(["service", "install"]).status() {
+                Ok(s) if s.success() => self.push_log("autostart installed (service install OK)"),
+                Ok(s) => self.push_log(format!("service install exit {:?}", s.code())),
+                Err(e) => self.push_log(format!("service install failed: {e}")),
+            }
+        }
         if ui.button("Open dashboard in browser").clicked() {
             let _ = open::that(format!("{}/", self.api.trim_end_matches('/')));
         }
@@ -1221,6 +1271,27 @@ impl JouleGuiApp {
 
 impl eframe::App for JouleGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // First frame: if nothing is listening, boot local pool (disable with JOULE_GUI_NO_AUTO=1).
+        if !self.auto_started {
+            self.auto_started = true;
+            if std::env::var_os("JOULE_GUI_NO_AUTO").is_none() {
+                let busy = std::net::TcpStream::connect_timeout(
+                    &"127.0.0.1:7700"
+                        .parse()
+                        .unwrap_or_else(|_| ([127, 0, 0, 1], 7700).into()),
+                    Duration::from_millis(150),
+                )
+                .is_ok();
+                if busy {
+                    self.push_log("control already on :7700 — not auto-starting another");
+                } else {
+                    self.push_log(
+                        "first open: auto-starting local pool (set JOULE_GUI_NO_AUTO=1 to skip)",
+                    );
+                    self.do_everything_local();
+                }
+            }
+        }
         if self.last_poll.elapsed() >= self.poll_every {
             self.poll();
         }

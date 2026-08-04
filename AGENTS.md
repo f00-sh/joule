@@ -80,6 +80,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release
 bash scripts/production-smoke.sh   # release binary: control+2 agents → challenges → chat
+cargo run -p joule --release -- get-started
+cargo run -p joule --release -- start
+cargo run -p joule --release -- service install --dry-run
 cargo run -p joule --release -- gui
 cargo run -p joule --release -- control
 cargo run -p joule --release -- agent --account alice

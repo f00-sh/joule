@@ -145,13 +145,21 @@ https://github.com/f00-sh/joule/releases/latest/download/install.ps1</code></pre
     </section>
 
     <section id="after">
-      <h2>After install</h2>
+      <h2>After install (do not skip)</h2>
       <ol class="steps">
-        <li>Launch <strong>joule</strong> (GUI dashboard by default).</li>
-        <li><strong>Start control</strong> → <strong>Start agent</strong> (or CLI equivalents).</li>
+        <li>Launch <strong>joule</strong> (GUI is the default when you type <code>joule</code>).</li>
+        <li>Click the big green <strong>★ DO EVERYTHING (local pool)</strong> button
+            (starts control + agent). Or run <code>joule start</code> in a terminal.</li>
+        <li>Wait ~10 seconds for challenges. Status should show a connected pool.</li>
+        <li>Open the <strong>Chat</strong> tab, or: <code>joule connect</code> then
+            <code>joule chat --prompt hi</code>.</li>
+        <li><strong>Survive reboot:</strong> <code>joule service install</code>
+            (writes + enables control + agent + tray for your OS user session).</li>
         <li>Back up your CODE / <code>JOULE-RECOVERY.txt</code>.</li>
-        <li>Connect apps: <code>joule connect</code> for Base URL + <code>joule_…</code> key + <code>kimi-open</code>.</li>
+        <li>Stuck? <code>joule get-started</code> prints the full dumb-user checklist.</li>
       </ol>
+      <p class="muted">Honest: full multi-TB Kimi needs many donors + weight seeds.
+      One PC still runs a real local pool and the production engine path.</p>
     </section>
   </main>
 </body>

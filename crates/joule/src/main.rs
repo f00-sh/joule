@@ -12,9 +12,10 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use clap::{Parser, Subcommand};
 use joule_client::{
-    format_monitor_dash, format_status_human, generate_launchd_plist, generate_systemd_unit,
-    generate_windows_task_xml, generate_windows_task_xml_file_bytes, InstallSpec, ServiceKind,
-    ServicePlatform,
+    default_unit_path, dumb_user_get_started, enable_commands, format_monitor_dash,
+    format_status_human, generate_launchd_plist, generate_systemd_unit, generate_unit_body,
+    generate_windows_task_xml, generate_windows_task_xml_file_bytes, unit_name, InstallSpec,
+    ServiceKind, ServicePlatform,
 };
 use joule_cluster::{plan_redundant_chunks, Cluster, ModelChunk};
 use joule_control::{
@@ -70,6 +71,21 @@ enum Commands {
     Gui {
         #[arg(long, default_value = "http://127.0.0.1:7700")]
         api: String,
+    },
+    /// Stupid-user checklist (print big steps).
+    #[command(name = "get-started", alias = "help-me", alias = "howto")]
+    GetStarted,
+    /// One-shot local pool: start control + agent in background (no reboot needed).
+    Start {
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        #[arg(long, default_value = "127.0.0.1:7701")]
+        control: String,
+        #[arg(long, default_value = "donor")]
+        account: String,
+        /// Also try OS autostart (same as `joule service install`).
+        #[arg(long, default_value_t = false)]
+        autostart: bool,
     },
     /// Print protocol and build identity.
     Version,
@@ -458,7 +474,7 @@ enum ServiceCmd {
         /// linux | macos | windows
         #[arg(long, default_value = "linux")]
         platform: String,
-        /// agent | tray
+        /// control | agent | tray
         #[arg(long, default_value = "agent")]
         kind: String,
         #[arg(long, default_value = "joule")]
@@ -483,6 +499,25 @@ enum ServiceCmd {
     InstallHelp {
         #[arg(long, default_value = "linux")]
         platform: String,
+    },
+    /// Write + enable control+agent (and optional tray) autostart for this OS.
+    /// This is the dumb path: reboot-safe user-session services.
+    Install {
+        /// linux | macos | windows (default: detect)
+        #[arg(long, default_value = "")]
+        platform: String,
+        #[arg(long, default_value = "donor")]
+        account: String,
+        #[arg(long, default_value = "127.0.0.1:7701")]
+        control: String,
+        #[arg(long, default_value = "http://127.0.0.1:7700")]
+        api: String,
+        /// Also install tray monitor autostart.
+        #[arg(long, default_value_t = true)]
+        tray: bool,
+        /// Write files but do not run systemctl/launchctl/schtasks.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
     },
 }
 
@@ -548,6 +583,17 @@ async fn main() -> Result<()> {
         Commands::Gui { api } => {
             // GUI is sync/eframe; leave async runtime after exit.
             gui::run_gui(api)?;
+        }
+        Commands::GetStarted => {
+            print!("{}", dumb_user_get_started());
+        }
+        Commands::Start {
+            api,
+            control,
+            account,
+            autostart,
+        } => {
+            run_local_start(&api, &control, &account, autostart)?;
         }
         Commands::Version => {
             println!("joule {}", env!("CARGO_PKG_VERSION"));
@@ -881,6 +927,16 @@ async fn main() -> Result<()> {
             }
             ServiceCmd::InstallHelp { platform } => {
                 run_service_install_help(&platform)?;
+            }
+            ServiceCmd::Install {
+                platform,
+                account,
+                control,
+                api,
+                tray,
+                dry_run,
+            } => {
+                run_service_install(&platform, &account, &control, &api, tray, dry_run)?;
             }
         },
         Commands::Lab {
@@ -2819,9 +2875,10 @@ fn run_service_generate(
         other => bail!("unknown platform {other}; use linux|macos|windows"),
     };
     let kind = match kind.to_ascii_lowercase().as_str() {
+        "control" => ServiceKind::Control,
         "agent" => ServiceKind::Agent,
         "tray" | "monitor" => ServiceKind::Tray,
-        other => bail!("unknown kind {other}; use agent|tray"),
+        other => bail!("unknown kind {other}; use control|agent|tray"),
     };
     let spec = InstallSpec {
         platform,
@@ -2834,6 +2891,7 @@ fn run_service_generate(
         mem_mib,
         user_unit: user,
         description: match kind {
+            ServiceKind::Control => "joule local control plane".into(),
             ServiceKind::Agent => "joule donor agent".into(),
             ServiceKind::Tray => "joule status tray/monitor".into(),
         },
@@ -2878,17 +2936,238 @@ fn write_service_text(out: Option<PathBuf>, body: &str) -> Result<()> {
     Ok(())
 }
 
+fn expand_user_path(p: &str) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(h) = std::env::var_os("HOME") {
+            return PathBuf::from(h).join(rest);
+        }
+    }
+    if let Some(rest) = p
+        .strip_prefix("%LOCALAPPDATA%\\")
+        .or_else(|| p.strip_prefix("%LOCALAPPDATA%/"))
+    {
+        if let Some(la) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(la).join(rest);
+        }
+    }
+    PathBuf::from(p)
+}
+
+fn detect_service_platform() -> ServicePlatform {
+    if cfg!(target_os = "linux") {
+        ServicePlatform::LinuxSystemd
+    } else if cfg!(target_os = "macos") {
+        ServicePlatform::MacosLaunchd
+    } else if cfg!(target_os = "windows") {
+        ServicePlatform::WindowsTask
+    } else {
+        ServicePlatform::LinuxSystemd
+    }
+}
+
+fn resolve_joule_binary() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(which_joule)
+        .unwrap_or_else(|| "joule".into())
+}
+
+fn which_joule() -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join(if cfg!(windows) { "joule.exe" } else { "joule" });
+        if cand.is_file() {
+            return Some(cand.display().to_string());
+        }
+    }
+    None
+}
+
+/// Write + enable autostart for control, agent, optional tray (user session).
+fn run_service_install(
+    platform: &str,
+    account: &str,
+    control: &str,
+    api: &str,
+    with_tray: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let platform = if platform.trim().is_empty() {
+        detect_service_platform()
+    } else {
+        match platform.to_ascii_lowercase().as_str() {
+            "linux" | "systemd" => ServicePlatform::LinuxSystemd,
+            "macos" | "darwin" | "launchd" => ServicePlatform::MacosLaunchd,
+            "windows" | "win" | "task" => ServicePlatform::WindowsTask,
+            other => bail!("unknown platform {other}; use linux|macos|windows"),
+        }
+    };
+    let binary = resolve_joule_binary();
+    let kinds: Vec<ServiceKind> = if with_tray {
+        vec![ServiceKind::Control, ServiceKind::Agent, ServiceKind::Tray]
+    } else {
+        vec![ServiceKind::Control, ServiceKind::Agent]
+    };
+    println!("joule service install — platform={platform:?} binary={binary}");
+    for kind in kinds {
+        let path_s = default_unit_path(platform, kind);
+        let path = expand_user_path(&path_s);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        let spec = InstallSpec {
+            platform,
+            kind,
+            binary_path: binary.clone(),
+            control: control.into(),
+            account: account.into(),
+            api: api.into(),
+            api_key: None,
+            mem_mib: 8192,
+            user_unit: true,
+            description: match kind {
+                ServiceKind::Control => "joule local control plane".into(),
+                ServiceKind::Agent => "joule donor agent".into(),
+                ServiceKind::Tray => "joule status tray".into(),
+            },
+        };
+        match platform {
+            ServicePlatform::WindowsTask => {
+                let bytes = generate_windows_task_xml_file_bytes(&spec);
+                if dry_run {
+                    println!(
+                        "dry-run would write {} ({} bytes UTF-16)",
+                        path.display(),
+                        bytes.len()
+                    );
+                } else {
+                    std::fs::write(&path, &bytes)
+                        .with_context(|| format!("write {}", path.display()))?;
+                    println!("wrote {}", path.display());
+                }
+            }
+            _ => {
+                let body = generate_unit_body(&spec);
+                if dry_run {
+                    println!("dry-run would write {}", path.display());
+                } else {
+                    std::fs::write(&path, body.as_bytes())
+                        .with_context(|| format!("write {}", path.display()))?;
+                    println!("wrote {}", path.display());
+                }
+            }
+        }
+        let path_for_cmd = path.display().to_string();
+        for cmd in enable_commands(platform, kind, &path_for_cmd) {
+            if dry_run {
+                println!("dry-run: {cmd}");
+                continue;
+            }
+            println!("run: {cmd}");
+            let status = if cfg!(windows) {
+                std::process::Command::new("cmd")
+                    .args(["/C", &cmd])
+                    .status()
+            } else {
+                std::process::Command::new("sh").args(["-c", &cmd]).status()
+            };
+            match status {
+                Ok(s) if s.success() => println!("  OK {name}", name = unit_name(kind)),
+                Ok(s) => warn!(
+                    "command exited {:?}: {cmd} (you may need to run it manually)",
+                    s.code()
+                ),
+                Err(e) => warn!("could not run enable: {e} — run manually: {cmd}"),
+            }
+        }
+    }
+    println!();
+    println!("Autostart installed (user session). After reboot: control + agent come up.");
+    println!("Now (without reboot):  joule start");
+    println!("Or open GUI:           joule");
+    println!("Check:                 joule status --api {api}");
+    Ok(())
+}
+
+/// Local home pool: spawn control + agent, wait until HTTP answers.
+fn run_local_start(api: &str, control: &str, account: &str, autostart: bool) -> Result<()> {
+    if autostart {
+        let _ = run_service_install("", account, control, api, true, false);
+    }
+    let bin = resolve_joule_binary();
+    println!("starting local pool with {bin}");
+    // Control
+    let mut control_child = std::process::Command::new(&bin)
+        .args([
+            "control",
+            "--http-listen",
+            "127.0.0.1:7700",
+            "--agent-listen",
+            "127.0.0.1:7701",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn control from {bin}"))?;
+    // Wait for control listen (no reqwest::blocking inside tokio runtime).
+    let mut ok = false;
+    let probe: SocketAddr = "127.0.0.1:7700".parse().unwrap();
+    for i in 0..40 {
+        if std::net::TcpStream::connect_timeout(&probe, Duration::from_millis(150)).is_ok() {
+            ok = true;
+            println!("control ready on :7700 (try {i})");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    if !ok {
+        let _ = control_child.kill();
+        bail!("control did not become ready at {api} — is a port already taken?");
+    }
+    let agent = std::process::Command::new(&bin)
+        .args(["agent", "--control", control, "--account", account])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| "spawn agent")?;
+    // Detach: forget PIDs so they keep running after this CLI exits.
+    std::mem::forget(control_child);
+    std::mem::forget(agent);
+    println!("OK local pool started");
+    println!("  control HTTP {api}");
+    println!("  agent → {control} account={account}");
+    println!("Next:");
+    println!("  joule connect          # show Base URL + API key card");
+    println!("  joule chat --prompt hi");
+    println!("  joule                    # open GUI");
+    println!("  joule service install    # survive reboot");
+    Ok(())
+}
+
 fn run_service_install_help(platform: &str) -> Result<()> {
+    println!("{}", dumb_user_get_started());
     match platform.to_ascii_lowercase().as_str() {
         "linux" | "systemd" => {
             println!(
                 r#"Linux (user systemd — recommended with tray/GPU):
 
+  # Easiest:
+  joule service install
+
+  # Manual:
+  joule service generate --platform linux --kind control \
+    --binary "$(command -v joule)" \
+    --out ~/.config/systemd/user/joule-control.service
   joule service generate --platform linux --kind agent \
     --binary "$(command -v joule)" --account YOU --control 127.0.0.1:7701 \
     --out ~/.config/systemd/user/joule-agent.service
   systemctl --user daemon-reload
-  systemctl --user enable --now joule-agent.service
+  systemctl --user enable --now joule-control.service joule-agent.service
 
 Tray/monitor:
   joule service generate --platform linux --kind tray --out ~/.config/systemd/user/joule-tray.service

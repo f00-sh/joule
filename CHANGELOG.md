@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
+- **Stupid-user path:** `joule get-started`, `joule start` (local control+agent), `joule service install` (write+enable control/agent/tray autostart on linux|macos|windows), GUI **★ DO EVERYTHING** + first-open auto local pool, website/README hand-hold steps; `ServiceKind::Control`
 - **Real Kimi-K3 production pins:** `kimi-k3-shards` is **96** `moonshotai/Kimi-K3` safetensors with Git LFS content digests (`models/kimi-k3-shards.pins.json`); zero synthetic `a100…` placeholders on the production quant
 - **ADR 0003 + `ProductionEngine`:** CUDA driver FFI (`libcuda` `cuInit`/`cuDeviceGetCount`); agents wire production engine for infer/challenge; content-proof gates for K3 quant
 - **96-file layer map:** file↔layer helpers match production shard naming (`model-NNNNN-of-000096`); residual files 94–96 global

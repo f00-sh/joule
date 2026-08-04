@@ -228,15 +228,33 @@ burn = (prompt + 4×completion) × leecher_usage_bp
         Content is <code>sha256</code>-addressed and peer-seeded (or official sources).
         Seed with <code>joule seed-blob</code>.
       </div>
-      <pre class="cmd"># after install:
-joule version
-joule agent --account you --control 127.0.0.1:7701
+      <div class="callout">
+        <strong>Do this (no cleverness):</strong>
+        <ol>
+          <li>Install (above).</li>
+          <li>Run <code>joule</code> — GUI opens. Click <strong>★ DO EVERYTHING (local pool)</strong>.</li>
+          <li>Or: <code>joule start</code> then <code>joule connect</code> then <code>joule chat --prompt hi</code>.</li>
+          <li>Survive reboot: <code>joule service install</code> (control + agent + tray autostart).</li>
+          <li>Stuck: <code>joule get-started</code> prints the full checklist.</li>
+        </ol>
+        Live numbers on this page = real control planes announcing pool health
+        (backends, VRAM, service_live) — not browser FLOPs.
+      </div>
+      <pre class="cmd"># after install (happy path):
+joule get-started
+joule                 # GUI → ★ DO EVERYTHING
+joule service install # reboot-safe autostart
+joule connect
+joule chat --prompt "hi"
+
+# or headless:
+joule start
+joule status --api http://127.0.0.1:7700
 
 # developers (from source):
 git clone https://github.com/f00-sh/joule.git
 cd joule && cargo build --release -p joule
-./target/release/joule control
-./target/release/joule agent --account you --control 127.0.0.1:7701</pre>
+./target/release/joule start</pre>
       <p class="muted">MIT · f00-sh · native agent only · browser is this page, not pool FLOPs · <a href="download.html">download</a></p>
     </section>
 

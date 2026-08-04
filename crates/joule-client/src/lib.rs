@@ -7,8 +7,9 @@ mod service;
 mod status;
 
 pub use service::{
-    encode_utf16_le_bom, generate_launchd_plist, generate_systemd_unit, generate_windows_task_xml,
-    generate_windows_task_xml_file_bytes, InstallSpec, ServiceKind, ServicePlatform,
+    default_unit_path, dumb_user_get_started, enable_commands, encode_utf16_le_bom,
+    generate_launchd_plist, generate_systemd_unit, generate_unit_body, generate_windows_task_xml,
+    generate_windows_task_xml_file_bytes, unit_name, InstallSpec, ServiceKind, ServicePlatform,
 };
 pub use status::{
     format_monitor_dash, format_status_human, format_tray_tooltip, ClientStatus, ConnectionState,
