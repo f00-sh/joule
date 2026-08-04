@@ -211,7 +211,7 @@ No path checks the donor’s network type. If a plan is too slow in practice, op
 | **C6** | Challenges + economy | Mint/burn live; abuse path measured | **done** |
 | **C7** | Public alpha installers | External donors move the dashboard numbers | **done** (v0.1.13 assets + channels) |
 
-**Alpha closeout:** v0/alpha **cluster product software track is complete** at **0.1.13**. Permanent non-goals: multi-hundred-GB Kimi quality, GPU/FFI without ADR 0003+, cash/multi-model, f00 weight CDN.
+**Status honesty:** protocol/control/lab track shipped at **0.1.13+**. Production Kimi path: real **96-shard** MANIFEST pins + **ADR 0003** `ProductionEngine` (CUDA driver FFI). Full multi-TB residency and multi-node service-live still require fleet storage/VRAM — not a single small card. Permanent product-law non-goals: cash/multi-model, f00 weight CDN.
 
 ## 13. Key decisions
 

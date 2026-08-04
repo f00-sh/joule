@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-- **First-light challenges:** cold pool issues 64 MiB mem-hard credit when `verified==0` so stream slots unlock without waiting a multi-second 1 GiB proof on every start (peak credit remains `CHALLENGE_CREDIT_MIB` thereafter)
-- **Agent prepare without pool_ready:** production agents load lab/available quants for local mem even when the pool is below the 64 GiB / 3-backend Kimi milestone (full Kimi still gated by digests/service_live)
-- **`scripts/production-smoke.sh`:** release-binary smoke — control + 2 agents → verified capacity → freeloader 401/403 → contributor `joule-tensor` chat → free==total + tokens/s samples
+### Added
+- **Real Kimi-K3 production pins:** `kimi-k3-shards` is **96** `moonshotai/Kimi-K3` safetensors with Git LFS content digests (`models/kimi-k3-shards.pins.json`); zero synthetic `a100…` placeholders on the production quant
+- **ADR 0003 + `ProductionEngine`:** CUDA driver FFI (`libcuda` `cuInit`/`cuDeviceGetCount`); agents wire production engine for infer/challenge; content-proof gates for K3 quant
+- **96-file layer map:** file↔layer helpers match production shard naming (`model-NNNNN-of-000096`); residual files 94–96 global
+- **Fleet honesty helper:** `full_k3_service_fleet_ok` — full K3 service requires ≥64 GiB + ≥3 backends
 
-<!-- Post-alpha (full multi-hundred-GB Kimi, GPU ADR 0003+) remains out of band. -->
+### Fixed
+- **First-light challenges:** cold pool issues 64 MiB mem-hard credit when `verified==0`
+- **Agent prepare without pool_ready:** lab/available quants load under Kimi milestone
+- **`scripts/production-smoke.sh`:** release-binary lab path smoke (not a substitute for full K3 residency)
+
+### Changed
+- Docs/status: no longer present “alpha software track closed” as the finished production Kimi product
 
 ## [0.1.13] — 2026-08-04
 

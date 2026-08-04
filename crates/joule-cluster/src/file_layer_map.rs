@@ -1,12 +1,16 @@
 //! Executable Kimi-K3 file index ↔ transformer layer map (design k3-file-layer-map-v0).
 //!
-//! 16 weight files, 93 layers. Pure math — no I/O.
+//! Production pin: **96** weight files (`model-NNNNN-of-000096.safetensors`) from
+//! moonshotai/Kimi-K3, **93** transformer layers. Pure math — no I/O.
+//!
+//! Files 1..=93 map 1:1 to layers 0..=92. Files 94..=96 are residual/global shards
+//! (embeddings / lm_head / multimodal packing) preferred for every band.
 
 /// Design constants from offline K3 meta pin + MANIFEST shard count.
 pub const K3_MODEL_LAYERS: u32 = 93;
-pub const K3_FILE_COUNT: u32 = 16;
+pub const K3_FILE_COUNT: u32 = 96;
 
-/// Inclusive layer range for a 1-based file index (1..=16).
+/// Inclusive layer range for a 1-based file index (1..=96).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayerRange {
     pub start: u32,
@@ -29,25 +33,32 @@ impl LayerRange {
 
 /// Layers covered by file index `i` (1-based). Err if out of range.
 ///
-/// First 15 files span 6 layers each; file 16 spans 3 (15*6+3=93).
+/// - Files `1..=93`: single layer `i-1`
+/// - Files `94..=96`: residual global weights attached to last layer for fetch preference
 pub fn layers_for_file(file_index_1based: u32) -> Result<LayerRange, String> {
     if file_index_1based == 0 || file_index_1based > K3_FILE_COUNT {
         return Err(format!(
             "file index {file_index_1based} out of 1..={K3_FILE_COUNT}"
         ));
     }
-    if file_index_1based <= 15 {
-        let start = (file_index_1based - 1) * 6;
-        Ok(LayerRange {
-            start,
-            end: start + 5,
-        })
+    if file_index_1based <= K3_MODEL_LAYERS {
+        let l = file_index_1based - 1;
+        Ok(LayerRange { start: l, end: l })
     } else {
-        Ok(LayerRange { start: 90, end: 92 })
+        Ok(LayerRange {
+            start: K3_MODEL_LAYERS - 1,
+            end: K3_MODEL_LAYERS - 1,
+        })
     }
 }
 
+/// True when this file is residual/global (always preferred for any band).
+pub fn is_global_weight_file(file_index_1based: u32) -> bool {
+    file_index_1based > K3_MODEL_LAYERS && file_index_1based <= K3_FILE_COUNT
+}
+
 /// 1-based file indices whose layer ranges intersect `[layer_start, layer_end]`.
+/// Residual files 94..=96 are always included (global weights).
 pub fn files_intersecting_layers(layer_start: u32, layer_end: u32) -> Result<Vec<u32>, String> {
     if layer_end < layer_start {
         return Err("layer_end < layer_start".into());
@@ -61,6 +72,10 @@ pub fn files_intersecting_layers(layer_start: u32, layer_end: u32) -> Result<Vec
     };
     let mut out = Vec::new();
     for i in 1..=K3_FILE_COUNT {
+        if is_global_weight_file(i) {
+            out.push(i);
+            continue;
+        }
         let r = layers_for_file(i)?;
         if r.intersects(&want) {
             out.push(i);
@@ -70,21 +85,16 @@ pub fn files_intersecting_layers(layer_start: u32, layer_end: u32) -> Result<Vec
 }
 
 /// Weight file basenames preferred for a donor owning layer band `[Ls, Le]`.
-///
-/// **Fetch preference call site:** agents / model_update order BlobWant digests
-/// with these paths first so a shard with layers `[Ls,Le]` pulls intersecting
-/// weight files before the rest of the quant.
 pub fn preferred_weight_files(layer_start: u32, layer_end: u32) -> Result<Vec<String>, String> {
     let idx = files_intersecting_layers(layer_start, layer_end)?;
     Ok(idx
         .into_iter()
-        .map(|i| format!("model-{i:05}-of-{K3_FILE_COUNT:05}.safetensors"))
+        // HF Kimi-K3 names: model-00001-of-000096.safetensors (5-digit index, 6-digit total).
+        .map(|i| format!("model-{i:05}-of-{K3_FILE_COUNT:06}.safetensors"))
         .collect())
 }
 
 /// Order `(path, sha256)` pairs for fetch: paths intersecting `[Ls,Le]` first.
-///
-/// Used by placement-aware fetch preference (model_update FetchDigests order).
 pub fn order_digests_for_layer_fetch(
     layer_start: u32,
     layer_end: u32,
@@ -102,26 +112,24 @@ pub fn order_digests_for_layer_fetch(
         }
     }
     preferred_digests.extend(rest);
-    // stable dedup
     let mut seen = std::collections::HashSet::new();
     preferred_digests.retain(|d| seen.insert(d.clone()));
     Ok(preferred_digests)
 }
 
-/// Infer K3 layer range from a weight file basename (`model-NNNNN-of-00016.safetensors`).
+/// Infer K3 layer range from a weight file basename (`model-NNNNN-of-000096.safetensors`).
 pub fn layers_for_weight_path(path: &str) -> Option<LayerRange> {
     let base = path.rsplit('/').next().unwrap_or(path);
-    // model-00008-of-00016.safetensors
     let rest = base.strip_prefix("model-")?;
     let idx_str = rest.split('-').next()?;
     let idx: u32 = idx_str.parse().ok()?;
     layers_for_file(idx).ok()
 }
 
-/// Total layer coverage check: union of all files is 0..92 contiguous, no gaps.
+/// Layer files 1..=93 cover 0..92 exactly once; residual 94..=96 may re-touch last layer.
 pub fn map_covers_all_layers() -> bool {
     let mut covered = [false; K3_MODEL_LAYERS as usize];
-    for i in 1..=K3_FILE_COUNT {
+    for i in 1..=K3_MODEL_LAYERS {
         let Ok(r) = layers_for_file(i) else {
             return false;
         };
@@ -130,7 +138,7 @@ pub fn map_covers_all_layers() -> bool {
                 return false;
             }
             if covered[l as usize] {
-                return false; // overlap
+                return false;
             }
             covered[l as usize] = true;
         }
@@ -143,52 +151,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn design_table_file_1_and_16() {
+    fn design_table_file_1_and_93_and_residuals() {
         let f1 = layers_for_file(1).unwrap();
-        assert_eq!(f1, LayerRange { start: 0, end: 5 });
-        assert_eq!(f1.span(), 6);
-        let f16 = layers_for_file(16).unwrap();
-        assert_eq!(f16, LayerRange { start: 90, end: 92 });
-        assert_eq!(f16.span(), 3);
+        assert_eq!(f1, LayerRange { start: 0, end: 0 });
+        let f93 = layers_for_file(93).unwrap();
+        assert_eq!(f93, LayerRange { start: 92, end: 92 });
         assert!(map_covers_all_layers());
+        assert!(is_global_weight_file(96));
+        assert!(!is_global_weight_file(1));
+        assert_eq!(K3_FILE_COUNT, 96);
         let mut total = 0u32;
-        for i in 1..=16 {
+        for i in 1..=93 {
             total += layers_for_file(i).unwrap().span();
         }
         assert_eq!(total, 93);
-        eprintln!("OBSERVE file-layer-map: file1=0-5 file16=90-92 total_span=93");
+        eprintln!("OBSERVE file-layer-map: files=96 layers=93 residual=94..96");
     }
 
     #[test]
     fn band_40_50_intersects_expected_files() {
-        // 40-45 → file 8 (42-47), 46-47 file 8, 48-50 file 9 (48-53)
         let files = files_intersecting_layers(40, 50).unwrap();
-        assert!(files.contains(&7) || files.contains(&8)); // 36-41 and 42-47
-        assert!(files.contains(&8));
-        assert!(files.contains(&9));
+        // layer files 41..=51 (1-based) + residual 94..96
+        assert!(files.contains(&41)); // layer 40
+        assert!(files.contains(&51)); // layer 50
+        assert!(files.contains(&96));
         let prefs = preferred_weight_files(40, 50).unwrap();
-        assert!(prefs.iter().any(|p| p.contains("00008")));
-        assert!(prefs.iter().any(|p| p.contains("00009")));
-        eprintln!("OBSERVE file-layer-map: layers 40-50 → files {files:?} prefs={prefs:?}");
+        assert!(prefs.iter().any(|p| p.contains("00041")));
+        assert!(prefs.iter().any(|p| p.contains("00096")));
+        eprintln!(
+            "OBSERVE file-layer-map: layers 40-50 → n={} prefs_head={}",
+            files.len(),
+            prefs[0]
+        );
     }
 
     #[test]
     fn fetch_preference_orders_intersecting_files_first() {
         let pairs = vec![
-            ("model-00001-of-00016.safetensors".into(), "aa".repeat(32)),
-            ("model-00008-of-00016.safetensors".into(), "bb".repeat(32)),
-            ("model-00009-of-00016.safetensors".into(), "cc".repeat(32)),
-            ("model-00016-of-00016.safetensors".into(), "dd".repeat(32)),
+            ("model-00001-of-000096.safetensors".into(), "aa".repeat(32)),
+            ("model-00041-of-000096.safetensors".into(), "bb".repeat(32)),
+            ("model-00051-of-000096.safetensors".into(), "cc".repeat(32)),
+            ("model-00002-of-000096.safetensors".into(), "dd".repeat(32)),
         ];
-        // Donor owns layers 40-50 → prefer files 7/8/9; 8 and 9 must lead.
+        // Donor owns layers 40-50 → prefer file 41 and 51 among these.
         let ordered = order_digests_for_layer_fetch(40, 50, &pairs).unwrap();
         assert_eq!(ordered.len(), 4);
         assert_eq!(ordered[0], "bb".repeat(32));
         assert_eq!(ordered[1], "cc".repeat(32));
-        assert!(ordered[2..].contains(&"aa".repeat(32)));
-        assert!(ordered[2..].contains(&"dd".repeat(32)));
-        let r = layers_for_weight_path("model-00001-of-00016.safetensors").unwrap();
-        assert_eq!(r, LayerRange { start: 0, end: 5 });
+        let r = layers_for_weight_path("model-00001-of-000096.safetensors").unwrap();
+        assert_eq!(r, LayerRange { start: 0, end: 0 });
         eprintln!("OBSERVE file-layer-map fetch preference: ordered={ordered:?}");
     }
 }

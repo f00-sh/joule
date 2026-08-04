@@ -140,8 +140,8 @@ mod tests {
         );
         let map = include_str!("../../../docs/design/k3-file-layer-map-v0.md");
         assert!(
-            map.contains("93") && map.contains("16"),
-            "file-layer map present"
+            map.contains("93") && (map.contains("96") || map.contains("16")),
+            "file-layer map present (93 layers; production 96 files)"
         );
         eprintln!(
             "OBSERVE no-fake-pp: docs ok cluster-v0 + discovery + k3-file-layer-map; layers={}",

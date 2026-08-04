@@ -5,6 +5,7 @@
 //! RAM. Service-live is a separate control flag after the mesh has loaded.
 
 mod decode;
+mod gpu_engine;
 mod k3_meta;
 mod k3_pipeline;
 mod load;
@@ -17,6 +18,7 @@ mod weights;
 pub use decode::{
     generate as generate_from_loaded, generate_from_activation_state, generate_tail_from_stage,
 };
+pub use gpu_engine::{full_k3_service_fleet_ok, probe_cuda_devices, CudaProbe, ProductionEngine};
 pub use k3_meta::{
     config_sha256_hex, manifest_k3_config_digest, num_hidden_layers_from_config_json,
     placement_model_layers, verified_k3_model_layers, verified_k3_model_layers_from,
@@ -511,9 +513,17 @@ mod tests {
         let store = WeightsStore::new(&dir);
         assert!(
             !digests_verified_for_quant(&store, &spec.id, k3),
-            "kimi-k3-shards must not unlock digests"
+            "kimi-k3-shards must not verify digests without staged bytes"
         );
-        assert!(!quant_can_unlock_service_digests(k3));
+        // Real LFS pins may unlock when content is present; empty store stays false.
+        assert!(
+            quant_can_unlock_service_digests(k3),
+            "real production pins are eligible to unlock"
+        );
+        assert!(k3
+            .files
+            .iter()
+            .all(|f| !is_synthetic_placeholder_digest(&f.sha256)));
         // Same quant digests_verified_for_primary_lab uses (pick_quant 8192 → lab-large).
         let lab = spec.pick_quant(8192).expect("lab-large");
         assert!(
@@ -528,10 +538,10 @@ mod tests {
         );
         assert!(digests_verified_for_primary_lab(&store).unwrap());
         eprintln!(
-            "OBSERVE k3-fail-closed: k3_unlock={} lab={} digests={} primary_lab={}",
+            "OBSERVE k3-content-gate: k3_can_unlock={} k3_verified={} lab={} primary_lab={}",
             quant_can_unlock_service_digests(k3),
+            digests_verified_for_quant(&store, &spec.id, k3),
             lab.id,
-            digests_verified_for_quant(&store, &spec.id, lab),
             digests_verified_for_primary_lab(&store).unwrap()
         );
         std::env::remove_var("JOULE_BLOBS_DIR");
@@ -555,7 +565,7 @@ mod tests {
             is_tail: false,
             require_upstream: false,
             require_band_weights: true,
-            required_weight_files: vec!["model-00001-of-00016.safetensors".into()],
+            required_weight_files: vec!["model-00001-of-000096.safetensors".into()],
         };
         let err = eng.stage_layers(req.clone()).await.unwrap_err();
         assert!(
@@ -571,7 +581,7 @@ mod tests {
         let spec = m.model("kimi-open").unwrap();
         let md = store.model_dir(&spec.id, "kimi-k3-ce-band");
         std::fs::create_dir_all(&md).unwrap();
-        let path = md.join("model-00001-of-00016.safetensors");
+        let path = md.join("model-00001-of-000096.safetensors");
         load::write_tiny_safetensors_fixture(&path).unwrap();
         let bytes = std::fs::read(&path).unwrap();
         let hash = hex::encode(Sha256::digest(&bytes));
@@ -580,7 +590,7 @@ mod tests {
             min_node_vram_mib: 256,
             approx_file_mib: 1,
             files: vec![WeightFile {
-                path: "model-00001-of-00016.safetensors".into(),
+                path: "model-00001-of-000096.safetensors".into(),
                 sha256: hash,
                 url: "peer://1".into(),
                 size_bytes: bytes.len() as u64,
@@ -599,7 +609,7 @@ mod tests {
         );
         assert!(!out.activation.is_empty());
         // Mutate staged file: diagonal scale 1.0 → 2.5 (real f32 matmul difference).
-        let path2 = md.join("model-00001-of-00016.safetensors");
+        let path2 = md.join("model-00001-of-000096.safetensors");
         {
             use safetensors::tensor::{serialize, TensorView};
             use safetensors::Dtype;
@@ -623,7 +633,7 @@ mod tests {
                 min_node_vram_mib: 256,
                 approx_file_mib: 1,
                 files: vec![WeightFile {
-                    path: "model-00001-of-00016.safetensors".into(),
+                    path: "model-00001-of-000096.safetensors".into(),
                     sha256: hash,
                     url: "peer://1".into(),
                     size_bytes: bytes.len() as u64,
@@ -719,8 +729,8 @@ mod tests {
         // Multi-file K3-named stand-ins (not whole quant on every donor).
         let model_dir = store.model_dir(&spec.id, "kimi-k3-band-only");
         std::fs::create_dir_all(&model_dir).unwrap();
-        let f1 = model_dir.join("model-00001-of-00016.safetensors");
-        let f2 = model_dir.join("model-00002-of-00016.safetensors");
+        let f1 = model_dir.join("model-00001-of-000096.safetensors");
+        let f2 = model_dir.join("model-00002-of-000096.safetensors");
         write_tiny_safetensors_fixture(&f1).unwrap();
         // Distinct payload so file2 is not restored from file1's content-addressed blob.
         {
@@ -750,13 +760,13 @@ mod tests {
             approx_file_mib: 1,
             files: vec![
                 WeightFile {
-                    path: "model-00001-of-00016.safetensors".into(),
+                    path: "model-00001-of-000096.safetensors".into(),
                     sha256: h1.clone(),
                     url: format!("peer://k3/{h1}"),
                     size_bytes: std::fs::metadata(&f1).unwrap().len(),
                 },
                 WeightFile {
-                    path: "model-00002-of-00016.safetensors".into(),
+                    path: "model-00002-of-000096.safetensors".into(),
                     sha256: h2.clone(),
                     url: format!("peer://k3/{h2}"),
                     size_bytes: std::fs::metadata(&f2).unwrap().len(),
@@ -764,12 +774,12 @@ mod tests {
             ],
         };
 
-        // Only file1 on disk initially → band 0–5 ok; band 6–11 fail closed.
+        // Only file1 on disk → band 0–0 ok; band 1–1 needs file2.
         std::fs::remove_file(&f2).unwrap();
         let eng = ClusterEngine::new();
         eng.load_plan(&demo_plan()).await.unwrap();
-        let report = prepare_and_install_for_band(&store, &eng, spec, &quant, 0, 5)
-            .expect("band 0-5 install");
+        let report = prepare_and_install_for_band(&store, &eng, spec, &quant, 0, 0)
+            .expect("band 0-0 install");
         let basenames = eng
             .loaded_report()
             .map(|r| {
@@ -779,30 +789,30 @@ mod tests {
             .unwrap_or_default();
         let lm_names = {
             // Re-load to assert basenames ⊆ preferred
-            let lm = load_model_for_band(&store, spec, &quant, 0, 5).unwrap();
+            let lm = load_model_for_band(&store, spec, &quant, 0, 0).unwrap();
             lm.loaded_file_basenames.clone()
         };
         assert_eq!(
             lm_names,
-            vec!["model-00001-of-00016.safetensors".to_string()]
+            vec!["model-00001-of-000096.safetensors".to_string()]
         );
         assert!(
             !lm_names
                 .iter()
-                .any(|b| b == "model-00002-of-00016.safetensors"),
-            "must not load file2 for band 0-5"
+                .any(|b| b == "model-00002-of-000096.safetensors"),
+            "must not load file2 for band 0-0"
         );
         let out = eng
             .stage_layers(StageRequest {
                 model: CLUSTER_MODEL.into(),
                 prompt: "band-only".into(),
                 layer_start: 0,
-                layer_end: 5,
+                layer_end: 0,
                 upstream: vec![],
                 is_tail: false,
                 require_upstream: false,
                 require_band_weights: true,
-                required_weight_files: WeightsStore::required_weight_files_for_band(&quant, 0, 5)
+                required_weight_files: WeightsStore::required_weight_files_for_band(&quant, 0, 0)
                     .unwrap(),
             })
             .await
@@ -813,8 +823,8 @@ mod tests {
             &out.activation[..4.min(out.activation.len())]
         );
         assert!(
-            prepare_and_install_for_band(&store, &eng, spec, &quant, 6, 11).is_err(),
-            "band 6-11 must fail closed without file2"
+            prepare_and_install_for_band(&store, &eng, spec, &quant, 1, 1).is_err(),
+            "band 1-1 must fail closed without file2"
         );
         eprintln!(
             "OBSERVE band-only-load: basenames={lm_names:?} bytes={} stage_magic={:?} msg={basenames}",

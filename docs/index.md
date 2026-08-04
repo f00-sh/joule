@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| Status | **0.1.13 alpha complete** — cluster product software track closed |
+| Status | **Production path (0.1.13+)** — real Kimi-K3 pins + ADR 0003 CUDA engine; full TB needs fleet |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
 | License | MIT |
 

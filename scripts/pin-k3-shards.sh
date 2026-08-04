@@ -2,10 +2,10 @@
 # pin-k3-shards.sh — replace MANIFEST kimi-k3-shards digests with real file hashes.
 #
 # Usage:
-#   scripts/pin-k3-shards.sh /path/to/dir/with/model-0000N-of-00016.safetensors
+#   scripts/pin-k3-shards.sh /path/to/dir/with/model-0000N-of-000096.safetensors
 #
-# Never hosts on f00. After pin, stage/seed blobs so digests_verified can unlock
-# (synthetic a100… placeholders refuse unlock).
+# Never hosts on f00. After pin, stage/seed blobs so digests_verified can unlock.
+# Production pins also live in models/kimi-k3-shards.pins.json (HF LFS oids).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MANIFEST="${ROOT}/models/MANIFEST.json"
@@ -16,21 +16,8 @@ if [[ -z "$DIR" || ! -d "$DIR" ]]; then
   exit 2
 fi
 
-if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
-  echo "need sha256sum or shasum" >&2
-  exit 1
-fi
-
-hash_file() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | awk '{print $1}'
-  else
-    shasum -a 256 "$1" | awk '{print $1}'
-  fi
-}
-
 python3 - "$MANIFEST" "$DIR" <<'PY'
-import json, os, sys, hashlib, subprocess
+import json, os, sys, hashlib
 
 manifest_path, shard_dir = sys.argv[1], sys.argv[2]
 with open(manifest_path) as f:
@@ -58,7 +45,6 @@ for model in m.get("models", []):
             old = file.get("sha256", "")
             file["sha256"] = digest
             file["size_bytes"] = size
-            # Prefer peer:// content-addressed name; keep peer scheme.
             if not file.get("url", "").startswith("peer://"):
                 file["url"] = f"peer://kimi-open/k3/{os.path.basename(file['path'])}"
             print(f"{file['path']}: {old[:12]}… → {digest[:12]}… ({size} bytes)")

@@ -151,10 +151,9 @@ impl WeightsStore {
         }
         let k3_class = quant.id.contains("k3")
             || quant.files.len() >= joule_cluster::K3_FILE_COUNT as usize
-            || quant
-                .files
-                .iter()
-                .any(|f| f.path.contains("model-00001-of-00016"));
+            || quant.files.iter().any(|f| {
+                f.path.contains("model-00001-of-000096") || f.path.contains("model-00001-of-00016")
+            });
         if k3_class {
             return Ok(preferred);
         }
@@ -755,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_k3_shards_never_unlock_digests_without_content_path() {
+    fn kimi_k3_shards_real_pins_unlock_only_with_content() {
         let m = ManifestFile::load_default().unwrap();
         let spec = m.model("kimi-open").unwrap();
         let k3 = spec
@@ -764,27 +763,33 @@ mod tests {
             .iter()
             .find(|q| q.id == "kimi-k3-shards")
             .expect("kimi-k3-shards");
-        assert!(!quant_can_unlock_service_digests(k3));
-        assert!(k3
-            .files
-            .iter()
-            .all(|f| is_synthetic_placeholder_digest(&f.sha256)));
+        // Production pins are real LFS digests (not a100… placeholders).
+        assert!(
+            k3.files
+                .iter()
+                .all(|f| !is_synthetic_placeholder_digest(&f.sha256)),
+            "production quant must not use synthetic placeholders"
+        );
+        assert!(
+            quant_can_unlock_service_digests(k3),
+            "real pins may unlock when content matches"
+        );
+        assert_eq!(k3.files.len(), 96);
         let dir = std::env::temp_dir().join(format!("joule-k3-empty-{}", Uuid::new_v4()));
         let _ = fs::remove_dir_all(&dir);
         let store = WeightsStore::new(&dir);
         assert!(
             !digests_verified_for_quant(&store, &spec.id, k3),
-            "empty cache: k3-shards digests must stay false"
+            "empty cache: k3-shards digests must stay false without bytes"
         );
-        // Even if placeholder digests somehow appear complete, unlock is refused.
         assert!(!store.digests_verified(&spec.id, k3));
         let lab = spec.pick_quant(256).expect("lab-tiny");
         assert!(is_lab_fixture_quant(lab));
         assert!(quant_can_unlock_service_digests(lab));
         eprintln!(
-            "OBSERVE k3-fail-closed: quant={} unlock={} digests_verified={}",
+            "OBSERVE k3-real-pins-fail-closed-without-bytes: quant={} files={} digests_verified={}",
             k3.id,
-            quant_can_unlock_service_digests(k3),
+            k3.files.len(),
             store.digests_verified(&spec.id, k3)
         );
         let _ = fs::remove_dir_all(&dir);
@@ -801,9 +806,13 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let store = WeightsStore::new(&root);
         let preferred = joule_cluster::preferred_weight_files(40, 50).unwrap();
-        assert!(preferred.iter().any(|p| p.contains("00008")));
-        assert!(preferred.iter().any(|p| p.contains("00009")));
-        eprintln!("OBSERVE band-weights: layers 40-50 preferred={preferred:?}");
+        // 96-file map: layer 40 → file 41, layer 50 → file 51 (+ residual globals).
+        assert!(preferred.iter().any(|p| p.contains("00041")));
+        assert!(preferred.iter().any(|p| p.contains("00051")));
+        eprintln!(
+            "OBSERVE band-weights: layers 40-50 preferred_n={}",
+            preferred.len()
+        );
 
         let mut files = Vec::new();
         for name in &preferred {

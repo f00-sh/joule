@@ -6,7 +6,7 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 
 | | |
 |---|---|
-| Status | **0.1.13 alpha complete** — cluster product software track closed (lab tensor path; not full Kimi quality) |
+| Status | **Production path (0.1.13+)** — real Kimi-K3 pins + CUDA `ProductionEngine` (ADR 0003); full TB weights need fleet storage |
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |

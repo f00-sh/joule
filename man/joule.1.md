@@ -40,11 +40,13 @@ pool is free of cash charges. No contribution ⇒ no API.
 
 How a node reaches the internet is irrelevant. This is not a mesh product.
 
-Version **0.1.13** loads **lab-tiny / lab-mid / lab-large** tensors when seeded,
-runs multi-donor sequential PP with weight-backed stages, measures **tokens/s**
-on live capacity, and **replans** control/mesh infer after a confirmed shard
-dies mid-flight (or fail-closed with free leases). Full Kimi remains gated on
-pool VRAM. Donors control contribution locally
+Version **0.1.13+** loads lab fixtures for protocol CI, pins production
+**moonshotai/Kimi-K3** digests (`kimi-k3-shards`, 96 files), and runs agents on
+**ProductionEngine** (CUDA driver FFI, ADR 0003) with content-proof weight gates.
+Multi-donor sequential PP, measured **tokens/s**, and replan-on-shard-death are
+shipped. Full multi-TB K3 residency and production service-live need fleet
+aggregate VRAM (≥64 GiB, ≥3 backends) and staged bytes matching real digests —
+not a single small card alone. Donors control contribution locally
 (`joule donor pause|set-cap|set-schedule|set-sensors`). No contribution ⇒ no API.
 After an agent Welcome, **`joule connect`** shows Base URL + full pool-issued
 `joule_…` API key + model `kimi-open` for Cursor / other OpenAI clients. Weights

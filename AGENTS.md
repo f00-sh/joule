@@ -9,18 +9,21 @@
 | Domain | joule.f00.sh |
 | License | MIT |
 | Language | **Rust** (workspace; strict purity for first-party code) |
-| Status | **0.1.13 alpha complete** — v0 cluster product software track closed |
+| Status | **Production path in progress (0.1.13+)** — real K3 pins + ADR 0003 CUDA engine; full TB residency needs fleet storage |
 
 **One-liner:** Distributed internet-wide supercomputer cluster — pool idle GPUs into open-weight AI inference (Kimi-class).
 
-### Alpha track complete (v0 / 0.1.13)
+### Production vs lab (honesty)
 
-The **cluster product software track is complete** at SemVer **0.1.13**: control + agent protocol, multi-donor PP with lab tensor engines, contribution gate, leases, capacity + measured tokens/s, replan on shard death, installers/channels.
+| Layer | State |
+|-------|--------|
+| Protocol / control / agents / economy / installers | Shipped (0.1.13+) |
+| Lab fixtures (`lab-*`) | CI / protocol tests only — **not** production Kimi quality |
+| Production quant `kimi-k3-shards` | **96** real `moonshotai/Kimi-K3` LFS digests in MANIFEST; unlock only with matching staged bytes |
+| GPU/FFI engine | **ADR 0003** `ProductionEngine` (CUDA driver `libcuda` FFI) wired in agents |
+| Full multi-TB residency + multi-node service-live | Requires fleet disk/VRAM (`≥64 GiB` aggregate, `≥3` backends); not claimable on a single 8 GiB card alone |
 
-**Permanent post-alpha non-goals (not a software backlog for this track):**
-- Full multi-hundred-GB Kimi / Moonshot answer quality (lab fixtures only for alpha)
-- GPU/FFI inference without **ADR 0003+** + AGENTS purity update
-- Cash/fiat, multi-model, f00 weight CDN hosting, global fleet ops as product gates
+**Still out of product laws:** cash/fiat, multi-model, f00 weight CDN hosting.
 
 ## Product laws
 
@@ -42,14 +45,18 @@ The **cluster product software track is complete** at SemVer **0.1.13**: control
 
 - Declared language: **Rust**. Style: `~/.grok/references/coding-standards/rust.md`.
 - Protocol, cluster, ledger, CLI: pure Rust + crates.io Rust deps only.
-- Inference backends implement `joule_runtime::Engine`. Prefer pure-Rust engines
-  (`StubEngine`, `ClusterEngine`, pure-Rust stage/decode).
+- Inference backends implement `joule_runtime::Engine`. Lab/CI: pure-Rust
+  (`StubEngine`, `ClusterEngine`, stage/decode).
 - **Any FFI / non-Rust runtime** requires an ADR under `docs/adr/` and an explicit note here before merge.
-- **GPU/FFI engine gate:** [docs/adr/0001-gpu-ffi-engine.md](docs/adr/0001-gpu-ffi-engine.md)
-  — pure-Rust default; no GPU/FFI backend ships without a follow-on ADR + this note updated.
-- **Alpha decision (ADR 0002):** pure-Rust remains acceptable for public alpha
+- **GPU/FFI engine gate:** [docs/adr/0001-gpu-ffi-engine.md](docs/adr/0001-gpu-ffi-engine.md).
+- **Alpha default (ADR 0002):** pure-Rust lab path for protocol CI
   ([docs/adr/0002-pure-rust-alpha-default.md](docs/adr/0002-pure-rust-alpha-default.md)).
-  A GPU backend needs **ADR 0003+** before merge — not stealth FFI.
+- **Production exception (ADR 0003 — accepted):**
+  [docs/adr/0003-cuda-production-engine.md](docs/adr/0003-cuda-production-engine.md) —
+  `ProductionEngine` dynamically loads NVIDIA **CUDA driver API** (`libcuda.so`:
+  `cuInit`, `cuDeviceGetCount`). No static CUDA toolkit link; no f00-hosted
+  proprietary blobs. Agents wire `ProductionEngine` for production infer/challenge;
+  weight residency remains content-addressed peer seed.
 
 ## Workspace
 
@@ -58,7 +65,7 @@ crates/joule             CLI binary (+ status/monitor/tray/service)
 crates/joule-client      shared ClientStatus + OS service unit generation
 crates/joule-proto       wire types / ClusterCapacity / plans
 crates/joule-cluster     membership + capacity + placement
-crates/joule-runtime     Engine trait + ClusterEngine + StubEngine
+crates/joule-runtime     Engine trait + ProductionEngine (ADR 0003) + ClusterEngine + StubEngine
 crates/joule-ledger      millijoule accounting
 crates/joule-control     control plane (agents + HTTP API)
 ```

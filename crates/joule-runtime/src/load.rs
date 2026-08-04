@@ -390,8 +390,8 @@ mod tests {
 
         let model_dir = store.model_dir(&spec.id, "kimi-k3-band-test");
         fs::create_dir_all(&model_dir).unwrap();
-        let f1 = model_dir.join("model-00001-of-00016.safetensors");
-        let f2 = model_dir.join("model-00002-of-00016.safetensors");
+        let f1 = model_dir.join("model-00001-of-000096.safetensors");
+        let f2 = model_dir.join("model-00002-of-000096.safetensors");
         write_tiny_safetensors_fixture(&f1).unwrap();
         write_tiny_safetensors_fixture(&f2).unwrap();
         let h1 = {
@@ -410,29 +410,29 @@ mod tests {
             approx_file_mib: 1,
             files: vec![
                 WeightFile {
-                    path: "model-00001-of-00016.safetensors".into(),
+                    path: "model-00001-of-000096.safetensors".into(),
                     sha256: h1,
                     url: "peer://k3/1".into(),
                     size_bytes: fs::metadata(&f1).unwrap().len(),
                 },
                 WeightFile {
-                    path: "model-00002-of-00016.safetensors".into(),
+                    path: "model-00002-of-000096.safetensors".into(),
                     sha256: h2,
                     url: "peer://k3/2".into(),
                     size_bytes: fs::metadata(&f2).unwrap().len(),
                 },
             ],
         };
-        // Remove file 2 → band 6-11 fails; 0-5 (file 1) ready.
+        // Remove file 2 → band 1-1 fails; band 0-0 (file1 only) ready.
         fs::remove_file(&f2).unwrap();
-        assert!(store.band_files_ready(&spec.id, &quant, 0, 5).is_ok());
-        assert!(store.band_files_ready(&spec.id, &quant, 6, 11).is_err());
-        let loaded = load_model_for_band(&store, spec, &quant, 0, 5).unwrap();
+        assert!(store.band_files_ready(&spec.id, &quant, 0, 0).is_ok());
+        assert!(store.band_files_ready(&spec.id, &quant, 1, 1).is_err());
+        let loaded = load_model_for_band(&store, spec, &quant, 0, 0).unwrap();
         assert_eq!(
             loaded.loaded_file_basenames,
-            vec!["model-00001-of-00016.safetensors"]
+            vec!["model-00001-of-000096.safetensors"]
         );
-        assert!(load_model_for_band(&store, spec, &quant, 6, 11).is_err());
+        assert!(load_model_for_band(&store, spec, &quant, 1, 1).is_err());
         eprintln!(
             "OBSERVE band-load: ready_0_5 basenames={:?} bytes={}",
             loaded.loaded_file_basenames, loaded.bytes_resident

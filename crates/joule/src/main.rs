@@ -28,7 +28,8 @@ use joule_proto::{
 use joule_runtime::{
     apply_staged, load_model, match_target, parse_software_update, prepare_and_install,
     prepare_and_install_for_band, read_stage, readiness_for_pool_ex, stage_blob, ClusterEngine,
-    Engine, InferRequest, ManifestFile, RuntimeFlags, SoftwareTarget, StubEngine, WeightsStore,
+    Engine, InferRequest, ManifestFile, ProductionEngine, RuntimeFlags, SoftwareTarget, StubEngine,
+    WeightsStore,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1372,8 +1373,17 @@ async fn run_agent(
     let caps = NodeCaps::for_cluster(device, claim_mib, throughput_class);
     let mem_mib = claim_mib;
 
-    // Shared engine for control agent path + peer-direct InferRequest.
-    let shared_engine = std::sync::Arc::new(ClusterEngine::new());
+    // ADR 0003: production agents use ProductionEngine (CUDA driver FFI + content-proof path).
+    // Weight residency is shared via ProductionEngine::cluster_arc() for prepare/peer paths.
+    let production_engine = std::sync::Arc::new(ProductionEngine::new());
+    let cuda = production_engine.cuda();
+    info!(
+        available = cuda.available,
+        devices = cuda.device_count,
+        detail = cuda.detail,
+        "production CUDA probe (ADR 0003)"
+    );
+    let shared_engine = production_engine.cluster_arc();
     // Peer listen for direct mesh dial (decentral Phase A/C) + peer-direct Infer*.
     let local_mesh: peer_net::SharedMesh =
         std::sync::Arc::new(tokio::sync::Mutex::new(peer_net::LocalMesh::new()));
@@ -1474,8 +1484,9 @@ async fn run_agent(
     let hello = Envelope::new(node_id.clone(), hello_msg);
     writer.write_all(&encode_line(&hello)?).await?;
 
-    // Tensor-backed when weights load; stub-style text until then (shared with peer listen).
+    // Tensor-backed when weights load; production Engine for control infer/stage/challenge.
     let engine = shared_engine;
+    let production = production_engine;
     let store = WeightsStore::new(WeightsStore::default_root());
     store.ensure_root().ok();
     let mut last_armed = false;
@@ -2028,15 +2039,15 @@ async fn run_agent(
                         }
                     }
                     Message::InferRequest { .. } => {
-                        // Production agent: after prepare_and_install, ClusterEngine has
-                        // resident weights → require_band_weights on multi-shard stages.
+                        // ADR 0003: ProductionEngine for infer (CUDA-tagged, content-proof path).
+                        // After prepare_and_install, resident weights → require_band_weights.
                         let opts = joule_control::InferAgentOpts {
-                            require_band_weights: engine.has_resident_weights()
-                                || engine.is_model_loaded(),
+                            require_band_weights: production.has_resident_weights()
+                                || production.is_model_loaded(),
                         };
                         let reply = joule_control::agent_handle_infer_with(
                             &env,
-                            engine.as_ref(),
+                            production.as_ref(),
                             opts,
                         )
                         .await
@@ -2049,7 +2060,7 @@ async fn run_agent(
                         // advertise unlock on PeerAlive — only control cluster attestation
                         // after settle_challenge_result raises verified for mint/placement.
                         let reply =
-                            joule_control::agent_handle_challenge(&env, engine.as_ref())
+                            joule_control::agent_handle_challenge(&env, production.as_ref())
                             .await
                             .context("handle challenge")?;
                         let reply = Envelope::new(node_id.clone(), reply.msg);
