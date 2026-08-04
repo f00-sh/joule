@@ -2593,15 +2593,19 @@ async fn capacity_tokens_per_sec_after_chat() {
         cap1["nodes_healthy"], cap1["mem_mib_healthy"], cap1["throughput_class_sum"]
     );
 
-    // Dashboard static binding: app.js reads tokens_per_sec from capacity JSON.
+    // Control dashboard (served at / via include_str!("dashboard.html")) binds tokens/s.
+    let control_dash = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/dashboard.html"));
+    assert!(
+        control_dash.contains("id=\"tokens-per-sec\"")
+            && control_dash.contains("cap.tokens_per_sec")
+            && control_dash.contains("tokens_per_sec_samples"),
+        "control dashboard.html must card+bind cap.tokens_per_sec in refresh()"
+    );
+    // Public site docs also bind the field.
     let app_js = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/app.js"));
     assert!(
         app_js.contains("tokens_per_sec"),
-        "dashboard app.js must bind tokens_per_sec"
-    );
-    assert!(
-        app_js.contains("stat-tokens-per-sec") || app_js.contains("tokens_per_sec"),
-        "dashboard must reference tokens/s field"
+        "docs/app.js must bind tokens_per_sec"
     );
     let index_html = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -2610,6 +2614,26 @@ async fn capacity_tokens_per_sec_after_chat() {
     assert!(
         index_html.contains("stat-tokens-per-sec"),
         "index.html must show Tokens / s widget"
+    );
+
+    // Live shipped path: GET / returns control dashboard HTML with tokens/s binding.
+    let dash_html = client
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        dash_html.contains("tokens-per-sec") && dash_html.contains("cap.tokens_per_sec"),
+        "GET / must serve control dashboard that binds cap.tokens_per_sec"
+    );
+    eprintln!(
+        "OBSERVE control dashboard GET / binds tokens_per_sec (html_len={})",
+        dash_html.len()
     );
 
     agent.abort();

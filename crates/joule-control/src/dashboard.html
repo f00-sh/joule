@@ -97,6 +97,7 @@
       <div class="card"><div class="label">VRAM (one device)</div><div class="value sky" id="pool-vram">—</div></div>
       <div class="card"><div class="label">Backends (internal)</div><div class="value" id="n-healthy">—</div></div>
       <div class="card"><div class="label">Stream slots free/used</div><div class="value" id="slots">—</div></div>
+      <div class="card"><div class="label">Tokens / s (measured)</div><div class="value sky" id="tokens-per-sec">—</div></div>
       <div class="card"><div class="label">Model</div><div class="value models" id="models">—</div></div>
       <div class="card"><div class="label">Model ready</div><div class="value" id="ready">—</div></div>
       <div class="card"><div class="label">Pool progress</div><div class="value sky" id="progress">—</div></div>
@@ -171,6 +172,15 @@
         document.getElementById("slots").textContent =
           (sched.stream_slots_free||0) + " / " + (sched.stream_slots_used||0) +
           " (max " + (sched.stream_slots_total||0) + ")";
+        // Measured tokens/s from capacity JSON (real completions), not throughput_class alone.
+        const tps = cap.tokens_per_sec;
+        const tpsN = cap.tokens_per_sec_samples || 0;
+        const tpsEl = document.getElementById("tokens-per-sec");
+        if (tps != null && Number(tps) > 0) {
+          tpsEl.textContent = tpsN > 0 ? (tps + " (n=" + tpsN + ")") : String(tps);
+        } else {
+          tpsEl.textContent = tpsN > 0 ? ("0 (n=" + tpsN + ")") : "—";
+        }
         document.getElementById("models").textContent = ld.model || sched.model || "kimi-open";
         document.getElementById("ready").textContent = ld.model_ready ? "yes" : "no";
         document.getElementById("progress").textContent =
