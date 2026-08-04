@@ -285,11 +285,15 @@ impl ModelSpec {
         };
 
         let can_load_model = pool_ready && self.weights.published;
+        // Fleet SoT: full K3 production service needs multi-backend + high VRAM
+        // (same thresholds as MANIFEST min_* / full_k3_service_fleet_ok).
+        let fleet_ok = crate::full_k3_service_fleet_ok(pool_vram_mib, backends);
         // Live path requires verified content digests — not model_loaded flag alone.
-        let can_begin_service = can_load_model && flags.model_loaded && flags.digests_verified;
-        // Honor digests even if operator flips service_live early.
+        let can_begin_service =
+            can_load_model && flags.model_loaded && flags.digests_verified && fleet_ok;
+        // Honor digests even if operator flips service_live early; never live under fleet.
         let service_live_honest =
-            flags.service_live && flags.digests_verified && flags.model_loaded;
+            flags.service_live && flags.digests_verified && flags.model_loaded && fleet_ok;
 
         let (inference_mode, message) = if service_live_honest {
             (

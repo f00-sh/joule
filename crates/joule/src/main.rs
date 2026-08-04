@@ -2013,6 +2013,16 @@ async fn run_agent(
                                         // Shared load path (same as peer-seed completion).
                                         match prepare_and_install(&store, engine.as_ref(), spec, q) {
                                             Ok(report) => {
+                                                // ADR 0003: arm ProductionEngine content-proof for stage/infer.
+                                                if let Err(e) =
+                                                    production.mark_content_from_store(&store, q)
+                                                {
+                                                    warn!(
+                                                        error = %e,
+                                                        quant = %q.id,
+                                                        "production content gate refused after prepare"
+                                                    );
+                                                }
                                                 last_armed = true;
                                                 println!("loaded: {}", report.message);
                                                 let loaded = Envelope::new(

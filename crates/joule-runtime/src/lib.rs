@@ -4,6 +4,7 @@
 //! hits the load milestone (and weights exist), [`load_model`] maps tensors into
 //! RAM. Service-live is a separate control flag after the mesh has loaded.
 
+mod cuda_matvec;
 mod decode;
 mod gpu_engine;
 mod k3_meta;
@@ -15,10 +16,14 @@ mod stage;
 mod stage_matmul;
 mod weights;
 
+pub use cuda_matvec::{cuda_matvec4_f32, host_matvec_f32, production_matvec4};
 pub use decode::{
     generate as generate_from_loaded, generate_from_activation_state, generate_tail_from_stage,
 };
-pub use gpu_engine::{full_k3_service_fleet_ok, probe_cuda_devices, CudaProbe, ProductionEngine};
+pub use gpu_engine::{
+    full_k3_service_fleet_ok, probe_cuda_devices, production_digests_ok, CudaProbe,
+    ProductionEngine,
+};
 pub use k3_meta::{
     config_sha256_hex, manifest_k3_config_digest, num_hidden_layers_from_config_json,
     placement_model_layers, verified_k3_model_layers, verified_k3_model_layers_from,
@@ -211,6 +216,11 @@ impl ClusterEngine {
     /// True if any LoadedModel is installed (including armed marker load).
     pub fn has_resident_weights(&self) -> bool {
         self.loaded.lock().expect("lock").is_some()
+    }
+
+    /// Snapshot of resident weights for production CUDA stage/infer (ADR 0003).
+    pub fn loaded_model_snapshot(&self) -> Option<std::sync::Arc<LoadedModel>> {
+        self.loaded.lock().expect("lock").clone()
     }
 }
 
