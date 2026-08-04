@@ -31,9 +31,16 @@ A **root system** service cannot own a user systray icon. v0 uses **OS-managed a
 ## Commands
 
 ```text
+joule get-started                 # dumb-user checklist
+joule start                       # one-shot local control + agent
+joule service install             # write+enable control + agent + tray (user session)
+joule service install --dry-run
 joule status --api http://127.0.0.1:7700 --key joule_… [--dash|--json]
 joule monitor --api … --key … --interval-secs 3
-joule tray --api … --key …          # same poller; tray GUI can wrap later
-joule service generate --platform linux --kind agent --out ~/.config/systemd/user/joule-agent.service
+joule tray --api … --key …
+joule service generate --platform linux --kind control|agent|tray --out …
 joule service install-help --platform macos
 ```
+
+**GUI:** default `joule` opens the dashboard. **★ DO EVERYTHING (local pool)** starts
+control + agent; first open auto-starts if nothing is on `:7700` (`JOULE_GUI_NO_AUTO=1` skips).

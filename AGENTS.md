@@ -9,7 +9,7 @@
 | Domain | joule.f00.sh |
 | License | MIT |
 | Language | **Rust** (workspace; strict purity for first-party code) |
-| Status | **Production path in progress (0.1.13+)** — real K3 pins + ADR 0003 CUDA engine; full TB residency needs fleet storage |
+| Status | **Production path (0.1.13+)** — real K3 pins, ADR 0003 CUDA engine, dumb-user start, commit-gated quant upgrade, mesh content-proof |
 
 **One-liner:** Distributed internet-wide supercomputer cluster — pool idle GPUs into open-weight AI inference (Kimi-class).
 
@@ -18,10 +18,14 @@
 | Layer | State |
 |-------|--------|
 | Protocol / control / agents / economy / installers | Shipped (0.1.13+) |
+| Dumb-user path | `get-started` / `start` / `service install` / GUI **DO EVERYTHING** + first-open auto pool |
 | Lab fixtures (`lab-*`) | CI / protocol tests only — **not** production Kimi quality |
 | Production quant `kimi-k3-shards` | **96** real `moonshotai/Kimi-K3` LFS digests in MANIFEST; unlock only with matching staged bytes |
+| Service digests SoT | Control `production_digests_ok` — lab complete alone does **not** set service digests |
 | GPU/FFI engine | **ADR 0003** `ProductionEngine` (CUDA driver `libcuda` FFI) wired in agents |
-| Full multi-TB residency + multi-node service-live | Requires fleet disk/VRAM (`≥64 GiB` aggregate, `≥3` backends); not claimable on a single 8 GiB card alone |
+| Quant lifecycle | **Commit-gated** `try_commit_*` — fleet K3 recommend without bytes must not brick lab serve |
+| Weight residency | **Band/shard slices** per donor — **not** full multi‑TB download on every box |
+| Full multi-TB + multi-node service-live | Fleet disk/VRAM (`≥64 GiB` aggregate, `≥3` backends); not claimable on a single 8 GiB card alone |
 
 **Still out of product laws:** cash/fiat, multi-model, f00 weight CDN hosting.
 
@@ -61,13 +65,16 @@
 ## Workspace
 
 ```text
-crates/joule             CLI binary (+ status/monitor/tray/service)
+crates/joule             CLI binary (+ GUI/status/monitor/tray/service)
 crates/joule-client      shared ClientStatus + OS service unit generation
 crates/joule-proto       wire types / ClusterCapacity / plans
 crates/joule-cluster     membership + capacity + placement
 crates/joule-runtime     Engine trait + ProductionEngine (ADR 0003) + ClusterEngine + StubEngine
 crates/joule-ledger      millijoule accounting
 crates/joule-control     control plane (agents + HTTP API)
+crates/joule-mesh        peer bus / mesh coordination
+crates/joule-dht         multi-hop DHT routing
+crates/joule-net         public multiaddrs / QUIC path helpers
 ```
 
 Design SoT: [docs/design/cluster-v0.md](docs/design/cluster-v0.md)
@@ -111,8 +118,9 @@ cargo run -p joule -- broadcast plan-chunks --chunks 12 --nodes 5
 
 ## Notes
 
-- Single API model: `kimi-open` (`CLUSTER_MODEL`). Pin exact weights later in `models/MANIFEST`.
-- Every donor serves that model; schedulers use the full healthy pool.
+- Single API model: `kimi-open` (`CLUSTER_MODEL`). Production pins live in `models/MANIFEST.json` (`kimi-k3-shards`).
+- Every donor serves that model; schedulers use the full healthy pool; donors hold **band slices**, not necessarily full TB.
+- Full Kimi fleet bar: ≥64 GiB + ≥3 backends (`full_k3_service_fleet_ok`).
 - Browser is dashboard only; compute is native `joule agent`.
 
 ## Remote status (Proton)

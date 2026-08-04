@@ -13,14 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **ADR 0003 + `ProductionEngine`:** CUDA driver FFI (`libcuda` `cuInit`/`cuDeviceGetCount`); agents wire production engine for infer/challenge; content-proof gates for K3 quant
 - **96-file layer map:** file↔layer helpers match production shard naming (`model-NNNNN-of-000096`); residual files 94–96 global
 - **Fleet honesty helper:** `full_k3_service_fleet_ok` — full K3 service requires ≥64 GiB + ≥3 backends
+- **Commit-gated quant upgrade:** `try_commit_quant_upgrade` / `try_commit_band_upgrade` — probe digests without clearing prior content gate; install only on success
+- **Shared `pack_jst3` tail text:** multi-donor mesh InferDone carries non-empty weight-sensitive completion text on production path
 
 ### Fixed
 - **First-light challenges:** cold pool issues 64 MiB mem-hard credit when `verified==0`
 - **Agent prepare without pool_ready:** lab/available quants load under Kimi milestone
 - **`scripts/production-smoke.sh`:** release-binary lab path smoke (not a substitute for full K3 residency)
+- **Fleet K3 recommend no longer bricks lab serve:** agents never `begin_quant_intent` before mark on PoolStatus/PlanAccept/peer-seed; deferred K3 keeps prior `content_verified`
+- **Service digests SoT:** control refresh uses `production_digests_ok` (K3 only); lab complete alone does not set service digests
+- **Agent lab→K3 reprepare:** PoolStatus re-prepares when recommend upgrades quant; PlanAccept uses production K3 band resolution
 
 ### Changed
-- Docs/status: no longer present “alpha software track closed” as the finished production Kimi product
+- Docs/site/SOP/man/README: full Kimi = one logical device + fleet bar; **not** full multi‑TB download on every box; band/shard peer-seed honesty; dumb-user path and production engine status
 
 ## [0.1.13] — 2026-08-04
 

@@ -7,12 +7,16 @@ joule — donate idle compute to a shared pool; earn millijoules; call open-weig
 ## SYNOPSIS
 
 ```text
+joule                              # GUI (default when no subcommand)
+joule get-started                  # dumb-user checklist (aliases: help-me, howto)
+joule start [--api URL]            # local control + agent in background
 joule version
 joule control [--agent-listen ADDR] [--http-listen ADDR] [--data-dir PATH] [--ephemeral]
 joule agent --account NAME [--control HOST:PORT] [--model TAG] [--mem-mib N] [--device gpu|metal|cpu]
 joule capacity [--api URL] [--peers N] [--json]
-joule chat --key KEY [--api URL] [--model TAG] --prompt TEXT [--stream]
-joule whoami --key KEY [--api URL]
+joule connect [--copy] [--copy-url] [--open]
+joule chat [--key KEY] [--api URL] [--model TAG] --prompt TEXT [--stream]
+joule whoami [--key KEY] [--api URL]
 joule ready [--api URL] [--pool-vram-gib N] [--backends N]
 joule load [--model TAG] [--quant ID] [--mem-mib N]
 joule seed-blob --path FILE [--kind KIND] [--name NAME]
@@ -21,7 +25,8 @@ joule software status|apply [--dest PATH]
 joule status --api URL [--key KEY] [--json] [--dash]
 joule monitor --api URL [--key KEY] [--interval-secs N]
 joule tray --api URL [--key KEY] [--interval-secs N]
-joule service generate --platform linux|macos|windows --kind agent|tray …
+joule service install [--platform auto|linux|macos|windows] [--dry-run]
+joule service generate --platform linux|macos|windows --kind control|agent|tray …
 joule service install-help --platform linux|macos|windows
 joule broadcast keygen|sign|inject|plan-chunks …
 joule lab [options]
@@ -41,13 +46,15 @@ pool is free of cash charges. No contribution ⇒ no API.
 How a node reaches the internet is irrelevant. This is not a mesh product.
 
 Version **0.1.13+** loads lab fixtures for protocol CI, pins production
-**moonshotai/Kimi-K3** digests (`kimi-k3-shards`, 96 files), and runs agents on
+**moonshotai/Kimi-K3** digests (`kimi-k3-shards`, 96 real LFS files), and runs agents on
 **ProductionEngine** (CUDA driver FFI, ADR 0003) with content-proof weight gates.
-Multi-donor sequential PP, measured **tokens/s**, and replan-on-shard-death are
-shipped. Full multi-TB K3 residency and production service-live need fleet
-aggregate VRAM (≥64 GiB, ≥3 backends) and staged bytes matching real digests —
-not a single small card alone. Donors control contribution locally
-(`joule donor pause|set-cap|set-schedule|set-sensors`). No contribution ⇒ no API.
+Multi-donor sequential PP, measured **tokens/s**, replan-on-shard-death, dumb-user
+**get-started / start / service install**, and **commit-gated** quant upgrades are
+shipped. **Not every client downloads full multi‑TB weights** — donors stage
+**band/shard slices**; full K3 service-live needs fleet aggregate VRAM
+(≥64 GiB, ≥3 backends) and staged bytes matching production digests.
+Lab complete alone does not unlock service digests. Donors control contribution
+locally (`joule donor pause|set-cap|set-schedule|set-sensors`). No contribution ⇒ no API.
 After an agent Welcome, **`joule connect`** shows Base URL + full pool-issued
 `joule_…` API key + model `kimi-open` for Cursor / other OpenAI clients. Weights
 and software are **peer-seeded by sha256** (f00 is website only). Operator orders
@@ -59,9 +66,19 @@ are **ed25519-signed** and flooded by the swarm.
 
 Interactive graphical dashboard (tabs: **Overview**, **Graphs**, **Donor**, **Chat**).
 Live multi-series plots (backends, agents, mesh, VRAM, balance, tokens, rates) with
-zoom/pan/box-zoom and series toggles; one-click Start/Stop control and agent;
-full local donor policy (pause, VRAM cap, schedule, thermal/battery); in-app chat.
+zoom/pan/box-zoom and series toggles; **★ DO EVERYTHING (local pool)** one-shot;
+first-open auto-starts a local pool if nothing listens on `:7700`
+(`JOULE_GUI_NO_AUTO=1` to skip); full local donor policy; in-app chat.
 Running `joule` with no subcommand launches the GUI.
+
+### joule get-started
+
+Print the dumb-user checklist (install → start pool → connect → chat → autostart).
+
+### joule start
+
+One-shot local pool: start control + agent in the background and wait until capacity
+is healthy. Prefer this or the GUI button over inventing ports by hand.
 
 ### joule control
 
@@ -140,13 +157,17 @@ backends/VRAM, service_live. `--dash` prints a compact monitor; `monitor` and
 
 ### joule service
 
-Generate **OS auto-start** units without root (dry-run to stdout/`--out`):
+**`joule service install`** writes and enables **control + agent + tray** autostart
+for the current user session (linux|macos|windows; `--dry-run` prints only).
+
+Generate individual units without root:
 
 - Linux: systemd user unit (`systemctl --user enable --now …`)
 - macOS: LaunchAgents plist (`launchctl load …`)
 - Windows: Task Scheduler XML (`schtasks /Create /XML …`)
 
-Prefer user-session services so tray/monitor can share the GPU session.
+Kinds: `control`, `agent`, `tray`. Prefer user-session services so tray/monitor
+can share the GPU session (not a silent root-only daemon).
 
 ### joule broadcast
 

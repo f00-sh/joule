@@ -40,7 +40,10 @@ They are **not** 1:1 MoE packing. Operators and code must not assume file *N* = 
 
 Full K3 service-live requires multi-backend + high aggregate VRAM (`≥64 GiB` and `≥3` backends in MANIFEST milestones / `full_k3_service_fleet_ok`). A single ~8 GiB card alone cannot honestly claim production service-live for full K3.
 
+**Not every donor downloads all 96 files.** Band prepare + preferred file map stage only intersecting shards (+ global residuals). Full multi‑TB per box would defeat the product; peer seeders spread content.
+
 ## Non-goals
 
 - Automatic re-slice of safetensors to exact layer boundaries inside a shard.
 - Claiming full multi-TB residency on a single developer host without the bytes.
+- Requiring every client to download the full production quant.

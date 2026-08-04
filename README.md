@@ -6,11 +6,11 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 
 | | |
 |---|---|
-| Status | **Production path (0.1.13+)** — real Kimi-K3 pins + CUDA `ProductionEngine` (ADR 0003); full TB weights need fleet storage |
+| Status | **Production path (0.1.13+)** — real Kimi-K3 pins, CUDA `ProductionEngine` (ADR 0003), dumb-user start, mesh content-proof serve |
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
-| Design | [cluster](docs/design/cluster-v0.md) · [economy](docs/design/economy-v0.md) · [distribution](docs/design/distribution-v0.md) · [broadcast](docs/design/broadcast-v0.md) · [ceremony](docs/design/operator-ceremony-v0.md) |
+| Design | [cluster](docs/design/cluster-v0.md) · [economy](docs/design/economy-v0.md) · [distribution](docs/design/distribution-v0.md) · [broadcast](docs/design/broadcast-v0.md) · [ceremony](docs/design/operator-ceremony-v0.md) · [K3 map](docs/design/k3-file-layer-map-v0.md) |
 
 ## Why
 
@@ -172,30 +172,38 @@ joule whoami --key joule_…
 
 **Mesh discovery (decentral):** agents open a **peer listen** port (`--peer-listen`, default ephemeral), gossip `PeerAlive`, and prefer **direct** blob transfer; control is a temporary rendezvous. Phase C starts with `joule-dht` + replaceable `bootstrap.json` (`docs/design/decentral-discovery-v0.md`).
 
-**Kimi waits for a big enough pool.** ≥**64 GiB** verified VRAM and ≥**3** backends for `model_ready`. Manifest lists digests; `lab-tiny` seeds from the git tree; full K3 shards spread once someone on the mesh has them.
+**Full Kimi baseline (fleet gate):** ≥**64 GiB** healthy/verified aggregate VRAM **and** ≥**3** backends (`full_k3_service_fleet_ok`). One 8 GiB laptop cannot honestly claim full-K3 service-live alone. `lab-*` fixtures are for protocol CI only — **not** production Kimi quality.
+
+**Not every box downloads the full multi‑TB model.** That would defeat the product. Donors prepare **band/shard slices** (preferred weight files for their plan layers). Weights are **sha256 content-addressed and peer-seeded**; fat seeders may hold more files, thin donors only their band. Control service digests SoT is production **`kimi-k3-shards`** (96 real `moonshotai/Kimi-K3` LFS digests) — lab complete does **not** unlock service claims. Agents use **commit-gated** quant upgrade: fleet recommend of K3 never bricks an already-serving lab path before digests verify.
 
 ```text
 joule ready                              # offline what-if
 joule ready --api http://127.0.0.1:7700  # live
 curl -s http://127.0.0.1:7700/v1/models/readiness
+bash scripts/production-smoke.sh         # release binary: 2 agents → challenges → chat economy
 ```
 
 ## Usage
 
 ```text
+joule                          # GUI (default)
+joule get-started              # dumb-user checklist
+joule start                    # local control + agent
+joule service install          # control + agent + tray autostart
 joule version
 joule control [--agent-listen ADDR] [--http-listen ADDR]
 joule agent --account NAME [--control HOST:PORT] [--peer-listen HOST:PORT] [--mem-mib N]
 joule capacity --api http://127.0.0.1:7700 --json
-joule chat --key joule_… --prompt "…"
-joule whoami --key joule_…
+joule connect [--copy]
+joule chat --prompt "…"
+joule whoami
 joule lab --peers 3
 joule credits --account alice
 joule ready [--api URL]
-joule status --api URL --key joule_… [--dash|--json]
-joule monitor --api URL --key joule_…          # living dash (all platforms)
-joule tray --api URL --key joule_…             # tray/monitor surface
-joule service generate --platform linux|macos|windows --kind agent|tray
+joule status --api URL [--dash|--json]
+joule monitor --api URL
+joule tray --api URL
+joule service generate --platform linux|macos|windows --kind control|agent|tray
 joule service install-help --platform linux
 joule seed-blob --path FILE [--kind software]
 joule software status|apply
@@ -216,10 +224,12 @@ Full option reference: [man/joule.1.md](man/joule.1.md).
 |---|---|
 | `joule-proto` | Wire protocol + `ClusterCapacity` |
 | `joule-cluster` | Membership, capacity aggregate, placement |
-| `joule-runtime` | Inference `Engine` trait + stub |
+| `joule-runtime` | `Engine` + `ProductionEngine` (ADR 0003) + lab `ClusterEngine` |
 | `joule-ledger` | Millijoule mint/burn |
 | `joule-control` | Control plane: agents + HTTP API |
-| `joule` | CLI |
+| `joule-client` | Shared status + OS service unit generation |
+| `joule-mesh` / `joule-dht` / `joule-net` | Peer bus, DHT, public multiaddrs / QUIC path |
+| `joule` | CLI + GUI + agent |
 
 See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 and the PR plan.
 
@@ -233,9 +243,10 @@ See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 an
 | GitHub Pages | [docs/](docs/) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
 | Scene card | [file_id.diz](file_id.diz) |
-| Operator SOP (PDF) | [docs/sop-joule-ops.pdf](docs/sop-joule-ops.pdf) |
-| This release memo (PDF) | [docs/releases/v0.1.10-memo.pdf](docs/releases/v0.1.10-memo.pdf) |
+| Operator SOP (PDF) | [docs/sop-joule-ops.pdf](docs/sop-joule-ops.pdf) · [JSON](docs/sop-joule-ops.json) |
+| Latest tagged release memo | [docs/releases/v0.1.13](docs/releases/) when present · see [releases/](docs/releases/) |
 | Release memos | [docs/releases/](docs/releases/) |
+| ADR 0003 (CUDA production engine) | [docs/adr/0003-cuda-production-engine.md](docs/adr/0003-cuda-production-engine.md) |
 
 ## Scene card
 

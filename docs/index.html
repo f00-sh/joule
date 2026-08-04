@@ -227,6 +227,15 @@ burn = (prompt + 4×completion) × leecher_usage_bp
         <strong>Weights ≠ installers:</strong> f00 never hosts model weights.
         Content is <code>sha256</code>-addressed and peer-seeded (or official sources).
         Seed with <code>joule seed-blob</code>.
+        <strong>You do not download the full multi‑TB model on every PC</strong> —
+        each donor stages its <strong>band/shard slice</strong>; the fleet is one logical GPU.
+      </div>
+      <div class="callout">
+        <strong>Full Kimi baseline:</strong> honest full-K3 service needs about
+        <strong>≥3 donor backends</strong> and <strong>≥64 GiB</strong> healthy aggregate VRAM,
+        plus peer-seeded weight digests that match the manifest.
+        One small card alone is still welcome (first light / local pool) but is not full-K3 service-live.
+        Lab fixtures are protocol smoke only — not production Kimi quality.
       </div>
       <div class="callout">
         <strong>Do this (no cleverness):</strong>

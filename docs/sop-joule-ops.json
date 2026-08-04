@@ -5,25 +5,63 @@
   "to": "joule operators and release owners",
   "from": "Project Engineering",
   "subject": "joule operator standard operating procedure",
-  "ref": "AGENTS.md, README.md, docs/design/cluster-v0.md",
-  "date": "2026-08-02",
+  "ref": "AGENTS.md, README.md, docs/design/cluster-v0.md, docs/adr/0003-cuda-production-engine.md",
+  "date": "2026-08-04",
   "doc_id": "JOULE-SOP-OPS-001",
   "doc_title": "STANDARD OPERATING PROCEDURE \u2014 joule cluster",
-  "version": "v0.1.8",
+  "version": "v0.1.13+",
   "status": "released",
-  "opening": "Operators run joule as a GUI-first local pool or multi-agent cluster: start control, donate with an agent under local policy, watch live capacity graphs, and ship only when cargo gates and the docs pack are green.",
+  "opening": "Operators run joule as a GUI-first local pool or multi-agent internet cluster: dumb-user start path, production CUDA engine with content-proof weights, band-only peer-seeded shards (not full multi-TB on every box), fleet honesty for full Kimi, contribute-to-consume economy, and ship only when cargo gates and the docs pack are green.",
   "sections": [
     {
       "heading": "1. Purpose",
-      "body": "This SOP defines day-to-day operation of a joule lab or standing pool: quality gates, donor contribution control, live capacity visibility (CLI and GUI), and the release ship flow for f00-sh/joule."
+      "body": "This SOP defines day-to-day operation of a joule lab or standing pool: quality gates, dumb-user join path, donor contribution control, full-Kimi fleet honesty, live capacity visibility (CLI and GUI), production smoke, and the release ship flow for f00-sh/joule."
     },
     {
       "heading": "2a. Native installers",
-      "body": "Prefer OS installers from GitHub Releases: Windows Setup.exe, macOS .pkg/.dmg (joule.app), Linux .deb. CLI curl/irm one-liners remain for automation.",
+      "body": "Prefer OS installers from permanent site links or GitHub Releases. Files live on GitHub; joule.f00.sh only redirects (website only — not a weight CDN).",
       "items": [
-        "Windows: joule-*-windows-x86_64-setup.exe",
-        "macOS: joule-*-darwin-*.pkg or .dmg",
-        "Linux: sudo dpkg -i joule-*-linux-*.deb"
+        "Permanent: https://joule.f00.sh/current/ and download.html",
+        "Windows: joule-windows-x86_64-setup.exe (or versioned *-setup.exe)",
+        "macOS: joule-darwin-aarch64.pkg or .dmg",
+        "Linux: sudo dpkg -i joule-linux-x86_64.deb",
+        "CLI: curl -fsSL https://joule.f00.sh/current/install.sh | sh"
+      ]
+    },
+    {
+      "heading": "2b. Dumb-user local pool (preferred)",
+      "body": "Do not invent ports for first light. Use the shipped one-shot path so control and agent come up together.",
+      "steps": [
+        {
+          "n": "2b.1",
+          "text": "Print checklist anytime.",
+          "code": "joule get-started"
+        },
+        {
+          "n": "2b.2",
+          "text": "GUI path: run joule, click star DO EVERYTHING (local pool). First open auto-starts if :7700 free (JOULE_GUI_NO_AUTO=1 skips).",
+          "code": "joule"
+        },
+        {
+          "n": "2b.3",
+          "text": "Headless one-shot control + agent.",
+          "code": "joule start"
+        },
+        {
+          "n": "2b.4",
+          "text": "Reboot-safe user-session autostart (control + agent + tray).",
+          "code": "joule service install"
+        },
+        {
+          "n": "2b.5",
+          "text": "Show Base URL + joule_ key + model for OpenAI clients.",
+          "code": "joule connect"
+        },
+        {
+          "n": "2b.6",
+          "text": "Contributor chat (requires healthy agent for that account).",
+          "code": "joule chat --prompt hi"
+        }
       ]
     },
     {
@@ -37,23 +75,22 @@
         },
         {
           "n": "2.2",
-          "text": "Optional offline lab.",
-          "code": "cargo run -p joule --release -- lab"
+          "text": "Clippy with warnings denied.",
+          "code": "cargo clippy --workspace --all-targets -- -D warnings"
         },
         {
           "n": "2.3",
-          "text": "Start control (GUI or CLI).",
-          "code": "joule gui   # or: joule control"
+          "text": "Release-binary economy smoke (2 agents, freeloader deny, contributor chat).",
+          "code": "bash scripts/production-smoke.sh"
         },
         {
           "n": "2.4",
-          "text": "Start agent with local policy.",
-          "code": "joule agent --control 127.0.0.1:7701 --policy ~/.config/joule/donor-policy.json"
+          "text": "Start local pool (GUI or start) and confirm capacity backends \u2265 1.",
+          "code": "joule start && joule capacity --api http://127.0.0.1:7700 --json"
         },
         {
           "n": "2.5",
-          "text": "Read live capacity.",
-          "code": "joule capacity --api http://127.0.0.1:7700 --json"
+          "text": "Attach a second agent for multi-node join when claiming a multi-backend pool."
         },
         {
           "n": "2.6",
@@ -71,27 +108,22 @@
           },
           {
             "id": "test",
-            "label": "cargo test --workspace",
+            "label": "cargo test + clippy",
             "shape": "process"
           },
           {
-            "id": "ctrl",
-            "label": "Start control (GUI/CLI)",
+            "id": "smoke",
+            "label": "production-smoke.sh",
             "shape": "process"
           },
           {
-            "id": "agent",
-            "label": "Start agent + policy",
+            "id": "pool",
+            "label": "joule start / GUI",
             "shape": "process"
           },
           {
             "id": "cap",
-            "label": "capacity --json + GUI graphs",
-            "shape": "process"
-          },
-          {
-            "id": "live",
-            "label": "Pool honest?",
+            "label": "capacity --json honest?",
             "shape": "decision"
           },
           {
@@ -112,27 +144,23 @@
           },
           {
             "from": "test",
-            "to": "ctrl"
+            "to": "smoke"
           },
           {
-            "from": "ctrl",
-            "to": "agent"
+            "from": "smoke",
+            "to": "pool"
           },
           {
-            "from": "agent",
+            "from": "pool",
             "to": "cap"
           },
           {
             "from": "cap",
-            "to": "live"
-          },
-          {
-            "from": "live",
             "to": "ok",
             "label": "yes"
           },
           {
-            "from": "live",
+            "from": "cap",
             "to": "block",
             "label": "no"
           }
@@ -147,7 +175,80 @@
       }
     },
     {
-      "heading": "3. Donor local controls (law 5)",
+      "heading": "3. Full Kimi honesty (do not overclaim)",
+      "body": "Full Kimi is one logical device across donors. Never tell users every box must download multi-TB weights.",
+      "items": [
+        "Production quant: kimi-k3-shards \u2014 96 real moonshotai/Kimi-K3 LFS digests in models/MANIFEST.json",
+        "Band/shard residency only per donor; peer-seed by sha256; f00 is website only",
+        "Fleet gate full_k3_service_fleet_ok: \u226564 GiB healthy aggregate VRAM and \u22653 backends",
+        "Service digests SoT is production K3 (production_digests_ok); lab complete alone is not service_live",
+        "Lab fixtures (lab-tiny/mid/large) = protocol CI only \u2014 not production Kimi quality",
+        "Commit-gated quant upgrade: try_commit_* \u2014 fleet K3 recommend without bytes must not brick lab serve",
+        "Agents use ProductionEngine (ADR 0003 CUDA driver FFI) with content-proof stage/infer"
+      ],
+      "flowchart": {
+        "title": "Full Kimi service-live path",
+        "color": true,
+        "nodes": [
+          {
+            "id": "join",
+            "label": "Donors join pool",
+            "shape": "terminator"
+          },
+          {
+            "id": "fleet",
+            "label": "\u22653 backends and \u226564 GiB?",
+            "shape": "decision"
+          },
+          {
+            "id": "seed",
+            "label": "Peer-seed band digests",
+            "shape": "process"
+          },
+          {
+            "id": "proof",
+            "label": "Content-proof mark",
+            "shape": "process"
+          },
+          {
+            "id": "live",
+            "label": "service_live OK",
+            "shape": "terminator"
+          },
+          {
+            "id": "wait",
+            "label": "Grow pool / seed",
+            "shape": "terminator"
+          }
+        ],
+        "edges": [
+          {
+            "from": "join",
+            "to": "fleet"
+          },
+          {
+            "from": "fleet",
+            "to": "seed",
+            "label": "yes"
+          },
+          {
+            "from": "fleet",
+            "to": "wait",
+            "label": "no"
+          },
+          {
+            "from": "seed",
+            "to": "proof"
+          },
+          {
+            "from": "proof",
+            "to": "live"
+          }
+        ]
+      }
+    },
+    {
+      "heading": "4. Donor local controls (law 5)",
       "body": "Remote operators cannot raise local caps. Agents reload the policy path passed with --policy. Schedule windows use OS local timezone (tm_gmtoff on Unix).",
       "items": [
         "Pause/resume: joule donor pause|resume or GUI Donor tab / tray",
@@ -157,7 +258,16 @@
       ]
     },
     {
-      "heading": "4. Release ship flow",
+      "heading": "5. Economy closed loop",
+      "body": "Public pool: no cash. Freeloaders without a healthy agent for the account get HTTP 401/403. Contributors chat on the OpenAI-shaped path after mint from contribution.",
+      "items": [
+        "Verify freeloader deny and contributor chat via production-smoke.sh",
+        "Millijoules: eco=v0 fairness (\u221aVRAM, tenure, leecher)",
+        "Single model: kimi-open only"
+      ]
+    },
+    {
+      "heading": "6. Release ship flow",
       "body": "Ship only when gates are green. Documentation pack is mandatory: CHANGELOG, file_id.diz, README, Pages, man, SOP PDF, this-version NASA memo PDF, SemVer tag, GitHub Release assets (CI on tag v*).",
       "flowchart": {
         "title": "Release ship flow",
@@ -170,7 +280,7 @@
           },
           {
             "id": "verify",
-            "label": "fmt + clippy + test",
+            "label": "fmt + clippy + test + smoke",
             "shape": "process"
           },
           {
@@ -237,13 +347,15 @@
       }
     },
     {
-      "heading": "5. Product laws (do not violate)",
+      "heading": "7. Product laws (do not violate)",
       "items": [
         "Compute is the only currency on the public pool \u2014 no money",
         "No contribution \u21d2 no API access",
         "Credits = sealed hash-chain millijoules only; verified VRAM only for mint/placement",
         "Single model: kimi-open",
-        "Website is not a weight CDN \u2014 content-addressed peer seed only"
+        "One logical device: N donors = one virtual GPU (sum of healthy VRAM)",
+        "Website is not a weight CDN \u2014 content-addressed peer seed only",
+        "Not every box downloads full multi-TB weights \u2014 band/shard slices"
       ]
     }
   ],
@@ -253,5 +365,5 @@
     "office": ""
   },
   "cc": "Maintainers, Release Operators",
-  "enclosure": "file_id.diz; CHANGELOG.md; docs/releases/v0.1.8-memo.pdf"
+  "enclosure": "file_id.diz; CHANGELOG.md; docs/releases/; ADR 0003"
 }

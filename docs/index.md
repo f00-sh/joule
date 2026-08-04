@@ -8,13 +8,15 @@
 
 | | |
 |---|---|
-| Status | **Production path (0.1.13+)** — real Kimi-K3 pins + ADR 0003 CUDA engine; full TB needs fleet |
+| Status | **Production path (0.1.13+)** — real Kimi-K3 pins, ADR 0003 CUDA engine, dumb-user start, band-only weights, fleet honesty |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
 | License | MIT |
 
 ## Why this project exists
 
 Frontier models need more than one idle card. Central clouds re-centralize power. joule pools donated machines into an **internet-wide cluster**. Multi-node placement is first-class. Connectivity medium does not matter. Donors keep control of their hardware. Freeloaders without contribution do not get working keys. Everyone can see the pool size on the dashboard.
+
+**Not every box downloads full multi‑TB weights** — each donor stages a **band/shard slice**; the fleet is **one logical GPU**. Full Kimi service-live needs about **≥3 backends + ≥64 GiB** aggregate VRAM and peer-seeded digests matching production `kimi-k3-shards` (96 real Moonshot pins). Lab fixtures are CI only.
 
 ## Requirements
 
@@ -24,7 +26,7 @@ Frontier models need more than one idle card. Central clouds re-centralize power
 
 ## Install
 
-Every install method installs man page(s).
+Every install method installs man page(s). Prefer permanent links: [download.html](download.html) · [/current](current/).
 
 ### Curl (releases)
 
@@ -38,27 +40,26 @@ curl -fsSL https://joule.f00.sh/current/install.sh | sh
 git clone https://github.com/f00-sh/joule.git
 cd joule
 cargo build --release -p joule
-./target/release/joule capacity --json
-./target/release/joule lab
+./target/release/joule get-started
+./target/release/joule start
 ```
 
-## Usage
+## Usage (stupid-easy)
 
 ```text
-joule control
-# open http://127.0.0.1:7700/ for the live dashboard
-joule agent --account alice
-# after Welcome: Base URL + full pool-issued joule_… key + model kimi-open
+joule get-started
+joule                 # GUI → ★ DO EVERYTHING (local pool)
+joule service install # reboot-safe autostart
 joule connect
-joule capacity --api http://127.0.0.1:7700 --json
-joule whoami
 joule chat --prompt "hello"
-joule chat --stream --prompt "hello"
+# headless:
+joule start
+joule capacity --api http://127.0.0.1:7700 --json
 ```
 
 `joule connect` is the external-app path (Cursor / Continue / any OpenAI client): Base URL `…/v1`, API key `joule_…`, model `kimi-open`. Chat/whoami use the Welcome-cached key when `--key` is omitted.
 
-See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
+See the man page for full options. Live capacity is `GET /v1/cluster/capacity`. Operator SOP: [sop-joule-ops.pdf](sop-joule-ops.pdf).
 
 ## Documents
 

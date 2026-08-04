@@ -211,7 +211,7 @@ No path checks the donor’s network type. If a plan is too slow in practice, op
 | **C6** | Challenges + economy | Mint/burn live; abuse path measured | **done** |
 | **C7** | Public alpha installers | External donors move the dashboard numbers | **done** (v0.1.13 assets + channels) |
 
-**Status honesty:** protocol/control/lab track shipped at **0.1.13+**. Production Kimi path: real **96-shard** MANIFEST pins + **ADR 0003** `ProductionEngine` (CUDA driver FFI). Full multi-TB residency and multi-node service-live still require fleet storage/VRAM — not a single small card. Permanent product-law non-goals: cash/multi-model, f00 weight CDN.
+**Status honesty:** protocol/control/lab track shipped at **0.1.13+**. Production Kimi path: real **96-shard** MANIFEST pins + **ADR 0003** `ProductionEngine` (CUDA driver FFI) + content-proof mesh tail text + **commit-gated** quant upgrades. Donors hold **band slices** (not full multi‑TB on every box). Full multi-TB fleet residency and multi-node service-live still require fleet storage/VRAM (**≥64 GiB**, **≥3** backends) — not a single small card. Permanent product-law non-goals: cash/multi-model, f00 weight CDN.
 
 ## 13. Key decisions
 
