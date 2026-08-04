@@ -650,6 +650,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional: serialize JOULE_* env for whole async test
     async fn cluster_engine_prepare_stage_is_weight_backed() {
         let _env = crate::weights::test_env::lock();
         let dir = std::env::temp_dir().join(format!("joule-ce-prep-{}", Uuid::new_v4()));
@@ -699,6 +700,7 @@ mod tests {
 
     /// Per-shard band-only prepare/install: only preferred files resident; other band fails closed.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional: serialize JOULE_* env for whole async test
     async fn prepare_and_install_for_band_only_preferred_files() {
         use crate::load::write_tiny_safetensors_fixture;
         use crate::manifest::WeightFile;
