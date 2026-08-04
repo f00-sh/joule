@@ -1086,6 +1086,37 @@ impl ControlState {
         }
     }
 
+    /// Fail every in-flight `PendingInfer` that lists `dead` as a plan shard or awaiting member.
+    ///
+    /// Structural mid-infer death path (not error-string scraping): used when a confirmed
+    /// agent disconnects. Notifies oneshots with `"shard disconnected: {id}"` so fanout
+    /// / replan can proceed. Double-call is a no-op (pending already removed).
+    pub fn fail_pending_for_dead_shard(&mut self, dead: &NodeId) -> Vec<(Uuid, String)> {
+        let err = format!("shard disconnected: {dead}");
+        let victims: Vec<Uuid> = self
+            .pending
+            .iter()
+            .filter(|(_, p)| {
+                p.awaiting.contains(dead) || p.plan.shards.iter().any(|s| &s.node == dead)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let mut out = Vec::new();
+        for request_id in victims {
+            if let Some(mut pending) = self.pending.remove(&request_id) {
+                if pending.stream_reserved {
+                    self.cluster.release_stream(&pending.plan);
+                    self.wake_scheduler();
+                }
+                if let Some(tx) = pending.tx.take() {
+                    let _ = tx.send(Err(err.clone()));
+                }
+                out.push((request_id, err.clone()));
+            }
+        }
+        out
+    }
+
     /// Record PlanAccept for a mesh-coordinated request; completes wait when all expected accept.
     ///
     /// Policy is pure [`joule_cluster::on_accept`] (membership → plan_id → verify → record).
@@ -1340,6 +1371,118 @@ mod challenge_integrity_tests {
             },
         );
         (challenge_id, expected)
+    }
+
+    #[test]
+    fn fail_pending_for_dead_shard_member_only() {
+        use joule_proto::{ClusterPlan, ShardAssignment, ShardRole, CLUSTER_MODEL};
+        use std::time::Instant;
+        use uuid::Uuid;
+
+        let mut state = ControlState::new();
+        let dead = NodeId::new();
+        let live = NodeId::new();
+        let outsider = NodeId::new();
+        let rid_hit = Uuid::new_v4();
+        let rid_miss = Uuid::new_v4();
+        let plan_hit = ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            shards: vec![
+                ShardAssignment {
+                    node: dead.clone(),
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(0),
+                    layer_end: Some(10),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 1024,
+                    mem_fraction_ppm: 500_000,
+                },
+                ShardAssignment {
+                    node: live.clone(),
+                    role: ShardRole::Pipeline,
+                    layer_start: Some(11),
+                    layer_end: Some(20),
+                    tp_rank: None,
+                    tp_world: None,
+                    mem_share_mib: 1024,
+                    mem_fraction_ppm: 500_000,
+                },
+            ],
+            pool_mem_mib: 2048,
+            model_layers: 21,
+        };
+        let plan_miss = ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            shards: vec![ShardAssignment {
+                node: outsider.clone(),
+                role: ShardRole::Pipeline,
+                layer_start: Some(0),
+                layer_end: Some(20),
+                tp_rank: None,
+                tp_world: None,
+                mem_share_mib: 2048,
+                mem_fraction_ppm: 1_000_000,
+            }],
+            pool_mem_mib: 2048,
+            model_layers: 21,
+        };
+        let (tx_hit, mut rx_hit) = tokio::sync::oneshot::channel();
+        let (tx_miss, mut rx_miss) = tokio::sync::oneshot::channel();
+        state.pending.insert(
+            rid_hit,
+            PendingInfer {
+                account: "a".into(),
+                plan: plan_hit,
+                awaiting: [dead.clone(), live.clone()].into_iter().collect(),
+                tail_text: None,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                charge: false,
+                stream_reserved: false,
+                coordination: CoordinationPath::ControlDispatch,
+                started: Instant::now(),
+                tx: Some(tx_hit),
+            },
+        );
+        state.pending.insert(
+            rid_miss,
+            PendingInfer {
+                account: "b".into(),
+                plan: plan_miss,
+                awaiting: [outsider.clone()].into_iter().collect(),
+                tail_text: None,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                charge: false,
+                stream_reserved: false,
+                coordination: CoordinationPath::ControlDispatch,
+                started: Instant::now(),
+                tx: Some(tx_miss),
+            },
+        );
+
+        let failed = state.fail_pending_for_dead_shard(&dead);
+        assert_eq!(failed.len(), 1, "only plan member pending fails");
+        assert_eq!(failed[0].0, rid_hit);
+        assert!(failed[0].1.contains("shard disconnected"));
+        assert!(!state.pending.contains_key(&rid_hit));
+        assert!(state.pending.contains_key(&rid_miss));
+        match rx_hit.try_recv() {
+            Ok(Err(e)) => assert!(e.contains("shard disconnected"), "{e}"),
+            other => panic!("expected Err oneshot, got {other:?}"),
+        }
+        assert!(
+            matches!(rx_miss.try_recv(), Err(_)),
+            "non-member oneshot untouched"
+        );
+
+        // Double-call safe.
+        let again = state.fail_pending_for_dead_shard(&dead);
+        assert!(again.is_empty());
+        eprintln!("OBSERVE fail_pending_for_dead_shard: hit=1 miss_untouched double_call=0 ok");
     }
 
     #[test]

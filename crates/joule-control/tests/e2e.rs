@@ -2639,20 +2639,23 @@ async fn capacity_tokens_per_sec_after_chat() {
     agent.abort();
 }
 
-/// Control multi-agent path: confirmed plan shard dies mid-infer → replan or fail-closed;
-/// delayed done is irrelevant; leases free==total after settle.
+/// Control multi-agent path: confirmed plan shard dies **mid-infer** (hang stall) →
+/// replan (plan_agreed≥2) or fail-closed 503; late done on old rid does not revive leases.
 #[tokio::test]
 async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
     let app = load_or_init_app(None).expect("app");
     {
         let mut g = app.state.write().await;
         g.dual_verify_every = 0;
-        g.lease_wait = Duration::from_millis(500);
+        g.lease_wait = Duration::from_millis(800);
     }
     let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
 
+    // Alice + carol respond normally; bob **hangs on InferRequest** after PlanAccept so
+    // death is mid-infer (not a race before fanout).
+    let hang = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (key_a, a) = spawn_agent(agent_addr, "replan-alice", 8192).await;
-    let (_kb, b) = spawn_agent(agent_addr, "replan-bob", 12288).await;
+    let (_kb, b) = spawn_agent_hang_infer(agent_addr, "replan-bob", 12288, hang.clone()).await;
     let (_kc, c) = spawn_agent(agent_addr, "replan-carol", 16384).await;
     tokio::time::sleep(Duration::from_millis(250)).await;
     {
@@ -2670,17 +2673,15 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
         .json()
         .await
         .unwrap();
-    let free0 = sched0["stream_slots_free"].as_u64().unwrap();
     assert!(
         sched0["shards"].as_u64().unwrap_or(0) >= 3,
         "need multi-shard plan: {sched0}"
     );
     eprintln!(
-        "OBSERVE control-replan before free={free0} shards={}",
-        sched0["shards"]
+        "OBSERVE control-replan before free={} shards={}",
+        sched0["stream_slots_free"], sched0["shards"]
     );
 
-    // Start chat; while plan is agreed mid-flight, kill a non-alice donor (confirmed shard).
     let chat = {
         let client = client.clone();
         let base = base.clone();
@@ -2694,15 +2695,16 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
                     "messages": [{"role":"user","content":"control-shard-die-replan"}],
                     "max_tokens": 24
                 }))
-                .timeout(Duration::from_secs(25))
+                .timeout(Duration::from_secs(30))
                 .send()
                 .await
         })
     };
 
-    // Wait for first plan_agreed then abort confirmed shard (bob).
+    // Wait until first plan is agreed AND infer is mid-flight (pending / lease / used).
     let mut first_request_id: Option<String> = None;
-    for _ in 0..80 {
+    let mut mid_flight = false;
+    for _ in 0..120 {
         let leases: serde_json::Value = client
             .get(format!("{base}/v1/cluster/leases"))
             .send()
@@ -2712,12 +2714,34 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
             .await
             .unwrap();
         let audit = leases["audit"].as_array().cloned().unwrap_or_default();
-        if let Some(e) = audit.iter().find(|e| e["event"] == "plan_agreed") {
-            first_request_id = e["request_id"].as_str().map(|s| s.to_string());
+        if first_request_id.is_none() {
+            if let Some(e) = audit.iter().find(|e| e["event"] == "plan_agreed") {
+                first_request_id = e["request_id"].as_str().map(|s| s.to_string());
+            }
+        }
+        let active = leases["active_leases"].as_u64().unwrap_or(0);
+        let used = {
+            let s: serde_json::Value = client
+                .get(format!("{base}/v1/cluster/scheduler"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            s["stream_slots_used"].as_u64().unwrap_or(0)
+        };
+        let pending_n = {
+            let g = app.state.read().await;
+            g.pending.len()
+        };
+        if first_request_id.is_some() && (pending_n > 0 || active > 0 || used > 0) {
+            mid_flight = true;
             eprintln!(
-                "OBSERVE control-replan plan_agreed request_id={:?}; aborting confirmed shard bob",
+                "OBSERVE control-replan mid-infer request_id={:?} pending={pending_n} active_leases={active} used={used}; abort hang shard bob",
                 first_request_id
             );
+            hang.store(false, std::sync::atomic::Ordering::SeqCst);
             b.abort();
             break;
         }
@@ -2726,6 +2750,10 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    assert!(
+        mid_flight,
+        "must kill hang shard only mid-infer (got mid_flight={mid_flight} rid={first_request_id:?})"
+    );
 
     let resp = chat.await.expect("join chat").expect("http");
     let status = resp.status();
@@ -2734,7 +2762,7 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
         "OBSERVE control-replan chat status={} body_len={} body={}",
         status,
         body_txt.len(),
-        body_txt.chars().take(200).collect::<String>()
+        body_txt.chars().take(220).collect::<String>()
     );
 
     let leases_mid: serde_json::Value = client
@@ -2760,10 +2788,9 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
         .count();
 
     if status.is_success() {
-        // Successful path after confirmed-shard death must have replan: second agree.
         assert!(
             plan_agreed_n >= 2,
-            "200 after shard death must replan (plan_agreed≥2), got {plan_agreed_n}: {leases_mid}"
+            "200 after mid-infer shard death must replan (plan_agreed≥2), got {plan_agreed_n}: {leases_mid}"
         );
         assert!(
             lease_granted_n >= 2,
@@ -2777,11 +2804,10 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
             "OBSERVE control-replan SUCCESS plan_agreed={plan_agreed_n} grants={lease_granted_n} releases={lease_released_n}"
         );
     } else {
-        // Fail-closed only when remaining pool cannot complete (no capacity / disconnect).
         assert_eq!(
             status,
             reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            "fail-closed must be 503 pool/shard capacity, got {status} {body_txt}"
+            "fail-closed must be 503, got {status} {body_txt}"
         );
         assert!(
             body_txt.contains("replan")
@@ -2797,7 +2823,6 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
         );
     }
 
-    // Late InferDone bound to dead/cleared first plan must not revive leases or used slots.
     if let Some(rid_s) = first_request_id.as_deref() {
         if let Ok(rid) = uuid::Uuid::parse_str(rid_s) {
             let victim = {
@@ -2812,14 +2837,13 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
             };
             {
                 let mut g = app.state.write().await;
-                // Inject poison completion for the *old* request_id (plan cleared / settled).
                 g.settle_shard_success(rid, "POISON-OLD-PLAN-DONE".into(), 1, 1, &victim, true);
             }
             eprintln!("OBSERVE late InferDone inject on old request_id={rid_s}");
         }
     }
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(80)).await;
     let sched1: serde_json::Value = client
         .get(format!("{base}/v1/cluster/scheduler"))
         .send()
@@ -2847,9 +2871,12 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
         .await
         .unwrap();
     assert_eq!(leases["active_leases"].as_u64().unwrap_or(99), 0);
-    let audit = leases["audit"].as_array().expect("audit");
     assert!(
-        audit.iter().any(|e| e["event"] == "lease_released"),
+        leases["audit"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["event"] == "lease_released"),
         "must release lease: {leases}"
     );
     eprintln!(

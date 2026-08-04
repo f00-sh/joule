@@ -629,7 +629,7 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
 
     if let Some(id) = node_id {
         app.routes.lock().await.remove(&id);
-        // Fail-fast any pipeline stage waiters for this node (control replan path).
+        // Fail-fast pipeline stage waiters for this node.
         {
             let mut w = app.shard_acks.lock().await;
             let keys: Vec<_> = w.keys().filter(|(_, n)| n == &id).cloned().collect();
@@ -639,8 +639,23 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
                 }
             }
         }
-        app.state.write().await.remove_node(&id);
-        info!(%id, "agent left");
+        // Structural: any PendingInfer that still lists this confirmed shard fails
+        // (unblocks fanout oneshot → control/mesh replan path).
+        let failed = {
+            let mut g = app.state.write().await;
+            let failed = g.fail_pending_for_dead_shard(&id);
+            g.remove_node(&id);
+            failed
+        };
+        if !failed.is_empty() {
+            info!(
+                %id,
+                n = failed.len(),
+                "agent left; failed pending infer(s) for confirmed dead shard"
+            );
+        } else {
+            info!(%id, "agent left");
+        }
     }
     write_task.abort();
     Ok(())
