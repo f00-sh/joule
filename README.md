@@ -6,7 +6,7 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 
 | | |
 |---|---|
-| Status | **0.1.13** released (control replan, lab-mid multi-donor PP, contribution gate, tokens/s) |
+| Status | **0.1.13 alpha complete** — cluster product software track closed (lab tensor path; not full Kimi quality) |
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |

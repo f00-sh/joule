@@ -200,16 +200,18 @@ No path checks the donor’s network type. If a plan is too slow in practice, op
 
 ## 12. Phased delivery
 
-| Phase | Outcome | Exit |
-|---|---|---|
-| **C0** | Skeleton, capacity type, lab, design | `cargo test`, `joule capacity --json` |
-| **C1** | Agent transport + heartbeats | 2 nodes anywhere form a cluster |
-| **C2** | Real single-node engine | Replica serves real model |
-| **C3** | Multi-node execution | Pipeline/replica across internet nodes |
-| **C4** | Gateway + keys | OpenAI clients work; freeloader denied |
-| **C5** | Live capacity API + dashboard UI | Public page shows live pool stats |
-| **C6** | Challenges + economy | Mint/burn live; abuse path measured |
-| **C7** | Public alpha installers | External donors move the dashboard numbers |
+| Phase | Outcome | Exit | Alpha (0.1.13) |
+|---|---|---|---|
+| **C0** | Skeleton, capacity type, lab, design | `cargo test`, `joule capacity --json` | **done** |
+| **C1** | Agent transport + heartbeats | 2 nodes anywhere form a cluster | **done** |
+| **C2** | Real single-node engine | Replica serves real model | **done** (lab tensor ClusterEngine; not full Kimi) |
+| **C3** | Multi-node execution | Pipeline/replica across internet nodes | **done** (sequential PP + replan) |
+| **C4** | Gateway + keys | OpenAI clients work; freeloader denied | **done** |
+| **C5** | Live capacity API + dashboard UI | Public page shows live pool stats | **done** (+ tokens/s) |
+| **C6** | Challenges + economy | Mint/burn live; abuse path measured | **done** |
+| **C7** | Public alpha installers | External donors move the dashboard numbers | **done** (v0.1.13 assets + channels) |
+
+**Alpha closeout:** v0/alpha **cluster product software track is complete** at **0.1.13**. Permanent non-goals: multi-hundred-GB Kimi quality, GPU/FFI without ADR 0003+, cash/multi-model, f00 weight CDN.
 
 ## 13. Key decisions
 

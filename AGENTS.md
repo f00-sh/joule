@@ -9,9 +9,18 @@
 | Domain | joule.f00.sh |
 | License | MIT |
 | Language | **Rust** (workspace; strict purity for first-party code) |
-| Status | 0.1.9 released (native OS installers + interactive GUI) |
+| Status | **0.1.13 alpha complete** — v0 cluster product software track closed |
 
 **One-liner:** Distributed internet-wide supercomputer cluster — pool idle GPUs into open-weight AI inference (Kimi-class).
+
+### Alpha track complete (v0 / 0.1.13)
+
+The **cluster product software track is complete** at SemVer **0.1.13**: control + agent protocol, multi-donor PP with lab tensor engines, contribution gate, leases, capacity + measured tokens/s, replan on shard death, installers/channels.
+
+**Permanent post-alpha non-goals (not a software backlog for this track):**
+- Full multi-hundred-GB Kimi / Moonshot answer quality (lab fixtures only for alpha)
+- GPU/FFI inference without **ADR 0003+** + AGENTS purity update
+- Cash/fiat, multi-model, f00 weight CDN hosting, global fleet ops as product gates
 
 ## Product laws
 

@@ -243,7 +243,11 @@ mod tests {
     #[test]
     fn stage_roundtrip() {
         let _env = crate::weights::test_env::lock();
-        let dir = std::env::temp_dir().join(format!("joule-sw-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "joule-sw-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
         let blobs = dir.join("blobs");
         let soft = dir.join("soft");
         let _ = fs::remove_dir_all(&dir);
@@ -255,6 +259,11 @@ mod tests {
         let payload = b"#!/bin/sh\necho joule-test\n";
         let hash = hex::encode(Sha256::digest(payload));
         WeightsStore::store_blob(&hash, payload).unwrap();
+        // Re-pin env after store (parallel tests must not steal path under lock).
+        std::env::set_var("JOULE_BLOBS_DIR", &blobs);
+        std::env::set_var("JOULE_SOFTWARE_DIR", &soft);
+        let got = WeightsStore::read_blob(&hash).expect("blob must be readable after store");
+        assert_eq!(got, payload);
         let target = SoftwareTarget {
             os: current_os().into(),
             arch: current_arch().into(),
@@ -268,7 +277,7 @@ mod tests {
             notes: "unit".into(),
         };
         assert!(match_target(&body).is_some());
-        let st = stage_blob("0.0.1-test", &target).unwrap();
+        let st = stage_blob("0.0.1-test", &target).expect("stage after verified store");
         assert!(st.staged);
         assert!(Path::new(&st.path).is_file());
         let apply_to = soft.join("installed-joule");

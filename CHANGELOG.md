@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+<!-- Alpha software queue closed at 0.1.13. Post-alpha work (full Kimi, GPU ADR 0003+, fleet ops)
+     is out of band — not open Unreleased product-layer TODOs for this track. -->
+
 ## [0.1.13] — 2026-08-04
 
 Product layer after 0.1.12: control shard recovery, multi-donor lab-mid PP, contribution gate, measured tokens/s dashboard.

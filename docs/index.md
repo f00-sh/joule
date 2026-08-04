@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| Status | **0.1.13** released (control replan, lab-mid multi-donor PP, contribution gate, tokens/s) |
+| Status | **0.1.13 alpha complete** — cluster product software track closed |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
 | License | MIT |
 

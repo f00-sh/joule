@@ -502,6 +502,7 @@ mod tests {
             .iter()
             .find(|q| q.id == "kimi-k3-shards")
             .expect("k3-shards");
+        let _env = crate::weights::test_env::lock();
         let dir = std::env::temp_dir().join(format!("joule-k3-fc-{}", Uuid::new_v4()));
         let blob = std::env::temp_dir().join(format!("joule-k3-fc-b-{}", Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -650,6 +651,7 @@ mod tests {
 
     #[tokio::test]
     async fn cluster_engine_prepare_stage_is_weight_backed() {
+        let _env = crate::weights::test_env::lock();
         let dir = std::env::temp_dir().join(format!("joule-ce-prep-{}", Uuid::new_v4()));
         let blob = std::env::temp_dir().join(format!("joule-ce-prep-b-{}", Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -702,6 +704,7 @@ mod tests {
         use crate::manifest::WeightFile;
         use sha2::{Digest, Sha256};
 
+        let _env = crate::weights::test_env::lock();
         let dir = std::env::temp_dir().join(format!("joule-band-only-{}", Uuid::new_v4()));
         let blob = std::env::temp_dir().join(format!("joule-band-only-b-{}", Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -823,6 +826,7 @@ mod tests {
 
     #[test]
     fn digests_gate_service_live_honesty() {
+        let _env = crate::weights::test_env::lock();
         let dir = std::env::temp_dir().join(format!("joule-digests-{}", Uuid::new_v4()));
         let blob = std::env::temp_dir().join(format!("joule-digests-blobs-{}", Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
