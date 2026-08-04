@@ -202,7 +202,14 @@ impl ProductionEngine {
         id == "kimi-k3-shards" || id.starts_with("kimi-k3")
     }
 
-    /// Fail closed if quant is production-class without unlock + complete files.
+    /// Public: claim production quant intent **without** verifying digests.
+    /// Leaves `content_verified=false` so stage/infer fail closed until mark/install.
+    pub fn begin_quant_intent(&self, quant: &QuantSpec) {
+        *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
+        *self.content_verified.lock().expect("lock") = false;
+    }
+
+    /// Full-quant digest gate (all listed files complete + non-synthetic pins).
     pub fn require_production_content(
         store: &WeightsStore,
         quant: &QuantSpec,
@@ -225,6 +232,40 @@ impl ProductionEngine {
         Ok(())
     }
 
+    /// Band-scoped digest gate for multi-donor partial residency (AC3).
+    /// Production quant unlocks stage when preferred band files match sha256 on disk
+    /// (not only when all 96 full-quant shards are complete).
+    pub fn require_production_band(
+        store: &WeightsStore,
+        model: &str,
+        quant: &QuantSpec,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Result<(), RuntimeError> {
+        if is_lab_fixture_quant(quant) {
+            return Ok(());
+        }
+        if Self::is_production_quant_id(&quant.id) {
+            if !quant_can_unlock_service_digests(quant) {
+                return Err(RuntimeError::Infer(
+                    "production quant digests are placeholders — refuse".into(),
+                ));
+            }
+            // Full quant complete is always enough.
+            if digests_verified_for_quant(store, model, quant) {
+                return Ok(());
+            }
+            store
+                .band_files_ready(model, quant, layer_start, layer_end)
+                .map_err(|e| {
+                    RuntimeError::Infer(format!(
+                        "production band digests not verified L{layer_start}-{layer_end}: {e}"
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
     /// Shipped install path: content-proof then load tensors onto the engine.
     pub fn install_production(
         &self,
@@ -233,50 +274,93 @@ impl ProductionEngine {
         quant: &QuantSpec,
         loaded: LoadedModel,
     ) -> Result<(), RuntimeError> {
-        if quant.id != loaded.quant && !loaded.quant.is_empty() {
-            // allow empty quant field
-        }
         let _ = model;
         Self::require_production_content(store, quant)?;
         self.inner.install_loaded(loaded);
-        *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
-        *self.content_verified.lock().expect("lock") =
-            Self::is_production_quant_id(&quant.id) || is_lab_fixture_quant(quant);
-        if Self::is_production_quant_id(&quant.id) {
-            *self.content_verified.lock().expect("lock") = true;
-        }
-        Ok(())
-    }
-
-    /// Mark content after prepare_and_install when digests verify for `quant`.
-    pub fn mark_content_from_store(
-        &self,
-        store: &WeightsStore,
-        quant: &QuantSpec,
-    ) -> Result<(), RuntimeError> {
-        Self::require_production_content(store, quant)?;
         *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
         *self.content_verified.lock().expect("lock") = true;
         Ok(())
     }
 
-    fn gate_production_content(&self) -> Result<(), RuntimeError> {
-        let q = self.production_quant.lock().expect("lock").clone();
-        let Some(qid) = q else {
-            // No production quant claimed — lab/cluster path may still run if weights resident.
-            return Ok(());
-        };
-        if Self::is_production_quant_id(&qid) && !*self.content_verified.lock().expect("lock") {
-            return Err(RuntimeError::Infer(format!(
-                "ProductionEngine: production quant {qid} digests not verified — refuse stage/infer"
-            )));
-        }
+    /// Band install: unlock via band_files_ready (or full quant), then resident load.
+    pub fn install_production_band(
+        &self,
+        store: &WeightsStore,
+        model: &str,
+        quant: &QuantSpec,
+        loaded: LoadedModel,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Result<(), RuntimeError> {
+        Self::require_production_band(store, model, quant, layer_start, layer_end)?;
+        self.inner.install_loaded(loaded);
+        *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
+        *self.content_verified.lock().expect("lock") = true;
         Ok(())
+    }
+
+    /// Mark content after prepare_and_install when digests verify for full `quant`.
+    pub fn mark_content_from_store(
+        &self,
+        store: &WeightsStore,
+        quant: &QuantSpec,
+    ) -> Result<(), RuntimeError> {
+        // Always record intent first so a failed mark leaves fail-closed state.
+        self.begin_quant_intent(quant);
+        Self::require_production_content(store, quant)?;
+        *self.content_verified.lock().expect("lock") = true;
+        Ok(())
+    }
+
+    /// Mark after band prepare (multi-donor). Public fail-closed path for AC3.
+    pub fn mark_content_from_band(
+        &self,
+        store: &WeightsStore,
+        model: &str,
+        quant: &QuantSpec,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Result<(), RuntimeError> {
+        self.begin_quant_intent(quant);
+        Self::require_production_band(store, model, quant, layer_start, layer_end)?;
+        *self.content_verified.lock().expect("lock") = true;
+        Ok(())
+    }
+
+    /// Fail closed unless content was proven via mark/install (lab or production).
+    /// Weight-gated stage and all infer require this — no open path when intent missing.
+    fn gate_production_content(&self, weight_gated: bool) -> Result<(), RuntimeError> {
+        if *self.content_verified.lock().expect("lock") {
+            return Ok(());
+        }
+        if !weight_gated {
+            // Ungated lab stage (require_band_weights=false) still refuses if a
+            // production quant intent was claimed but never verified.
+            let q = self.production_quant.lock().expect("lock").clone();
+            if let Some(qid) = q {
+                if Self::is_production_quant_id(&qid) {
+                    return Err(RuntimeError::Infer(format!(
+                        "ProductionEngine: production quant {qid} digests not verified — refuse"
+                    )));
+                }
+            }
+            return Ok(());
+        }
+        // Weight-gated path: always require content proof (lab or K3).
+        let q = self
+            .production_quant
+            .lock()
+            .expect("lock")
+            .clone()
+            .unwrap_or_else(|| "(none)".into());
+        Err(RuntimeError::Infer(format!(
+            "ProductionEngine: content digests not verified (quant={q}) — refuse stage/infer"
+        )))
     }
 
     /// GPU (or host-fallback) weight stage — **not** ClusterEngine::stage_layers.
     fn production_stage(&self, req: StageRequest) -> Result<StageOutput, RuntimeError> {
-        self.gate_production_content()?;
+        self.gate_production_content(req.require_band_weights)?;
         if req.require_band_weights && !self.has_resident_weights() {
             return Err(RuntimeError::Infer(
                 "ProductionEngine: missing resident weights for band stage".into(),
@@ -346,7 +430,8 @@ impl ProductionEngine {
     }
 
     fn production_infer(&self, req: InferRequest) -> Result<InferResponse, RuntimeError> {
-        self.gate_production_content()?;
+        // Infer always weight-gated on ProductionEngine.
+        self.gate_production_content(true)?;
         if !self.has_resident_weights() {
             return Err(RuntimeError::NotLoaded(req.model.clone()));
         }
@@ -765,9 +850,28 @@ mod tests {
         .await
         .unwrap();
 
-        // Claim production quant without content proof → stage must fail via Engine.
-        *eng.production_quant.lock().unwrap() = Some("kimi-k3-shards".into());
-        *eng.content_verified.lock().unwrap() = false;
+        // Public API only: begin intent + failed mark leaves fail-closed.
+        let empty_k3 = QuantSpec {
+            id: "kimi-k3-band-proof".into(),
+            min_node_vram_mib: 256,
+            approx_file_mib: 1,
+            files: vec![WeightFile {
+                path: "model-00001-of-000096.safetensors".into(),
+                sha256: "ab".repeat(32), // non-synthetic shape; file missing
+                url: "peer://kimi-open/k3/model-00001-of-000096.safetensors".into(),
+                size_bytes: 64,
+            }],
+        };
+        assert!(!is_synthetic_placeholder_digest(&empty_k3.files[0].sha256));
+        eng.begin_quant_intent(&empty_k3);
+        assert!(eng
+            .mark_content_from_band(&store, "kimi-open", &empty_k3, 0, 0)
+            .is_err());
+        assert!(!eng.content_verified());
+        assert_eq!(
+            eng.production_quant_id().as_deref(),
+            Some("kimi-k3-band-proof")
+        );
         let fail = eng
             .stage_layers(StageRequest {
                 model: CLUSTER_MODEL.into(),
@@ -788,8 +892,7 @@ mod tests {
             "err should mention digests: {err}"
         );
 
-        // Shipped unlock: plant real (non-synthetic) digest-backed band file,
-        // digests_verified_for_quant, install_production, then stage via Engine.
+        // Shipped unlock: plant band file → mark_content_from_band + install_production_band.
         let md = store.model_dir("kimi-open", "kimi-k3-band-proof");
         fs::create_dir_all(&md).unwrap();
         let path = md.join("model-00001-of-000096.safetensors");
@@ -797,7 +900,6 @@ mod tests {
         let bytes = fs::read(&path).unwrap();
         let hash = hex::encode(Sha256::digest(&bytes));
         assert!(!is_synthetic_placeholder_digest(&hash));
-        // Production-class quant id with real digest-backed band file(s).
         let quant = QuantSpec {
             id: "kimi-k3-band-proof".into(),
             min_node_vram_mib: 256,
@@ -810,14 +912,14 @@ mod tests {
             }],
         };
         assert!(quant_can_unlock_service_digests(&quant));
-        assert!(digests_verified_for_quant(&store, "kimi-open", &quant));
-        ProductionEngine::require_production_content(&store, &quant).unwrap();
+        eng.mark_content_from_band(&store, "kimi-open", &quant, 0, 0)
+            .expect("mark band after plant");
 
         let m = ManifestFile::load_default().unwrap();
         let spec = m.primary().unwrap();
         let lm = load_model_for_band(&store, spec, &quant, 0, 0).unwrap();
-        eng.install_production(&store, &spec.id, &quant, lm)
-            .expect("install_production");
+        eng.install_production_band(&store, &spec.id, &quant, lm, 0, 0)
+            .expect("install_production_band");
         assert!(eng.content_verified());
         assert_eq!(
             eng.production_quant_id().as_deref(),
@@ -874,7 +976,7 @@ mod tests {
                 }],
             };
             let lm2 = load_model_for_band(&store, spec, &quant2, 0, 0).unwrap();
-            eng.install_production(&store, &spec.id, &quant2, lm2)
+            eng.install_production_band(&store, &spec.id, &quant2, lm2, 0, 0)
                 .unwrap();
         }
         let out2 = eng

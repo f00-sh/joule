@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use joule_dht::{DhtStore, PeerRecord};
 use joule_proto::{decode_line, encode_line, BlobMeta, Envelope, Message, NodeId};
-use joule_runtime::{ClusterEngine, WeightsStore};
+use joule_runtime::{ProductionEngine, WeightsStore};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -180,7 +180,7 @@ pub async fn run_peer_listener(
     listener: TcpListener,
     node_id: NodeId,
     mesh: SharedMesh,
-    engine: Arc<ClusterEngine>,
+    engine: Arc<ProductionEngine>,
 ) -> Result<()> {
     loop {
         let (sock, peer) = listener.accept().await?;
@@ -199,7 +199,7 @@ async fn handle_peer_session(
     sock: TcpStream,
     node_id: NodeId,
     mesh: SharedMesh,
-    engine: Arc<ClusterEngine>,
+    engine: Arc<ProductionEngine>,
 ) -> Result<()> {
     let (reader, mut writer) = sock.into_split();
     let mut lines = BufReader::new(reader).lines();
@@ -622,7 +622,7 @@ mod tests {
         let seeder = NodeId::new();
         let mesh = Arc::new(Mutex::new(LocalMesh::new()));
         let mesh2 = mesh.clone();
-        let eng = Arc::new(ClusterEngine::new());
+        let eng = Arc::new(ProductionEngine::new());
         tokio::spawn(async move {
             let _ = run_peer_listener(listener, seeder, mesh2, eng).await;
         });
@@ -667,19 +667,39 @@ mod tests {
 
     /// P3: dial peer multiaddr, send InferRequest, receive InferDone (no control relay).
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn peer_direct_infer_request_infer_done_roundtrip() {
         use joule_proto::{ClusterPlan, ShardAssignment, ShardRole, CLUSTER_MODEL};
+        use joule_runtime::{prepare_and_install, ManifestFile};
         use uuid::Uuid;
+
+        let _guard = env_lock();
+        let dir = std::env::temp_dir().join(format!(
+            "joule-peer-infer-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("JOULE_BLOBS_DIR", &dir);
+        let store = WeightsStore::new(&dir);
+        let eng = Arc::new(ProductionEngine::new());
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.primary().unwrap();
+        let lab = spec.pick_quant(256).expect("lab-tiny");
+        prepare_and_install(&store, eng.cluster(), spec, lab).expect("lab prepare");
+        eng.mark_content_from_store(&store, lab)
+            .expect("lab content mark");
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let multi = format_tcp_multiaddr(addr);
         let seeder = NodeId::new();
         let mesh = Arc::new(Mutex::new(LocalMesh::new()));
-        let eng = Arc::new(ClusterEngine::new());
+        let eng2 = eng.clone();
         let seeder2 = seeder.clone();
         tokio::spawn(async move {
-            let _ = run_peer_listener(listener, seeder2, mesh, eng).await;
+            let _ = run_peer_listener(listener, seeder2, mesh, eng2).await;
         });
         tokio::time::sleep(Duration::from_millis(40)).await;
 
@@ -741,9 +761,15 @@ mod tests {
                     !text.is_empty() && text.contains("peer-direct-p3"),
                     "peer InferDone text={text}"
                 );
+                assert!(
+                    text.contains("joule-cuda") || text.contains("joule-production"),
+                    "peer path must use ProductionEngine: {text}"
+                );
                 eprintln!("OBSERVE peer-direct InferRequest→InferDone multi={multi} text={text}");
             }
             other => panic!("expected InferDone, got {other:?}"),
         }
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

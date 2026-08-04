@@ -27,8 +27,8 @@ use joule_proto::{
 };
 use joule_runtime::{
     apply_staged, load_model, match_target, parse_software_update, prepare_and_install,
-    prepare_and_install_for_band, read_stage, readiness_for_pool_ex, stage_blob, ClusterEngine,
-    Engine, InferRequest, ManifestFile, ProductionEngine, RuntimeFlags, SoftwareTarget, StubEngine,
+    prepare_and_install_for_band, read_stage, readiness_for_pool_ex, stage_blob, Engine,
+    InferRequest, ManifestFile, ProductionEngine, RuntimeFlags, SoftwareTarget, StubEngine,
     WeightsStore,
 };
 use std::collections::HashMap;
@@ -1414,7 +1414,7 @@ async fn run_agent(
         }
         let nid = node_id.clone();
         let mesh = local_mesh.clone();
-        let eng = shared_engine.clone();
+        let eng = production_engine.clone();
         tokio::spawn(async move {
             if let Err(e) = peer_net::run_peer_listener(listener, nid, mesh, eng).await {
                 warn!(error = %e, "peer listener exited");
@@ -1791,6 +1791,7 @@ async fn run_agent(
                                     if let Ok(m) = ManifestFile::load_default() {
                                         if let Some(spec) = m.model(CLUSTER_MODEL) {
                                             if let Some(q) = spec.pick_quant(mem_mib.max(256)) {
+                                                production.begin_quant_intent(q);
                                                 match prepare_and_install_for_band(
                                                     &store,
                                                     engine.as_ref(),
@@ -1800,25 +1801,53 @@ async fn run_agent(
                                                     le,
                                                 ) {
                                                     Ok(report) => {
-                                                        info!(
-                                                            layers = %format!("{ls}-{le}"),
-                                                            tensors = report.tensors,
-                                                            bytes = report.bytes_resident,
-                                                            "band-only weights installed for plan shard"
-                                                        );
+                                                        if let Err(e) = production
+                                                            .mark_content_from_band(
+                                                                &store,
+                                                                &spec.id,
+                                                                q,
+                                                                ls,
+                                                                le,
+                                                            )
+                                                        {
+                                                            warn!(
+                                                                error = %e,
+                                                                quant = %q.id,
+                                                                "band content gate refused — stage will fail closed"
+                                                            );
+                                                        } else {
+                                                            info!(
+                                                                layers = %format!("{ls}-{le}"),
+                                                                tensors = report.tensors,
+                                                                bytes = report.bytes_resident,
+                                                                "band-only weights installed + production content marked"
+                                                            );
+                                                        }
                                                     }
                                                     Err(e) => {
-                                                        // Fall back to full prepare if band path incomplete.
                                                         info!(
                                                             error = %e,
-                                                            "band-only prepare deferred; keeping resident load"
+                                                            "band-only prepare deferred; trying full quant"
                                                         );
-                                                        let _ = prepare_and_install(
+                                                        match prepare_and_install(
                                                             &store,
                                                             engine.as_ref(),
                                                             spec,
                                                             q,
-                                                        );
+                                                        ) {
+                                                            Ok(report) => {
+                                                                if let Err(me) = production
+                                                                    .mark_content_from_store(
+                                                                        &store, q,
+                                                                    )
+                                                                {
+                                                                    warn!(error = %me, "full quant content gate refused");
+                                                                } else {
+                                                                    info!(tensors = report.tensors, "full quant installed + marked");
+                                                                }
+                                                            }
+                                                            Err(e2) => info!(error = %e2, "full prepare also deferred"),
+                                                        }
                                                     }
                                                 }
                                             }
@@ -2011,33 +2040,36 @@ async fn run_agent(
                                             Err(e) => warn!(error = %e, "prepare failed"),
                                         }
                                         // Shared load path (same as peer-seed completion).
+                                        production.begin_quant_intent(q);
                                         match prepare_and_install(&store, engine.as_ref(), spec, q) {
                                             Ok(report) => {
-                                                // ADR 0003: arm ProductionEngine content-proof for stage/infer.
-                                                if let Err(e) =
-                                                    production.mark_content_from_store(&store, q)
-                                                {
-                                                    warn!(
-                                                        error = %e,
-                                                        quant = %q.id,
-                                                        "production content gate refused after prepare"
-                                                    );
+                                                // ADR 0003: content-proof required before ModelLoaded honesty.
+                                                match production.mark_content_from_store(&store, q) {
+                                                    Ok(()) => {
+                                                        last_armed = true;
+                                                        println!("loaded: {}", report.message);
+                                                        let loaded = Envelope::new(
+                                                            node_id.clone(),
+                                                            Message::ModelLoaded {
+                                                                model: report.model,
+                                                                quant: report.quant,
+                                                                bytes_resident: report.bytes_resident,
+                                                                tensors: report.tensors as u32,
+                                                                message: report.message,
+                                                            },
+                                                        );
+                                                        writer
+                                                            .write_all(&encode_line(&loaded)?)
+                                                            .await?;
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            error = %e,
+                                                            quant = %q.id,
+                                                            "content gate refused — not emitting ModelLoaded"
+                                                        );
+                                                    }
                                                 }
-                                                last_armed = true;
-                                                println!("loaded: {}", report.message);
-                                                let loaded = Envelope::new(
-                                                    node_id.clone(),
-                                                    Message::ModelLoaded {
-                                                        model: report.model,
-                                                        quant: report.quant,
-                                                        bytes_resident: report.bytes_resident,
-                                                        tensors: report.tensors as u32,
-                                                        message: report.message,
-                                                    },
-                                                );
-                                                writer
-                                                    .write_all(&encode_line(&loaded)?)
-                                                    .await?;
                                             }
                                             Err(e) => {
                                                 info!(error = %e, "model load deferred")
@@ -2381,7 +2413,7 @@ async fn run_agent(
                                     // If a weight digest landed, try prepare/load for primary quant.
                                     try_load_after_blob(
                                         &store,
-                                        engine.as_ref(),
+                                        production.as_ref(),
                                         &mut writer,
                                         &node_id,
                                         &finished.sha256,
@@ -2434,13 +2466,15 @@ fn append_broadcast_journal(envelope: &SignedEnvelope) -> Result<()> {
 
 async fn try_load_after_blob(
     store: &WeightsStore,
-    engine: &ClusterEngine,
+    production: &ProductionEngine,
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     node_id: &NodeId,
     sha256: &str,
     mem_mib: u32,
     last_armed: &mut bool,
 ) -> Result<()> {
+    let engine = production.cluster();
+
     let Ok(manifest) = ManifestFile::load_default() else {
         return Ok(());
     };
@@ -2478,21 +2512,25 @@ async fn try_load_after_blob(
             );
             writer.write_all(&encode_line(&ok)?).await?;
             if st.files_complete {
+                production.begin_quant_intent(q);
                 match prepare_and_install(store, engine, spec, q) {
-                    Ok(report) => {
-                        println!("loaded after peer seed: {}", report.message);
-                        let loaded = Envelope::new(
-                            node_id.clone(),
-                            Message::ModelLoaded {
-                                model: report.model,
-                                quant: report.quant,
-                                bytes_resident: report.bytes_resident,
-                                tensors: report.tensors as u32,
-                                message: report.message,
-                            },
-                        );
-                        writer.write_all(&encode_line(&loaded)?).await?;
-                    }
+                    Ok(report) => match production.mark_content_from_store(store, q) {
+                        Ok(()) => {
+                            println!("loaded after peer seed: {}", report.message);
+                            let loaded = Envelope::new(
+                                node_id.clone(),
+                                Message::ModelLoaded {
+                                    model: report.model,
+                                    quant: report.quant,
+                                    bytes_resident: report.bytes_resident,
+                                    tensors: report.tensors as u32,
+                                    message: report.message,
+                                },
+                            );
+                            writer.write_all(&encode_line(&loaded)?).await?;
+                        }
+                        Err(e) => warn!(error = %e, "peer-seed content gate refused"),
+                    },
                     Err(e) => info!(error = %e, "load after seed deferred"),
                 }
             }
