@@ -27,10 +27,10 @@ use joule_proto::{
     NodeId, OperatorKind, SignedEnvelope, CLUSTER_MODEL,
 };
 use joule_runtime::{
-    apply_staged, load_model, match_target, parse_software_update, prepare_and_install,
-    prepare_and_install_for_band, read_stage, readiness_for_pool_ex, stage_blob, Engine,
-    InferRequest, ManifestFile, ProductionEngine, RuntimeFlags, SoftwareTarget, StubEngine,
-    WeightsStore,
+    agent_should_reprepare, apply_staged, load_model, match_target, parse_software_update,
+    prepare_and_install, prepare_and_install_for_band, read_stage, readiness_for_pool_ex,
+    resolve_agent_quant, resolve_plan_band_quant, stage_blob, Engine, InferRequest, ManifestFile,
+    ProductionEngine, RuntimeFlags, SoftwareTarget, StubEngine, WeightsStore,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1545,7 +1545,10 @@ async fn run_agent(
     let production = production_engine;
     let store = WeightsStore::new(WeightsStore::default_root());
     store.ensure_root().ok();
-    let mut last_armed = false;
+    // Last quant id successfully armed (re-prepare on lab→kimi-k3-shards upgrade).
+    let mut last_armed_quant: Option<String> = None;
+    // Last control recommend_quant from PoolStatus (PlanAccept band uses this).
+    let mut last_recommend_quant: Option<String> = None;
     let mut pending_recv: HashMap<Uuid, PendingBlobRecv> = HashMap::new();
     // When software_update matches this host, stage once the digest lands.
     let mut pending_software: Option<(String, SoftwareTarget)> = None;
@@ -1839,14 +1842,19 @@ async fn run_agent(
                             },
                         );
                         writer.write_all(&encode_line(&acc)?).await?;
-                        // Per-shard band-only load: when we own a layer band, prefer
-                        // prepare_and_install_for_band (preferred files only) over full quant.
+                        // Per-shard band-only load: preferred files only. Quant must follow
+                        // control recommend / production K3 (not pick_quant(mem) — 8 GiB
+                        // donors would stick on lab forever).
                         if accepted {
                             if let Some(shard) = plan.shards.iter().find(|s| s.node == node_id) {
                                 if let (Some(ls), Some(le)) = (shard.layer_start, shard.layer_end) {
                                     if let Ok(m) = ManifestFile::load_default() {
                                         if let Some(spec) = m.model(CLUSTER_MODEL) {
-                                            if let Some(q) = spec.pick_quant(mem_mib.max(256)) {
+                                            if let Some(q) = resolve_plan_band_quant(
+                                                spec,
+                                                last_recommend_quant.as_deref(),
+                                                mem_mib,
+                                            ) {
                                                 production.begin_quant_intent(q);
                                                 match prepare_and_install_for_band(
                                                     &store,
@@ -1872,7 +1880,9 @@ async fn run_agent(
                                                                 "band content gate refused — stage will fail closed"
                                                             );
                                                         } else {
+                                                            last_armed_quant = Some(q.id.clone());
                                                             info!(
+                                                                quant = %q.id,
                                                                 layers = %format!("{ls}-{le}"),
                                                                 tensors = report.tensors,
                                                                 bytes = report.bytes_resident,
@@ -1899,7 +1909,13 @@ async fn run_agent(
                                                                 {
                                                                     warn!(error = %me, "full quant content gate refused");
                                                                 } else {
-                                                                    info!(tensors = report.tensors, "full quant installed + marked");
+                                                                    last_armed_quant =
+                                                                        Some(q.id.clone());
+                                                                    info!(
+                                                                        quant = %q.id,
+                                                                        tensors = report.tensors,
+                                                                        "full quant installed + marked"
+                                                                    );
                                                                 }
                                                             }
                                                             Err(e2) => info!(error = %e2, "full prepare also deferred"),
@@ -2032,30 +2048,37 @@ async fn run_agent(
                             backends,
                             "{message}"
                         );
-                        // Production: load the best available quant for this node's mem
-                        // even when the pool is not yet "Kimi-ready" (lab-tiny/mid/large).
-                        // Full Kimi remains gated by digests/service_live on control — not by
-                        // leaving agents unloaded forever below the 64 GiB / 3-backend milestone.
-                        if !last_armed {
-                            if let Ok(manifest) = ManifestFile::load_default() {
-                                if let Some(spec) = manifest.primary() {
-                                    let quant = recommend_quant
-                                        .as_deref()
-                                        .and_then(|id| {
-                                            spec.weights.quants.iter().find(|q| q.id == id)
-                                        })
-                                        .or_else(|| spec.pick_quant(mem_mib));
-                                    if let Some(q) = quant {
+                        // Production: honor recommend_quant; re-prepare on lab→K3 upgrade
+                        // (never sticky last_armed forever after first-light lab).
+                        last_recommend_quant = recommend_quant.clone();
+                        if let Ok(manifest) = ManifestFile::load_default() {
+                            if let Some(spec) = manifest.primary() {
+                                if let Some(q) = resolve_agent_quant(
+                                    spec,
+                                    recommend_quant.as_deref(),
+                                    mem_mib,
+                                ) {
+                                    let reprepare = agent_should_reprepare(
+                                        last_armed_quant.as_deref(),
+                                        &q.id,
+                                    );
+                                    if reprepare {
+                                        if last_armed_quant.is_some() {
+                                            info!(
+                                                from = %last_armed_quant.as_deref().unwrap_or("?"),
+                                                to = %q.id,
+                                                "quant upgrade — re-preparing (lab→full Kimi path)"
+                                            );
+                                        }
                                         if !pool_ready {
                                             info!(
                                                 quant = %q.id,
-                                                "pool not milestone-ready; preparing lab/available quant for production path"
+                                                "pool not milestone-ready; preparing available quant"
                                             );
                                         }
                                         // Prepare always (may arm while waiting for peer seeds).
                                         match store.prepare(spec, q) {
                                             Ok(st) => {
-                                                last_armed = st.armed;
                                                 println!(
                                                     "weights: {} ({})",
                                                     st.message, st.cache_dir
@@ -2102,7 +2125,7 @@ async fn run_agent(
                                                 // ADR 0003: content-proof required before ModelLoaded honesty.
                                                 match production.mark_content_from_store(&store, q) {
                                                     Ok(()) => {
-                                                        last_armed = true;
+                                                        last_armed_quant = Some(q.id.clone());
                                                         println!("loaded: {}", report.message);
                                                         let loaded = Envelope::new(
                                                             node_id.clone(),
@@ -2119,6 +2142,8 @@ async fn run_agent(
                                                             .await?;
                                                     }
                                                     Err(e) => {
+                                                        // K3 may not be fully resident yet — keep last_armed_quant
+                                                        // unset so we retry on next PoolStatus.
                                                         warn!(
                                                             error = %e,
                                                             quant = %q.id,
@@ -2474,7 +2499,8 @@ async fn run_agent(
                                         &node_id,
                                         &finished.sha256,
                                         mem_mib,
-                                        &mut last_armed,
+                                        last_recommend_quant.as_deref(),
+                                        &mut last_armed_quant,
                                     )
                                     .await?;
                                 }
@@ -2520,6 +2546,7 @@ fn append_broadcast_journal(envelope: &SignedEnvelope) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn try_load_after_blob(
     store: &WeightsStore,
     production: &ProductionEngine,
@@ -2527,7 +2554,8 @@ async fn try_load_after_blob(
     node_id: &NodeId,
     sha256: &str,
     mem_mib: u32,
-    last_armed: &mut bool,
+    last_recommend_quant: Option<&str>,
+    last_armed_quant: &mut Option<String>,
 ) -> Result<()> {
     let engine = production.cluster();
 
@@ -2545,7 +2573,10 @@ async fn try_load_after_blob(
             break;
         }
     }
-    let Some(q) = matched_quant.or_else(|| spec.pick_quant(mem_mib)) else {
+    // Prefer blob's quant; else resolve like PoolStatus/PlanAccept (K3 over lab by mem).
+    let Some(q) =
+        matched_quant.or_else(|| resolve_agent_quant(spec, last_recommend_quant, mem_mib))
+    else {
         return Ok(());
     };
     // Only auto-load if this blob is part of the quant we're considering.
@@ -2554,7 +2585,6 @@ async fn try_load_after_blob(
     }
     match store.prepare(spec, q) {
         Ok(st) => {
-            *last_armed = st.armed;
             info!(%st.message, "prepare after peer seed");
             let ok = Envelope::new(
                 node_id.clone(),
@@ -2572,6 +2602,7 @@ async fn try_load_after_blob(
                 match prepare_and_install(store, engine, spec, q) {
                     Ok(report) => match production.mark_content_from_store(store, q) {
                         Ok(()) => {
+                            *last_armed_quant = Some(q.id.clone());
                             println!("loaded after peer seed: {}", report.message);
                             let loaded = Envelope::new(
                                 node_id.clone(),

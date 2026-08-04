@@ -86,19 +86,69 @@ pub fn recommend_quant_for_pool(
     backends: u32,
 ) -> Option<&manifest::QuantSpec> {
     if full_k3_service_fleet_ok(pool_vram_mib, backends) {
-        if let Some(k3) = spec
-            .weights
-            .quants
-            .iter()
-            .find(|q| q.id == "kimi-k3-shards")
-        {
-            if quant_can_unlock_service_digests(k3) {
-                return Some(k3);
-            }
+        if let Some(k3) = production_k3_quant(spec) {
+            return Some(k3);
         }
     }
     spec.pick_quant(8192)
         .or_else(|| spec.weights.quants.first())
+}
+
+/// Production quant `kimi-k3-shards` when pins are real (non-placeholder).
+pub fn production_k3_quant(spec: &manifest::ModelSpec) -> Option<&manifest::QuantSpec> {
+    let k3 = spec
+        .weights
+        .quants
+        .iter()
+        .find(|q| q.id == "kimi-k3-shards")?;
+    if quant_can_unlock_service_digests(k3) {
+        Some(k3)
+    } else {
+        None
+    }
+}
+
+/// PoolStatus prepare quant: honor control recommend, else lab by node VRAM.
+///
+/// Callers re-prepare when the returned id changes (lab→kimi-k3-shards).
+pub fn resolve_agent_quant<'a>(
+    spec: &'a manifest::ModelSpec,
+    recommend_quant: Option<&str>,
+    node_vram_mib: u32,
+) -> Option<&'a manifest::QuantSpec> {
+    if let Some(id) = recommend_quant {
+        if let Some(q) = spec.weights.quants.iter().find(|q| q.id == id) {
+            return Some(q);
+        }
+    }
+    spec.pick_quant(node_vram_mib.max(256))
+}
+
+/// PlanAccept band quant: control recommend first; else production K3 when pins
+/// are real (8 GiB donors still load K3 bands for multi-donor full-Kimi PP);
+/// else lab pick_quant.
+pub fn resolve_plan_band_quant<'a>(
+    spec: &'a manifest::ModelSpec,
+    recommend_quant: Option<&str>,
+    node_vram_mib: u32,
+) -> Option<&'a manifest::QuantSpec> {
+    if let Some(id) = recommend_quant {
+        if let Some(q) = spec.weights.quants.iter().find(|q| q.id == id) {
+            return Some(q);
+        }
+    }
+    if let Some(k3) = production_k3_quant(spec) {
+        return Some(k3);
+    }
+    spec.pick_quant(node_vram_mib.max(256))
+}
+
+/// True when agent should re-prepare after PoolStatus (quant upgrade lab→K3).
+pub fn agent_should_reprepare(last_armed_quant: Option<&str>, selected_quant_id: &str) -> bool {
+    match last_armed_quant {
+        None => true,
+        Some(prev) => prev != selected_quant_id,
+    }
 }
 
 use async_trait::async_trait;
@@ -620,6 +670,39 @@ mod tests {
         eprintln!(
             "OBSERVE recommend_quant: below={} fleet={}",
             below.id, fleet.id
+        );
+    }
+
+    /// Shipped agent path: PoolStatus first-light stays lab; fleet recommend upgrades
+    /// to kimi-k3-shards; PlanAccept band selects K3 even for 8 GiB donors.
+    #[test]
+    fn resolve_agent_quant_upgrades_lab_to_k3_under_fleet_recommend() {
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.primary().unwrap();
+        // First-light (no recommend): lab by mem.
+        let first = resolve_agent_quant(spec, None, 8192).expect("first");
+        assert_eq!(
+            first.id, "lab-large",
+            "first-light uses lab; got {}",
+            first.id
+        );
+        // Explicit control fleet recommend.
+        let upgraded = resolve_agent_quant(spec, Some("kimi-k3-shards"), 8192).expect("upgrade");
+        assert_eq!(upgraded.id, "kimi-k3-shards");
+        assert!(agent_should_reprepare(Some("lab-large"), "kimi-k3-shards"));
+        assert!(!agent_should_reprepare(Some("lab-large"), "lab-large"));
+        // PlanAccept band: even without recommend, K3 when pins real (not pick_quant lab).
+        let band = resolve_plan_band_quant(spec, None, 8192).expect("band");
+        assert_eq!(
+            band.id, "kimi-k3-shards",
+            "8GiB PlanAccept band must use K3 pins, not pick_quant lab"
+        );
+        let band_fleet =
+            resolve_plan_band_quant(spec, Some("kimi-k3-shards"), 8192).expect("band fleet");
+        assert_eq!(band_fleet.id, "kimi-k3-shards");
+        assert_eq!(spec.pick_quant(8192).unwrap().id, "lab-large");
+        eprintln!(
+            "OBSERVE agent-quant-upgrade: first=lab-large fleet_rec=kimi-k3-shards band=kimi-k3-shards reprepare=true"
         );
     }
 
