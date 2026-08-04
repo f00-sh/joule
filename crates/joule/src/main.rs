@@ -27,10 +27,10 @@ use joule_proto::{
     NodeId, OperatorKind, SignedEnvelope, CLUSTER_MODEL,
 };
 use joule_runtime::{
-    agent_should_reprepare, apply_staged, load_model, match_target, parse_software_update,
-    prepare_and_install, prepare_and_install_for_band, read_stage, readiness_for_pool_ex,
-    resolve_agent_quant, resolve_plan_band_quant, stage_blob, Engine, InferRequest, ManifestFile,
-    ProductionEngine, RuntimeFlags, SoftwareTarget, StubEngine, WeightsStore,
+    agent_should_reprepare, apply_staged, load_model, load_model_for_band, match_target,
+    parse_software_update, read_stage, readiness_for_pool_ex, resolve_agent_quant,
+    resolve_plan_band_quant, stage_blob, Engine, InferRequest, ManifestFile, ProductionEngine,
+    RuntimeFlags, SoftwareTarget, StubEngine, UpgradeOutcome, WeightsStore,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -1430,7 +1430,7 @@ async fn run_agent(
     let mem_mib = claim_mib;
 
     // ADR 0003: production agents use ProductionEngine (CUDA driver FFI + content-proof path).
-    // Weight residency is shared via ProductionEngine::cluster_arc() for prepare/peer paths.
+    // Quant upgrades are commit-gated (try_commit_*) so fleet K3 recommend never bricks lab serve.
     let production_engine = std::sync::Arc::new(ProductionEngine::new());
     let cuda = production_engine.cuda();
     info!(
@@ -1439,7 +1439,6 @@ async fn run_agent(
         detail = cuda.detail,
         "production CUDA probe (ADR 0003)"
     );
-    let shared_engine = production_engine.cluster_arc();
     // Peer listen for direct mesh dial (decentral Phase A/C) + peer-direct Infer*.
     let local_mesh: peer_net::SharedMesh =
         std::sync::Arc::new(tokio::sync::Mutex::new(peer_net::LocalMesh::new()));
@@ -1541,7 +1540,6 @@ async fn run_agent(
     writer.write_all(&encode_line(&hello)?).await?;
 
     // Tensor-backed when weights load; production Engine for control infer/stage/challenge.
-    let engine = shared_engine;
     let production = production_engine;
     let store = WeightsStore::new(WeightsStore::default_root());
     store.ensure_root().ok();
@@ -1845,6 +1843,7 @@ async fn run_agent(
                         // Per-shard band-only load: preferred files only. Quant must follow
                         // control recommend / production K3 (not pick_quant(mem) — 8 GiB
                         // donors would stick on lab forever).
+                        // Commit-gated: never begin_quant_intent before mark (would brick lab serve).
                         if accepted {
                             if let Some(shard) = plan.shards.iter().find(|s| s.node == node_id) {
                                 if let (Some(ls), Some(le)) = (shard.layer_start, shard.layer_end) {
@@ -1855,70 +1854,93 @@ async fn run_agent(
                                                 last_recommend_quant.as_deref(),
                                                 mem_mib,
                                             ) {
-                                                production.begin_quant_intent(q);
-                                                match prepare_and_install_for_band(
-                                                    &store,
-                                                    engine.as_ref(),
-                                                    spec,
-                                                    q,
-                                                    ls,
-                                                    le,
+                                                // Seed band bytes without clearing the content gate.
+                                                let _ = store.prepare_for_band(spec, q, ls, le);
+                                                match load_model_for_band(
+                                                    &store, spec, q, ls, le,
                                                 ) {
-                                                    Ok(report) => {
-                                                        if let Err(e) = production
-                                                            .mark_content_from_band(
-                                                                &store,
-                                                                &spec.id,
-                                                                q,
-                                                                ls,
-                                                                le,
-                                                            )
-                                                        {
-                                                            warn!(
-                                                                error = %e,
-                                                                quant = %q.id,
-                                                                "band content gate refused — stage will fail closed"
-                                                            );
-                                                        } else {
-                                                            last_armed_quant = Some(q.id.clone());
-                                                            info!(
-                                                                quant = %q.id,
-                                                                layers = %format!("{ls}-{le}"),
-                                                                tensors = report.tensors,
-                                                                bytes = report.bytes_resident,
-                                                                "band-only weights installed + production content marked"
-                                                            );
+                                                    Ok(lm) => {
+                                                        let report = lm.report();
+                                                        match production.try_commit_band_upgrade(
+                                                            &store,
+                                                            &spec.id,
+                                                            q,
+                                                            lm,
+                                                            ls,
+                                                            le,
+                                                        ) {
+                                                            UpgradeOutcome::Committed {
+                                                                quant_id,
+                                                            } => {
+                                                                last_armed_quant =
+                                                                    Some(quant_id.clone());
+                                                                info!(
+                                                                    quant = %quant_id,
+                                                                    layers = %format!("{ls}-{le}"),
+                                                                    tensors = report.tensors,
+                                                                    bytes = report.bytes_resident,
+                                                                    "band-only weights commit-gated install"
+                                                                );
+                                                            }
+                                                            UpgradeOutcome::Deferred {
+                                                                reason,
+                                                                kept_verified,
+                                                                kept_quant,
+                                                            } => {
+                                                                warn!(
+                                                                    error = %reason,
+                                                                    quant = %q.id,
+                                                                    kept_verified,
+                                                                    kept = ?kept_quant,
+                                                                    "band upgrade deferred — prior serve intact"
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                     Err(e) => {
                                                         info!(
                                                             error = %e,
-                                                            "band-only prepare deferred; trying full quant"
+                                                            "band-only load deferred; trying full quant"
                                                         );
-                                                        match prepare_and_install(
-                                                            &store,
-                                                            engine.as_ref(),
-                                                            spec,
-                                                            q,
-                                                        ) {
-                                                            Ok(report) => {
-                                                                if let Err(me) = production
-                                                                    .mark_content_from_store(
-                                                                        &store, q,
-                                                                    )
-                                                                {
-                                                                    warn!(error = %me, "full quant content gate refused");
-                                                                } else {
-                                                                    last_armed_quant =
-                                                                        Some(q.id.clone());
-                                                                    info!(
-                                                                        quant = %q.id,
-                                                                        tensors = report.tensors,
-                                                                        "full quant installed + marked"
-                                                                    );
+                                                        let _ = store.prepare(spec, q);
+                                                        match load_model(&store, spec, q) {
+                                                            Ok(lm) => {
+                                                                let report = lm.report();
+                                                                match production
+                                                                    .try_commit_quant_upgrade(
+                                                                        &store, q, lm,
+                                                                    ) {
+                                                                    UpgradeOutcome::Committed {
+                                                                        quant_id,
+                                                                    } => {
+                                                                        last_armed_quant =
+                                                                            Some(quant_id.clone());
+                                                                        info!(
+                                                                            quant = %quant_id,
+                                                                            tensors = report.tensors,
+                                                                            "full quant commit-gated install"
+                                                                        );
+                                                                    }
+                                                                    UpgradeOutcome::Deferred {
+                                                                        reason,
+                                                                        kept_verified,
+                                                                        kept_quant,
+                                                                    } => {
+                                                                        warn!(
+                                                                            error = %reason,
+                                                                            kept_verified,
+                                                                            kept = ?kept_quant,
+                                                                            "full quant upgrade deferred — prior serve intact"
+                                                                        );
+                                                                    }
                                                                 }
                                                             }
-                                                            Err(e2) => info!(error = %e2, "full prepare also deferred"),
+                                                            Err(e2) => {
+                                                                info!(
+                                                                    error = %e2,
+                                                                    "full quant load also deferred"
+                                                                )
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -2118,21 +2140,25 @@ async fn run_agent(
                                             }
                                             Err(e) => warn!(error = %e, "prepare failed"),
                                         }
-                                        // Shared load path (same as peer-seed completion).
-                                        production.begin_quant_intent(q);
-                                        match prepare_and_install(&store, engine.as_ref(), spec, q) {
-                                            Ok(report) => {
-                                                // ADR 0003: content-proof required before ModelLoaded honesty.
-                                                match production.mark_content_from_store(&store, q) {
-                                                    Ok(()) => {
-                                                        last_armed_quant = Some(q.id.clone());
+                                        // Commit-gated load: probe digests without clearing prior gate.
+                                        // Never begin_quant_intent here — fleet K3 recommend without
+                                        // bytes must not brick lab content_verified serve.
+                                        match load_model(&store, spec, q) {
+                                            Ok(lm) => {
+                                                let report = lm.report();
+                                                match production
+                                                    .try_commit_quant_upgrade(&store, q, lm)
+                                                {
+                                                    UpgradeOutcome::Committed { quant_id } => {
+                                                        last_armed_quant = Some(quant_id.clone());
                                                         println!("loaded: {}", report.message);
                                                         let loaded = Envelope::new(
                                                             node_id.clone(),
                                                             Message::ModelLoaded {
                                                                 model: report.model,
                                                                 quant: report.quant,
-                                                                bytes_resident: report.bytes_resident,
+                                                                bytes_resident: report
+                                                                    .bytes_resident,
                                                                 tensors: report.tensors as u32,
                                                                 message: report.message,
                                                             },
@@ -2141,13 +2167,17 @@ async fn run_agent(
                                                             .write_all(&encode_line(&loaded)?)
                                                             .await?;
                                                     }
-                                                    Err(e) => {
-                                                        // K3 may not be fully resident yet — keep last_armed_quant
-                                                        // unset so we retry on next PoolStatus.
+                                                    UpgradeOutcome::Deferred {
+                                                        reason,
+                                                        kept_verified,
+                                                        kept_quant,
+                                                    } => {
                                                         warn!(
-                                                            error = %e,
+                                                            error = %reason,
                                                             quant = %q.id,
-                                                            "content gate refused — not emitting ModelLoaded"
+                                                            kept_verified,
+                                                            kept = ?kept_quant,
+                                                            "content gate deferred — not emitting ModelLoaded; prior serve intact"
                                                         );
                                                     }
                                                 }
@@ -2163,7 +2193,7 @@ async fn run_agent(
                     }
                     Message::InferRequest { .. } => {
                         // ADR 0003: ProductionEngine for infer (CUDA-tagged, content-proof path).
-                        // After prepare_and_install, resident weights → require_band_weights.
+                        // After commit-gated install, resident weights → require_band_weights.
                         let opts = joule_control::InferAgentOpts {
                             require_band_weights: production.has_resident_weights()
                                 || production.is_model_loaded(),
@@ -2557,8 +2587,6 @@ async fn try_load_after_blob(
     last_recommend_quant: Option<&str>,
     last_armed_quant: &mut Option<String>,
 ) -> Result<()> {
-    let engine = production.cluster();
-
     let Ok(manifest) = ManifestFile::load_default() else {
         return Ok(());
     };
@@ -2598,26 +2626,40 @@ async fn try_load_after_blob(
             );
             writer.write_all(&encode_line(&ok)?).await?;
             if st.files_complete {
-                production.begin_quant_intent(q);
-                match prepare_and_install(store, engine, spec, q) {
-                    Ok(report) => match production.mark_content_from_store(store, q) {
-                        Ok(()) => {
-                            *last_armed_quant = Some(q.id.clone());
-                            println!("loaded after peer seed: {}", report.message);
-                            let loaded = Envelope::new(
-                                node_id.clone(),
-                                Message::ModelLoaded {
-                                    model: report.model,
-                                    quant: report.quant,
-                                    bytes_resident: report.bytes_resident,
-                                    tensors: report.tensors as u32,
-                                    message: report.message,
-                                },
-                            );
-                            writer.write_all(&encode_line(&loaded)?).await?;
+                // Commit-gated: install only after digests verify; never clear prior gate first.
+                match load_model(store, spec, q) {
+                    Ok(lm) => {
+                        let report = lm.report();
+                        match production.try_commit_quant_upgrade(store, q, lm) {
+                            UpgradeOutcome::Committed { quant_id } => {
+                                *last_armed_quant = Some(quant_id);
+                                println!("loaded after peer seed: {}", report.message);
+                                let loaded = Envelope::new(
+                                    node_id.clone(),
+                                    Message::ModelLoaded {
+                                        model: report.model,
+                                        quant: report.quant,
+                                        bytes_resident: report.bytes_resident,
+                                        tensors: report.tensors as u32,
+                                        message: report.message,
+                                    },
+                                );
+                                writer.write_all(&encode_line(&loaded)?).await?;
+                            }
+                            UpgradeOutcome::Deferred {
+                                reason,
+                                kept_verified,
+                                kept_quant,
+                            } => {
+                                warn!(
+                                    error = %reason,
+                                    kept_verified,
+                                    kept = ?kept_quant,
+                                    "peer-seed content gate deferred — prior serve intact"
+                                );
+                            }
                         }
-                        Err(e) => warn!(error = %e, "peer-seed content gate refused"),
-                    },
+                    }
                     Err(e) => info!(error = %e, "load after seed deferred"),
                 }
             }

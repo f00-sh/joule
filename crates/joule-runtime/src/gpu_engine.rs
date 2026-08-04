@@ -28,6 +28,25 @@ pub struct CudaProbe {
     pub detail: &'static str,
 }
 
+/// Outcome of commit-gated quant upgrade (lab→K3 without bricking serve).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpgradeOutcome {
+    /// Gate + resident weights committed to `quant_id`.
+    Committed { quant_id: String },
+    /// Probe failed; prior content_verified / quant unchanged.
+    Deferred {
+        reason: String,
+        kept_verified: bool,
+        kept_quant: Option<String>,
+    },
+}
+
+impl UpgradeOutcome {
+    pub fn is_committed(&self) -> bool {
+        matches!(self, Self::Committed { .. })
+    }
+}
+
 /// Dynamically load libcuda and query device count (cuInit + cuDeviceGetCount).
 pub fn probe_cuda_devices() -> CudaProbe {
     probe_cuda_devices_with(|name| {
@@ -202,11 +221,76 @@ impl ProductionEngine {
         id == "kimi-k3-shards" || id.starts_with("kimi-k3")
     }
 
-    /// Public: claim production quant intent **without** verifying digests.
-    /// Leaves `content_verified=false` so stage/infer fail closed until mark/install.
+    /// Snapshot of content gate (for commit-gated upgrades).
+    pub fn snapshot_gate(&self) -> (Option<String>, bool) {
+        (
+            self.production_quant.lock().expect("lock").clone(),
+            *self.content_verified.lock().expect("lock"),
+        )
+    }
+
+    /// Restore content gate after a failed upgrade probe.
+    pub fn restore_gate(&self, snap: (Option<String>, bool)) {
+        *self.production_quant.lock().expect("lock") = snap.0;
+        *self.content_verified.lock().expect("lock") = snap.1;
+    }
+
+    /// **Test / intentional fail-closed only.** Clears content_verified.
+    /// Agents must use [`Self::try_commit_quant_upgrade`] — never call this before mark.
     pub fn begin_quant_intent(&self, quant: &QuantSpec) {
         *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
         *self.content_verified.lock().expect("lock") = false;
+    }
+
+    /// Commit-gated full quant arm: **probe without clearing** the prior gate.
+    /// On success installs `loaded` and sets verified; on failure leaves prior serve intact.
+    pub fn try_commit_quant_upgrade(
+        &self,
+        store: &WeightsStore,
+        quant: &QuantSpec,
+        loaded: LoadedModel,
+    ) -> UpgradeOutcome {
+        // Probe only — do not begin_quant_intent (would brick lab serve).
+        if let Err(e) = Self::require_production_content(store, quant) {
+            return UpgradeOutcome::Deferred {
+                reason: e.to_string(),
+                kept_verified: self.content_verified(),
+                kept_quant: self.production_quant_id(),
+            };
+        }
+        self.inner.install_loaded(loaded);
+        *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
+        *self.content_verified.lock().expect("lock") = true;
+        UpgradeOutcome::Committed {
+            quant_id: quant.id.clone(),
+        }
+    }
+
+    /// Commit-gated band arm (multi-donor). Probe band readiness without clearing gate.
+    pub fn try_commit_band_upgrade(
+        &self,
+        store: &WeightsStore,
+        model: &str,
+        quant: &QuantSpec,
+        loaded: LoadedModel,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> UpgradeOutcome {
+        if let Err(e) =
+            Self::require_production_band(store, model, quant, layer_start, layer_end)
+        {
+            return UpgradeOutcome::Deferred {
+                reason: e.to_string(),
+                kept_verified: self.content_verified(),
+                kept_quant: self.production_quant_id(),
+            };
+        }
+        self.inner.install_loaded(loaded);
+        *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
+        *self.content_verified.lock().expect("lock") = true;
+        UpgradeOutcome::Committed {
+            quant_id: quant.id.clone(),
+        }
     }
 
     /// Full-quant digest gate (all listed files complete + non-synthetic pins).
@@ -299,20 +383,28 @@ impl ProductionEngine {
         Ok(())
     }
 
-    /// Mark content after prepare_and_install when digests verify for full `quant`.
+    /// Mark content when digests verify for full `quant`.
+    /// **Does not clear** prior verification on failure (snapshot/restore).
     pub fn mark_content_from_store(
         &self,
         store: &WeightsStore,
         quant: &QuantSpec,
     ) -> Result<(), RuntimeError> {
-        // Always record intent first so a failed mark leaves fail-closed state.
-        self.begin_quant_intent(quant);
-        Self::require_production_content(store, quant)?;
-        *self.content_verified.lock().expect("lock") = true;
-        Ok(())
+        let snap = self.snapshot_gate();
+        match Self::require_production_content(store, quant) {
+            Ok(()) => {
+                *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
+                *self.content_verified.lock().expect("lock") = true;
+                Ok(())
+            }
+            Err(e) => {
+                self.restore_gate(snap);
+                Err(e)
+            }
+        }
     }
 
-    /// Mark after band prepare (multi-donor). Public fail-closed path for AC3.
+    /// Mark after band prepare. Does not clear prior verification on failure.
     pub fn mark_content_from_band(
         &self,
         store: &WeightsStore,
@@ -321,10 +413,18 @@ impl ProductionEngine {
         layer_start: u32,
         layer_end: u32,
     ) -> Result<(), RuntimeError> {
-        self.begin_quant_intent(quant);
-        Self::require_production_band(store, model, quant, layer_start, layer_end)?;
-        *self.content_verified.lock().expect("lock") = true;
-        Ok(())
+        let snap = self.snapshot_gate();
+        match Self::require_production_band(store, model, quant, layer_start, layer_end) {
+            Ok(()) => {
+                *self.production_quant.lock().expect("lock") = Some(quant.id.clone());
+                *self.content_verified.lock().expect("lock") = true;
+                Ok(())
+            }
+            Err(e) => {
+                self.restore_gate(snap);
+                Err(e)
+            }
+        }
     }
 
     /// Fail closed unless content was proven via mark/install (lab or production).
@@ -784,6 +884,128 @@ mod tests {
             a.text.len(),
             b.text.len()
         );
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&blobs);
+    }
+
+    /// Skeptic: fleet recommends K3 without residency must not brick lab serve.
+    /// Commit-gated upgrade: probe fails → Deferred; content_verified + stage stay live.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn try_commit_failed_k3_keeps_lab_serve() {
+        let _env = crate::weights::test_env::lock();
+        let root = std::env::temp_dir().join(format!("joule-commit-gate-{}", Uuid::new_v4()));
+        let blobs = std::env::temp_dir().join(format!("joule-commit-gate-b-{}", Uuid::new_v4()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&blobs);
+        fs::create_dir_all(&blobs).unwrap();
+        std::env::set_var("JOULE_BLOBS_DIR", &blobs);
+        let store = WeightsStore::new(&root);
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.primary().unwrap();
+        let lab = spec.pick_quant(8192).expect("lab-large");
+        let k3 = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "kimi-k3-shards")
+            .expect("kimi-k3-shards");
+
+        let eng = ProductionEngine::with_cuda_probe(CudaProbe {
+            available: true,
+            device_count: 1,
+            detail: "test-commit-gate",
+        });
+        let report = prepare_and_install(&store, eng.cluster(), spec, lab).expect("lab install");
+        assert!(report.bytes_resident > 0 || eng.has_resident_weights());
+        eng.mark_content_from_store(&store, lab)
+            .expect("lab mark");
+        assert!(eng.content_verified());
+        assert_eq!(eng.production_quant_id().as_deref(), Some(lab.id.as_str()));
+
+        eng.load_plan(&ClusterPlan {
+            plan_id: Uuid::new_v4(),
+            model: CLUSTER_MODEL.into(),
+            shards: vec![ShardAssignment {
+                node: NodeId::new(),
+                role: ShardRole::Replica,
+                layer_start: Some(0),
+                layer_end: Some(0),
+                tp_rank: None,
+                tp_world: None,
+                mem_share_mib: 8192,
+                mem_fraction_ppm: 1_000_000,
+            }],
+            pool_mem_mib: 200_000,
+            model_layers: 1,
+        })
+        .await
+        .unwrap();
+
+        // Empty store for K3: cannot load full quant. Simulate failed upgrade with a
+        // dummy LoadedModel clone of lab tensors + try_commit against empty K3 digests.
+        let lab_lm = crate::load_model(&store, spec, lab).expect("reload lab tensors");
+        let outcome = eng.try_commit_quant_upgrade(&store, k3, lab_lm);
+        match &outcome {
+            UpgradeOutcome::Deferred {
+                kept_verified,
+                kept_quant,
+                reason,
+            } => {
+                assert!(*kept_verified, "must keep lab verified: {reason}");
+                assert_eq!(kept_quant.as_deref(), Some(lab.id.as_str()));
+            }
+            UpgradeOutcome::Committed { quant_id } => {
+                panic!("K3 must not commit without digests, got {quant_id}");
+            }
+        }
+        assert!(
+            eng.content_verified(),
+            "content_verified must remain true after deferred K3"
+        );
+        assert_eq!(
+            eng.production_quant_id().as_deref(),
+            Some(lab.id.as_str()),
+            "production quant must stay lab after deferred K3"
+        );
+
+        // Weight-gated stage still works on lab (the brick skeptic feared).
+        let out = eng
+            .stage_layers(StageRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "commit-gate-still-serves".into(),
+                layer_start: 0,
+                layer_end: 0,
+                upstream: vec![],
+                is_tail: false,
+                require_upstream: false,
+                require_band_weights: true,
+                required_weight_files: vec![],
+            })
+            .await
+            .expect("lab stage after deferred K3 must still work");
+        assert!(
+            out.activation.starts_with(b"JST3") || !out.activation.is_empty(),
+            "activation present"
+        );
+        eprintln!(
+            "OBSERVE try_commit_failed_k3_keeps_lab_serve: verified={} quant={:?} act_len={}",
+            eng.content_verified(),
+            eng.production_quant_id(),
+            out.activation.len()
+        );
+
+        // begin_quant_intent still clears (test-only path) — document contrast.
+        eng.begin_quant_intent(k3);
+        assert!(!eng.content_verified());
+        // Restore via successful lab re-commit for hygiene.
+        let lab_lm2 = crate::load_model(&store, spec, lab).expect("lab again");
+        assert!(eng
+            .try_commit_quant_upgrade(&store, lab, lab_lm2)
+            .is_committed());
+        assert!(eng.content_verified());
+
         std::env::remove_var("JOULE_BLOBS_DIR");
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&blobs);

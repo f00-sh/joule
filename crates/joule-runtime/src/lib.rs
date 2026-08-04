@@ -22,7 +22,7 @@ pub use decode::{
 };
 pub use gpu_engine::{
     full_k3_service_fleet_ok, probe_cuda_devices, production_digests_ok, CudaProbe,
-    ProductionEngine,
+    ProductionEngine, UpgradeOutcome,
 };
 pub use k3_meta::{
     config_sha256_hex, manifest_k3_config_digest, num_hidden_layers_from_config_json,
