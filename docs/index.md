@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| Status | 0.1.5 released (lab-tiny + lab-mid + lab-large; donor controls; Kimi gated) |
+| Status | **0.1.13** released (control replan, lab-mid multi-donor PP, contribution gate, tokens/s) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
 | License | MIT |
 
@@ -74,7 +74,7 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 | Client status / tray / service install | [design/client-v0.md](design/client-v0.md) |
 | Self-govern ledger | [design/self-govern-v0.md](design/self-govern-v0.md) |
 | Operator SOP (NASA PDF) | [sop-joule-ops.pdf](sop-joule-ops.pdf) |
-| This release memo (PDF) | [releases/v0.1.8-memo.pdf](releases/v0.1.8-memo.pdf) |
+| This release memo (PDF) | [CHANGELOG.md](../CHANGELOG.md) · [releases/](releases/) |
 | Release memos | [releases/](releases/) |
 | README | [../README.md](../README.md) |
 | Man page | [../man/joule.1.md](../man/joule.1.md) |
@@ -89,7 +89,7 @@ See the man page for full options. Live capacity is `GET /v1/cluster/capacity`.
 ║████████████████████████████████████████████████  ║
 ║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
-║  v0.1.8  ·  MIT  ·  2026                         ║
+║  v0.1.13  ·  MIT  ·  2026                         ║
 ║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝

@@ -773,7 +773,7 @@ pub async fn dispatch_mesh_infer(
     }
 
     let mut last_err = String::new();
-    for attempt in 1u32..=2 {
+    'attempt: for attempt in 1u32..=2 {
         let connected: std::collections::HashSet<NodeId> =
             app.routes.lock().await.keys().cloned().collect();
         let donors: Vec<(NodeId, u32)> = {
@@ -876,10 +876,12 @@ pub async fn dispatch_mesh_infer(
             if !send_to_agent(&app.routes, &shard.node, env).await {
                 let mut g = app.state.write().await;
                 g.pending_plan_accepts.remove(&request_id);
+                drop(g);
                 guard.release_now("lease_released", "plan offer fail").await;
                 last_err = format!("PlanOffer: shard {} not connected", shard.node);
                 if attempt < 2 && is_control_shard_death_err(&last_err) {
-                    continue;
+                    // Must replan the whole attempt — not the next shard of this plan.
+                    continue 'attempt;
                 }
                 return Err(last_err);
             }
@@ -898,7 +900,7 @@ pub async fn dispatch_mesh_infer(
             guard.release_now("lease_released", &e).await;
             last_err = e;
             if attempt < 2 && is_control_shard_death_err(&last_err) {
-                continue;
+                continue 'attempt;
             }
             return Err(last_err);
         }
@@ -933,7 +935,7 @@ pub async fn dispatch_mesh_infer(
                         error = %last_err,
                         "mesh/control replan after confirmed shard death mid-infer"
                     );
-                    continue;
+                    continue 'attempt;
                 }
                 return Err(last_err);
             }
@@ -965,7 +967,7 @@ async fn dispatch_control_stream(
     charge: bool,
 ) -> Result<InferOutcome, String> {
     let mut last_err = String::new();
-    for attempt in 1u32..=2 {
+    'attempt: for attempt in 1u32..=2 {
         let request_id = Uuid::new_v4();
         let wait = {
             let g = app.state.read().await;
@@ -1033,7 +1035,8 @@ async fn dispatch_control_stream(
                 last_err = format!("PlanOffer: shard {} not connected", shard.node);
                 if attempt < 2 && is_control_shard_death_err(&last_err) {
                     info!(attempt, error = %last_err, "control replan after plan-offer shard death");
-                    continue;
+                    // Must replan the whole attempt — not the next shard of this plan.
+                    continue 'attempt;
                 }
                 return Err(last_err);
             }
@@ -1052,7 +1055,7 @@ async fn dispatch_control_stream(
             last_err = e;
             if attempt < 2 && is_control_shard_death_err(&last_err) {
                 info!(attempt, error = %last_err, "control replan after PlanAccept failure");
-                continue;
+                continue 'attempt;
             }
             return Err(last_err);
         }
@@ -1114,7 +1117,7 @@ async fn dispatch_control_stream(
                         error = %last_err,
                         "control replan: confirmed shard death mid-infer; retrying remaining pool"
                     );
-                    continue;
+                    continue 'attempt;
                 }
                 return Err(last_err);
             }

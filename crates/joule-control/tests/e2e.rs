@@ -2700,7 +2700,8 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
         })
     };
 
-    // Wait for plan_agreed then abort bob + carol-style victim (bob).
+    // Wait for first plan_agreed then abort confirmed shard (bob).
+    let mut first_request_id: Option<String> = None;
     for _ in 0..80 {
         let leases: serde_json::Value = client
             .get(format!("{base}/v1/cluster/leases"))
@@ -2711,8 +2712,12 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
             .await
             .unwrap();
         let audit = leases["audit"].as_array().cloned().unwrap_or_default();
-        if audit.iter().any(|e| e["event"] == "plan_agreed") {
-            eprintln!("OBSERVE control-replan plan_agreed; aborting confirmed shard agent bob");
+        if let Some(e) = audit.iter().find(|e| e["event"] == "plan_agreed") {
+            first_request_id = e["request_id"].as_str().map(|s| s.to_string());
+            eprintln!(
+                "OBSERVE control-replan plan_agreed request_id={:?}; aborting confirmed shard bob",
+                first_request_id
+            );
             b.abort();
             break;
         }
@@ -2731,23 +2736,89 @@ async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
         body_txt.len(),
         body_txt.chars().take(200).collect::<String>()
     );
-    // Replan success (200) or hard fail-closed if remaining pool cannot complete (4xx/5xx).
-    // Never hang with open lease.
-    let ok_or_fail_closed = status.is_success()
-        || status.as_u16() == 503
-        || status.as_u16() == 400
-        || status.as_u16() == 502
-        || body_txt.contains("replan")
-        || body_txt.contains("shard")
-        || body_txt.contains("not connected")
-        || body_txt.contains("fail-closed")
-        || body_txt.contains("capacity");
-    assert!(
-        ok_or_fail_closed,
-        "expected replan success or fail-closed: status={status} body={body_txt}"
-    );
 
-    // Late InferDone bound to dead plan must not leave active leases / used slots.
+    let leases_mid: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/leases"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let audit_mid = leases_mid["audit"].as_array().cloned().unwrap_or_default();
+    let plan_agreed_n = audit_mid
+        .iter()
+        .filter(|e| e["event"] == "plan_agreed")
+        .count();
+    let lease_granted_n = audit_mid
+        .iter()
+        .filter(|e| e["event"] == "lease_granted")
+        .count();
+    let lease_released_n = audit_mid
+        .iter()
+        .filter(|e| e["event"] == "lease_released")
+        .count();
+
+    if status.is_success() {
+        // Successful path after confirmed-shard death must have replan: second agree.
+        assert!(
+            plan_agreed_n >= 2,
+            "200 after shard death must replan (plan_agreed≥2), got {plan_agreed_n}: {leases_mid}"
+        );
+        assert!(
+            lease_granted_n >= 2,
+            "replan must grant a second lease, granted={lease_granted_n}: {leases_mid}"
+        );
+        assert!(
+            body_txt.contains("choices") || body_txt.contains("content"),
+            "success body must be chat completion: {body_txt}"
+        );
+        eprintln!(
+            "OBSERVE control-replan SUCCESS plan_agreed={plan_agreed_n} grants={lease_granted_n} releases={lease_released_n}"
+        );
+    } else {
+        // Fail-closed only when remaining pool cannot complete (no capacity / disconnect).
+        assert_eq!(
+            status,
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "fail-closed must be 503 pool/shard capacity, got {status} {body_txt}"
+        );
+        assert!(
+            body_txt.contains("replan")
+                || body_txt.contains("not connected")
+                || body_txt.contains("capacity")
+                || body_txt.contains("shard")
+                || body_txt.contains("disconnected")
+                || body_txt.contains("timeout"),
+            "503 body must cite shard/capacity failure: {body_txt}"
+        );
+        eprintln!(
+            "OBSERVE control-replan FAIL-CLOSED 503 plan_agreed={plan_agreed_n} body={body_txt}"
+        );
+    }
+
+    // Late InferDone bound to dead/cleared first plan must not revive leases or used slots.
+    if let Some(rid_s) = first_request_id.as_deref() {
+        if let Ok(rid) = uuid::Uuid::parse_str(rid_s) {
+            let victim = {
+                let g = app.state.read().await;
+                let id = g
+                    .cluster
+                    .nodes()
+                    .map(|n| n.id.clone())
+                    .next()
+                    .unwrap_or_else(NodeId::new);
+                id
+            };
+            {
+                let mut g = app.state.write().await;
+                // Inject poison completion for the *old* request_id (plan cleared / settled).
+                g.settle_shard_success(rid, "POISON-OLD-PLAN-DONE".into(), 1, 1, &victim, true);
+            }
+            eprintln!("OBSERVE late InferDone inject on old request_id={rid_s}");
+        }
+    }
+
     tokio::time::sleep(Duration::from_millis(100)).await;
     let sched1: serde_json::Value = client
         .get(format!("{base}/v1/cluster/scheduler"))

@@ -40,13 +40,16 @@ pool is free of cash charges. No contribution ⇒ no API.
 
 How a node reaches the internet is irrelevant. This is not a mesh product.
 
-Version **0.1.8** loads **lab-tiny / lab-mid / lab-large** tensors when seeded and
-gates full Kimi on pool VRAM. Donors control contribution locally
-(`joule donor pause|set-cap|set-schedule|set-sensors`). After an agent Welcome,
-**`joule connect`** shows Base URL + full pool-issued `joule_…` API key + model
-`kimi-open` for Cursor / other OpenAI clients. Weights and software are
-**peer-seeded by sha256** (f00 is website only). Operator orders are
-**ed25519-signed** and flooded by the swarm.
+Version **0.1.13** loads **lab-tiny / lab-mid / lab-large** tensors when seeded,
+runs multi-donor sequential PP with weight-backed stages, measures **tokens/s**
+on live capacity, and **replans** control/mesh infer after a confirmed shard
+dies mid-flight (or fail-closed with free leases). Full Kimi remains gated on
+pool VRAM. Donors control contribution locally
+(`joule donor pause|set-cap|set-schedule|set-sensors`). No contribution ⇒ no API.
+After an agent Welcome, **`joule connect`** shows Base URL + full pool-issued
+`joule_…` API key + model `kimi-open` for Cursor / other OpenAI clients. Weights
+and software are **peer-seeded by sha256** (f00 is website only). Operator orders
+are **ed25519-signed** and flooded by the swarm.
 
 ## COMMANDS
 
