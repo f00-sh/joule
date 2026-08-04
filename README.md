@@ -6,7 +6,7 @@ Donors run a native agent. Nodes join one shared cluster no matter how they reac
 
 | | |
 |---|---|
-| Status | **0.1.12** released (JST3 band matmul + sequential PP close-out) |
+| Status | **0.1.13** released (control replan, lab-mid multi-donor PP, contribution gate, tokens/s) |
 | License | [MIT](LICENSE) |
 | Site | [joule.f00.sh](https://joule.f00.sh/) |
 | Repo | [github.com/f00-sh/joule](https://github.com/f00-sh/joule) |
@@ -234,7 +234,7 @@ See [docs/design/cluster-v0.md](docs/design/cluster-v0.md) for phases C0–C7 an
 ║████████████████████████████████████████████████  ║
 ║  ▄█▀  DISTRIBUTED CLUSTER  ▀█▄                   ║
 ║████████████████████████████████████████████████  ║
-║  v0.1.12  ·  MIT  ·  2026                         ║
+║  v0.1.13  ·  MIT  ·  2026                         ║
 ║  idle GPUs → open cluster · pay in compute       ║
 ║  github:f00-sh/joule  ·  joule.f00.sh             ║
 ╚══════════════════════════════════════════════════╝

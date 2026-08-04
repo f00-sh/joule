@@ -629,6 +629,16 @@ pub async fn run_agent_session(app: App, sock: TcpStream) -> Result<()> {
 
     if let Some(id) = node_id {
         app.routes.lock().await.remove(&id);
+        // Fail-fast any pipeline stage waiters for this node (control replan path).
+        {
+            let mut w = app.shard_acks.lock().await;
+            let keys: Vec<_> = w.keys().filter(|(_, n)| n == &id).cloned().collect();
+            for k in keys {
+                if let Some(tx) = w.remove(&k) {
+                    let _ = tx.send(Err(format!("shard disconnected: {id}")));
+                }
+            }
+        }
         app.state.write().await.remove_node(&id);
         info!(%id, "agent left");
     }
@@ -741,6 +751,9 @@ pub async fn mesh_donors_ready(app: &App) -> bool {
 
 /// Phase D mesh coordination: **stream lease** → RequestInfer → PlanOffer →
 /// hashed PlanAccept (all shards) → InferRequest → InferDone → **lease release**.
+///
+/// Confirmed-shard death mid-infer: release + replan once on remaining connected
+/// mesh donors, or fail closed if no capacity remains.
 pub async fn dispatch_mesh_infer(
     app: &App,
     account: &str,
@@ -759,139 +772,190 @@ pub async fn dispatch_mesh_infer(
         }
     }
 
-    let connected: std::collections::HashSet<NodeId> =
-        app.routes.lock().await.keys().cloned().collect();
-    let donors: Vec<(NodeId, u32)> = {
-        let g = app.state.read().await;
-        g.mesh_plan_donors()
-            .into_iter()
-            .filter(|(id, _)| connected.contains(id))
-            .collect()
-    };
-    if donors.is_empty() {
-        return Err("mesh has no connected donors with verified capacity".into());
-    }
+    let mut last_err = String::new();
+    for attempt in 1u32..=2 {
+        let connected: std::collections::HashSet<NodeId> =
+            app.routes.lock().await.keys().cloned().collect();
+        let donors: Vec<(NodeId, u32)> = {
+            let g = app.state.read().await;
+            g.mesh_plan_donors()
+                .into_iter()
+                .filter(|(id, _)| connected.contains(id))
+                .collect()
+        };
+        if donors.is_empty() {
+            if attempt == 1 {
+                return Err("mesh has no connected donors with verified capacity".into());
+            }
+            return Err(format!(
+                "control replan fail-closed (no connected mesh donors): prior={last_err}"
+            ));
+        }
 
-    // Geometry from mesh; capacity truth still requires a stream lease.
-    let plan_geometry = joule_cluster::plan_from_mesh_donors(&donors).map_err(|e| e.to_string())?;
-    let request_id = Uuid::new_v4();
-    let lease = {
-        let mut g = app.state.write().await;
-        g.admit_stream_lease(account, request_id, Duration::from_secs(90))?
-    };
-    let mut guard = StreamLeaseGuard::new(app, request_id);
-    // Prefer lease plan shards (registry) when they match mesh geometry size;
-    // mesh plan is used for PlanOffer agreement among mesh donors.
-    let plan = plan_geometry;
-    let plan_hash_hex = joule_cluster::plan_hash_hex(&plan);
-    // Capacity lease may have been granted against registry geometry; bind the
-    // **mesh** plan hash every donor will confirm.
-    {
-        let mut g = app.state.write().await;
-        g.leases
-            .bind_agreement_hash(request_id, plan_hash_hex.clone());
-    }
+        // Geometry from mesh; capacity truth still requires a stream lease.
+        let plan_geometry =
+            joule_cluster::plan_from_mesh_donors(&donors).map_err(|e| e.to_string())?;
+        let request_id = Uuid::new_v4();
+        let lease = {
+            let mut g = app.state.write().await;
+            match g.admit_stream_lease(account, request_id, Duration::from_secs(90)) {
+                Ok(l) => l,
+                Err(e) => {
+                    if attempt == 1 {
+                        return Err(e);
+                    }
+                    return Err(format!(
+                        "control replan fail-closed (no healthy capacity): {e}; prior={last_err}"
+                    ));
+                }
+            }
+        };
+        let mut guard = StreamLeaseGuard::new(app, request_id);
+        let plan = plan_geometry;
+        let plan_hash_hex = joule_cluster::plan_hash_hex(&plan);
+        {
+            let mut g = app.state.write().await;
+            g.leases
+                .bind_agreement_hash(request_id, plan_hash_hex.clone());
+        }
 
-    info!(
-        %request_id,
-        lease_id = %lease.lease_id,
-        shards = plan.shards.len(),
-        pool_mem_mib = plan.pool_mem_mib,
-        donors = donors.len(),
-        %plan_hash_hex,
-        "mesh RequestInfer + stream lease"
-    );
-
-    // Register accept wait **before** RequestInfer so early/poison PlanAccepts
-    // (wrong local plan_hash) fail closed against want_hash instead of racing.
-    let expected: std::collections::HashSet<NodeId> =
-        plan.shards.iter().map(|s| s.node.clone()).collect();
-    let (accept_tx, accept_rx) = oneshot::channel();
-    {
-        let mut g = app.state.write().await;
-        g.pending_plan_accepts.insert(
-            request_id,
-            PendingPlanAccept {
-                plan_id: plan.plan_id,
-                plan_hash_hex: plan_hash_hex.clone(),
-                expected: expected.clone(),
-                accepted: std::collections::HashSet::new(),
-                tx: Some(accept_tx),
-            },
+        info!(
+            %request_id,
+            lease_id = %lease.lease_id,
+            shards = plan.shards.len(),
+            pool_mem_mib = plan.pool_mem_mib,
+            donors = donors.len(),
+            %plan_hash_hex,
+            attempt,
+            "mesh RequestInfer + stream lease"
         );
-    }
 
-    for (node, _) in &donors {
-        let env = Envelope::new(
-            node.clone(),
-            Message::RequestInfer {
+        let expected: std::collections::HashSet<NodeId> =
+            plan.shards.iter().map(|s| s.node.clone()).collect();
+        let (accept_tx, accept_rx) = oneshot::channel();
+        {
+            let mut g = app.state.write().await;
+            g.pending_plan_accepts.insert(
                 request_id,
-                account: account.to_string(),
-                model: model.clone(),
-                prompt: prompt.to_string(),
-                max_tokens,
-            },
-        );
-        let _ = send_to_agent(&app.routes, node, env).await;
-    }
+                PendingPlanAccept {
+                    plan_id: plan.plan_id,
+                    plan_hash_hex: plan_hash_hex.clone(),
+                    expected: expected.clone(),
+                    accepted: std::collections::HashSet::new(),
+                    tx: Some(accept_tx),
+                },
+            );
+        }
 
-    for shard in &plan.shards {
-        let (offerer, auth) =
-            control_plan_offer_auth(app, plan.plan_id, request_id, &plan_hash_hex);
-        let env = Envelope::new(
-            offerer,
-            Message::PlanOffer {
-                plan: plan.clone(),
-                request_id,
-                plan_hash_hex: plan_hash_hex.clone(),
-                auth,
-            },
-        );
-        if !send_to_agent(&app.routes, &shard.node, env).await {
+        for (node, _) in &donors {
+            let env = Envelope::new(
+                node.clone(),
+                Message::RequestInfer {
+                    request_id,
+                    account: account.to_string(),
+                    model: model.clone(),
+                    prompt: prompt.to_string(),
+                    max_tokens,
+                },
+            );
+            let _ = send_to_agent(&app.routes, node, env).await;
+        }
+
+        for shard in &plan.shards {
+            let (offerer, auth) =
+                control_plan_offer_auth(app, plan.plan_id, request_id, &plan_hash_hex);
+            let env = Envelope::new(
+                offerer,
+                Message::PlanOffer {
+                    plan: plan.clone(),
+                    request_id,
+                    plan_hash_hex: plan_hash_hex.clone(),
+                    auth,
+                },
+            );
+            if !send_to_agent(&app.routes, &shard.node, env).await {
+                let mut g = app.state.write().await;
+                g.pending_plan_accepts.remove(&request_id);
+                guard.release_now("lease_released", "plan offer fail").await;
+                last_err = format!("PlanOffer: shard {} not connected", shard.node);
+                if attempt < 2 && is_control_shard_death_err(&last_err) {
+                    continue;
+                }
+                return Err(last_err);
+            }
+        }
+
+        let agree = match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err("PlanAccept channel closed".into()),
+            Err(_) => Err("timed out waiting for PlanAccept from mesh shards".into()),
+        };
+        if let Err(e) = agree {
             let mut g = app.state.write().await;
             g.pending_plan_accepts.remove(&request_id);
-            guard.release_now("lease_released", "plan offer fail").await;
-            return Err(format!("PlanOffer: shard {} not connected", shard.node));
+            drop(g);
+            guard.release_now("lease_released", &e).await;
+            last_err = e;
+            if attempt < 2 && is_control_shard_death_err(&last_err) {
+                continue;
+            }
+            return Err(last_err);
+        }
+
+        let out = fanout_infer(
+            app,
+            account,
+            &model,
+            prompt,
+            max_tokens,
+            plan,
+            request_id,
+            true,
+            false,
+            CoordinationPath::MeshRequestInfer,
+        )
+        .await;
+        match out {
+            Ok(o) => {
+                guard.release_now("lease_released", "infer ok").await;
+                if attempt > 1 {
+                    info!(attempt, "mesh/control replan succeeded after shard death");
+                }
+                return Ok(o);
+            }
+            Err(e) => {
+                guard.release_now("lease_released", &e).await;
+                last_err = e;
+                if attempt < 2 && is_control_shard_death_err(&last_err) {
+                    info!(
+                        attempt,
+                        error = %last_err,
+                        "mesh/control replan after confirmed shard death mid-infer"
+                    );
+                    continue;
+                }
+                return Err(last_err);
+            }
         }
     }
+    Err(format!("control replan exhausted: {last_err}"))
+}
 
-    let agree = match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(e))) => Err(e),
-        Ok(Err(_)) => Err("PlanAccept channel closed".into()),
-        Err(_) => Err("timed out waiting for PlanAccept from mesh shards".into()),
-    };
-    if let Err(e) = agree {
-        let mut g = app.state.write().await;
-        g.pending_plan_accepts.remove(&request_id);
-        drop(g);
-        guard.release_now("lease_released", &e).await;
-        return Err(e);
-    }
-
-    // Lease holds cluster inflight; fanout does NOT double-reserve.
-    let out = fanout_infer(
-        app,
-        account,
-        &model,
-        prompt,
-        max_tokens,
-        plan,
-        request_id,
-        true,
-        false,
-        CoordinationPath::MeshRequestInfer,
-    )
-    .await;
-    let detail = match &out {
-        Ok(_) => "infer ok",
-        Err(e) => e.as_str(),
-    };
-    guard.release_now("lease_released", detail).await;
-    out
+/// True when fanout failed because a confirmed plan shard died/disconnected mid-infer.
+fn is_control_shard_death_err(e: &str) -> bool {
+    e.contains("not connected")
+        || e.contains("missing activation")
+        || e.contains("shard disconnected")
+        || e.contains("all shards disconnected")
+        || e.contains("timed out")
+        || e.contains("pipeline sequential stage")
 }
 
 /// Classic control path: stream **lease** + multi-shard PlanOffer agree + InferRequest.
+///
+/// On confirmed-shard death mid-infer: release lease, replan against remaining
+/// healthy/connected donors (up to 1 retry), or fail closed if no capacity.
 async fn dispatch_control_stream(
     app: &App,
     account: &str,
@@ -900,124 +964,163 @@ async fn dispatch_control_stream(
     max_tokens: u32,
     charge: bool,
 ) -> Result<InferOutcome, String> {
-    let request_id = Uuid::new_v4();
-    let wait = {
-        let g = app.state.read().await;
-        g.lease_wait
-    };
-    let lease = acquire_lease_with_wait(app, account, request_id, wait).await?;
-    let mut guard = StreamLeaseGuard::new(app, request_id);
-    let plan = lease.plan.clone();
-    let plan_hash_hex = lease.plan_hash_hex.clone();
-    info!(
-        %request_id,
-        lease_id = %lease.lease_id,
-        shards = plan.shards.len(),
-        pool_mem_mib = plan.pool_mem_mib,
-        %plan_hash_hex,
-        "control_dispatch sharded infer (stream lease)"
-    );
+    let mut last_err = String::new();
+    for attempt in 1u32..=2 {
+        let request_id = Uuid::new_v4();
+        let wait = {
+            let g = app.state.read().await;
+            g.lease_wait
+        };
+        let lease = match acquire_lease_with_wait(app, account, request_id, wait).await {
+            Ok(l) => l,
+            Err(e) => {
+                if attempt == 1 {
+                    return Err(e);
+                }
+                // Replan attempt: no capacity left after shard death.
+                return Err(format!(
+                    "control replan fail-closed (no healthy capacity after shard death): {e}; prior={last_err}"
+                ));
+            }
+        };
+        let mut guard = StreamLeaseGuard::new(app, request_id);
+        let plan = lease.plan.clone();
+        let plan_hash_hex = lease.plan_hash_hex.clone();
+        info!(
+            %request_id,
+            lease_id = %lease.lease_id,
+            shards = plan.shards.len(),
+            pool_mem_mib = plan.pool_mem_mib,
+            %plan_hash_hex,
+            attempt,
+            "control_dispatch sharded infer (stream lease)"
+        );
 
-    // Multi-party agreement even on control path: PlanOffer → hashed PlanAccept.
-    let expected: std::collections::HashSet<NodeId> =
-        plan.shards.iter().map(|s| s.node.clone()).collect();
-    let (accept_tx, accept_rx) = oneshot::channel();
-    {
-        let mut g = app.state.write().await;
-        g.pending_plan_accepts.insert(
-            request_id,
-            PendingPlanAccept {
-                plan_id: plan.plan_id,
-                plan_hash_hex: plan_hash_hex.clone(),
-                expected,
-                accepted: std::collections::HashSet::new(),
-                tx: Some(accept_tx),
-            },
-        );
-    }
-    for shard in &plan.shards {
-        let (offerer, auth) =
-            control_plan_offer_auth(app, plan.plan_id, request_id, &plan_hash_hex);
-        let env = Envelope::new(
-            offerer,
-            Message::PlanOffer {
-                plan: plan.clone(),
+        // Multi-party agreement even on control path: PlanOffer → hashed PlanAccept.
+        let expected: std::collections::HashSet<NodeId> =
+            plan.shards.iter().map(|s| s.node.clone()).collect();
+        let (accept_tx, accept_rx) = oneshot::channel();
+        {
+            let mut g = app.state.write().await;
+            g.pending_plan_accepts.insert(
                 request_id,
-                plan_hash_hex: plan_hash_hex.clone(),
-                auth,
-            },
-        );
-        if !send_to_agent(&app.routes, &shard.node, env).await {
+                PendingPlanAccept {
+                    plan_id: plan.plan_id,
+                    plan_hash_hex: plan_hash_hex.clone(),
+                    expected,
+                    accepted: std::collections::HashSet::new(),
+                    tx: Some(accept_tx),
+                },
+            );
+        }
+        for shard in &plan.shards {
+            let (offerer, auth) =
+                control_plan_offer_auth(app, plan.plan_id, request_id, &plan_hash_hex);
+            let env = Envelope::new(
+                offerer,
+                Message::PlanOffer {
+                    plan: plan.clone(),
+                    request_id,
+                    plan_hash_hex: plan_hash_hex.clone(),
+                    auth,
+                },
+            );
+            if !send_to_agent(&app.routes, &shard.node, env).await {
+                let mut g = app.state.write().await;
+                g.pending_plan_accepts.remove(&request_id);
+                drop(g);
+                guard.release_now("lease_released", "plan offer fail").await;
+                last_err = format!("PlanOffer: shard {} not connected", shard.node);
+                if attempt < 2 && is_control_shard_death_err(&last_err) {
+                    info!(attempt, error = %last_err, "control replan after plan-offer shard death");
+                    continue;
+                }
+                return Err(last_err);
+            }
+        }
+        let agree = match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err("PlanAccept channel closed".into()),
+            Err(_) => Err("timed out waiting for PlanAccept from control shards".into()),
+        };
+        if let Err(e) = agree {
             let mut g = app.state.write().await;
             g.pending_plan_accepts.remove(&request_id);
             drop(g);
-            guard.release_now("lease_released", "plan offer fail").await;
-            return Err(format!("PlanOffer: shard {} not connected", shard.node));
+            guard.release_now("lease_released", &e).await;
+            last_err = e;
+            if attempt < 2 && is_control_shard_death_err(&last_err) {
+                info!(attempt, error = %last_err, "control replan after PlanAccept failure");
+                continue;
+            }
+            return Err(last_err);
         }
-    }
-    let agree = match tokio::time::timeout(Duration::from_secs(8), accept_rx).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(e))) => Err(e),
-        Ok(Err(_)) => Err("PlanAccept channel closed".into()),
-        Err(_) => Err("timed out waiting for PlanAccept from control shards".into()),
-    };
-    if let Err(e) = agree {
-        let mut g = app.state.write().await;
-        g.pending_plan_accepts.remove(&request_id);
-        drop(g);
-        guard.release_now("lease_released", &e).await;
-        return Err(e);
-    }
 
-    let out = fanout_infer(
-        app,
-        account,
-        model,
-        prompt,
-        max_tokens,
-        plan,
-        request_id,
-        charge,
-        false,
-        CoordinationPath::ControlDispatch,
-    )
-    .await;
+        let out = fanout_infer(
+            app,
+            account,
+            model,
+            prompt,
+            max_tokens,
+            plan,
+            request_id,
+            charge,
+            false,
+            CoordinationPath::ControlDispatch,
+        )
+        .await;
 
-    let detail = match &out {
-        Ok(_) => "infer ok",
-        Err(e) => e.as_str(),
-    };
-    guard.release_now("lease_released", detail).await;
-
-    let out = out?;
-
-    if charge {
-        let dual = {
-            let mut g = app.state.write().await;
-            g.should_dual_verify()
-        };
-        if dual {
-            match Box::pin(dispatch_control_stream(
-                app, account, model, prompt, max_tokens, false,
-            ))
-            .await
-            {
-                Ok(second) => {
-                    if second.text.trim() != out.text.trim() {
-                        warn!(
-                            first_len = out.text.len(),
-                            second_len = second.text.len(),
-                            "dual_verify text mismatch (accepted primary; tensors may be non-deterministic)"
-                        );
-                    } else {
-                        info!("dual_verify matched");
+        match out {
+            Ok(outcome) => {
+                guard.release_now("lease_released", "infer ok").await;
+                if charge {
+                    let dual = {
+                        let mut g = app.state.write().await;
+                        g.should_dual_verify()
+                    };
+                    if dual {
+                        match Box::pin(dispatch_control_stream(
+                            app, account, model, prompt, max_tokens, false,
+                        ))
+                        .await
+                        {
+                            Ok(second) => {
+                                if second.text.trim() != outcome.text.trim() {
+                                    warn!(
+                                        first_len = outcome.text.len(),
+                                        second_len = second.text.len(),
+                                        "dual_verify text mismatch (accepted primary; tensors may be non-deterministic)"
+                                    );
+                                } else {
+                                    info!("dual_verify matched");
+                                }
+                            }
+                            Err(e) => warn!(error = %e, "dual_verify second pass failed"),
+                        }
                     }
                 }
-                Err(e) => warn!(error = %e, "dual_verify second pass failed"),
+                if attempt > 1 {
+                    info!(attempt, "control replan succeeded after shard death");
+                }
+                return Ok(outcome);
+            }
+            Err(e) => {
+                guard.release_now("lease_released", &e).await;
+                last_err = e;
+                if attempt < 2 && is_control_shard_death_err(&last_err) {
+                    info!(
+                        attempt,
+                        error = %last_err,
+                        "control replan: confirmed shard death mid-infer; retrying remaining pool"
+                    );
+                    continue;
+                }
+                return Err(last_err);
             }
         }
     }
-    Ok(out)
+    Err(format!("control replan exhausted: {last_err}"))
 }
 
 #[allow(clippy::too_many_arguments)]

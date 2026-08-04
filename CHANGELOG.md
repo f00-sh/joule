@@ -7,17 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-08-04
+
+Product layer after 0.1.12: control shard recovery, multi-donor lab-mid PP, contribution gate, measured tokens/s dashboard.
+
 ### Added
-- **lab-mid / lab-large decode quality:** multi-file fixture prepare→infer is tensor-backed; weight invert and activation seed change emitted tokens (not stage-tag-only)
-- **Measured tokens/s on capacity:** `ClusterCapacity.tokens_per_sec` + `tokens_per_sec_samples` from real completion wall time; dashboard `stat-tokens-per-sec` + `docs/app.js` bind; `GET /v1/cluster/capacity` e2e
-- **Shard die → replan e2e OBSERVE:** mesh `confirmed_shard_death_triggers_replan` — attempt bump, lease free→used→free, free==total
-- **ADR 0002:** pure-Rust remains alpha default ([docs/adr/0002-pure-rust-alpha-default.md](docs/adr/0002-pure-rust-alpha-default.md)); GPU needs ADR 0003+
-- **Per-shard band-only prepare/install:** `prepare_for_band` / `prepare_and_install_for_band` (preferred files only)
-- **Mesh sequential JST3 parity** + **tail `joule-decode`** + **ADR 0001** GPU/FFI gate (prior Unreleased track)
+- **Control confirmed-shard death recovery:** multi-agent control/mesh path replan once after mid-infer shard disconnect, or fail-closed when no capacity remains; stream leases free→used→free (e2e `control_confirmed_shard_death_replans_or_fail_closed_lease_free`)
+- **Multi-donor lab-mid sequential PP:** three prepared ClusterEngine donors; sequential JST activations + `joule-decode` tail; weight flip changes text (e2e `multi_donor_lab_mid_sequential_pp_tail_decode`)
+- **Contribution gate e2e:** no agent → HTTP 403 contribution required; healthy agent → chat allowed (product law 2)
+- **lab-mid / lab-large decode quality:** multi-file fixture prepare→infer is tensor-backed; weight/activation sensitive
+- **Measured tokens/s on capacity:** `ClusterCapacity.tokens_per_sec` + samples; control `dashboard.html` + docs site bind; e2e
+- **Mesh shard die replan** + **ADR 0001/0002** (pure-Rust alpha default) + **band-only prepare/install** + JST3/mesh parity from prior Unreleased track
 
 ### Changed
-- Control path records infer rate samples on settle (sub-ms completions floor 1ms)
-- K3 pin ops: real offline bytes still absent on CI hosts; `pin-k3-shards` fail-closed; no SemVer **0.1.13** cut this cycle (Unreleased only — packaging/channels deferred)
+- Agent disconnect fails pipeline shard_ack waiters immediately (enables fast replan)
+- Control path records infer rate samples on settle (sub-ms floor 1ms)
+
+### Fixed
+- Control dashboard binds measured tokens/s (served at `/`)
 
 ## [0.1.12] — 2026-08-03
 

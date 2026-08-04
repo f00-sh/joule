@@ -2084,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "joule"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "base64",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "joule-client"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "serde",
  "serde_json",
@@ -2127,7 +2127,7 @@ dependencies = [
 
 [[package]]
 name = "joule-cluster"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "joule-control"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2171,7 +2171,7 @@ dependencies = [
 
 [[package]]
 name = "joule-dht"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "hex",
  "serde",
@@ -2182,7 +2182,7 @@ dependencies = [
 
 [[package]]
 name = "joule-ledger"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "joule-mesh"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2213,7 +2213,7 @@ dependencies = [
 
 [[package]]
 name = "joule-net"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "anyhow",
  "serde",
@@ -2224,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "joule-proto"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "bytes",
  "serde",
@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "joule-runtime"
-version = "0.1.12"
+version = "0.1.13"
 dependencies = [
  "async-trait",
  "hex",

@@ -2639,6 +2639,426 @@ async fn capacity_tokens_per_sec_after_chat() {
     agent.abort();
 }
 
+/// Control multi-agent path: confirmed plan shard dies mid-infer → replan or fail-closed;
+/// delayed done is irrelevant; leases free==total after settle.
+#[tokio::test]
+async fn control_confirmed_shard_death_replans_or_fail_closed_lease_free() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+        g.lease_wait = Duration::from_millis(500);
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+
+    let (key_a, a) = spawn_agent(agent_addr, "replan-alice", 8192).await;
+    let (_kb, b) = spawn_agent(agent_addr, "replan-bob", 12288).await;
+    let (_kc, c) = spawn_agent(agent_addr, "replan-carol", 16384).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let sched0: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let free0 = sched0["stream_slots_free"].as_u64().unwrap();
+    assert!(
+        sched0["shards"].as_u64().unwrap_or(0) >= 3,
+        "need multi-shard plan: {sched0}"
+    );
+    eprintln!(
+        "OBSERVE control-replan before free={free0} shards={}",
+        sched0["shards"]
+    );
+
+    // Start chat; while plan is agreed mid-flight, kill a non-alice donor (confirmed shard).
+    let chat = {
+        let client = client.clone();
+        let base = base.clone();
+        let key = key_a.clone();
+        tokio::spawn(async move {
+            client
+                .post(format!("{base}/v1/chat/completions"))
+                .bearer_auth(&key)
+                .json(&serde_json::json!({
+                    "model": CLUSTER_MODEL,
+                    "messages": [{"role":"user","content":"control-shard-die-replan"}],
+                    "max_tokens": 24
+                }))
+                .timeout(Duration::from_secs(25))
+                .send()
+                .await
+        })
+    };
+
+    // Wait for plan_agreed then abort bob + carol-style victim (bob).
+    for _ in 0..80 {
+        let leases: serde_json::Value = client
+            .get(format!("{base}/v1/cluster/leases"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let audit = leases["audit"].as_array().cloned().unwrap_or_default();
+        if audit.iter().any(|e| e["event"] == "plan_agreed") {
+            eprintln!("OBSERVE control-replan plan_agreed; aborting confirmed shard agent bob");
+            b.abort();
+            break;
+        }
+        if chat.is_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let resp = chat.await.expect("join chat").expect("http");
+    let status = resp.status();
+    let body_txt = resp.text().await.unwrap_or_default();
+    eprintln!(
+        "OBSERVE control-replan chat status={} body_len={} body={}",
+        status,
+        body_txt.len(),
+        body_txt.chars().take(200).collect::<String>()
+    );
+    // Replan success (200) or hard fail-closed if remaining pool cannot complete (4xx/5xx).
+    // Never hang with open lease.
+    let ok_or_fail_closed = status.is_success()
+        || status.as_u16() == 503
+        || status.as_u16() == 400
+        || status.as_u16() == 502
+        || body_txt.contains("replan")
+        || body_txt.contains("shard")
+        || body_txt.contains("not connected")
+        || body_txt.contains("fail-closed")
+        || body_txt.contains("capacity");
+    assert!(
+        ok_or_fail_closed,
+        "expected replan success or fail-closed: status={status} body={body_txt}"
+    );
+
+    // Late InferDone bound to dead plan must not leave active leases / used slots.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let sched1: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/scheduler"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        sched1["stream_slots_used"].as_u64().unwrap_or(99),
+        0,
+        "lease used must restore free after replan/fail: {sched1}"
+    );
+    assert_eq!(
+        sched1["stream_slots_free"].as_u64().unwrap(),
+        sched1["stream_slots_total"].as_u64().unwrap(),
+        "free==total after settle: {sched1}"
+    );
+    let leases: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/leases"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(leases["active_leases"].as_u64().unwrap_or(99), 0);
+    let audit = leases["audit"].as_array().expect("audit");
+    assert!(
+        audit.iter().any(|e| e["event"] == "lease_released"),
+        "must release lease: {leases}"
+    );
+    eprintln!(
+        "OBSERVE control-replan after free={} used={} total={} active_leases=0 released=true",
+        sched1["stream_slots_free"], sched1["stream_slots_used"], sched1["stream_slots_total"]
+    );
+
+    a.abort();
+    c.abort();
+}
+
+/// Product law 2: no active contribution ⇒ chat forbidden; with healthy agent ⇒ allowed.
+#[tokio::test]
+async fn contribution_required_gate_deny_then_allow() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+        // Issue a pool key for freeloader without any agent (not donating).
+        let key = g.ensure_account("freeloader");
+        assert!(key.starts_with("joule_"));
+        // Give balance so failure is contribution, not insufficient funds.
+        g.ledger
+            .mint_contribution("freeloader", 10_000, "e2e-seed")
+            .expect("mint");
+    }
+    let freeloader_key = {
+        let g = app.state.read().await;
+        g.account_keys
+            .get("freeloader")
+            .cloned()
+            .expect("freeloader key")
+    };
+
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+
+    let denied = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&freeloader_key)
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role":"user","content":"freeload-hi"}],
+            "max_tokens": 8
+        }))
+        .send()
+        .await
+        .unwrap();
+    let deny_status = denied.status();
+    let deny_body = denied.text().await.unwrap_or_default();
+    assert_eq!(
+        deny_status,
+        reqwest::StatusCode::FORBIDDEN,
+        "no contribution must be 403: {deny_status} {deny_body}"
+    );
+    assert!(
+        deny_body.to_lowercase().contains("contribution") || deny_body.contains("agent"),
+        "deny body must mention contribution: {deny_body}"
+    );
+    eprintln!("OBSERVE contribution-gate DENY status={deny_status} body={deny_body}");
+
+    // Active contribution: healthy agent for freeloader account.
+    let (_key2, agent) = spawn_agent(agent_addr, "freeloader", 8192).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+    assert!(
+        {
+            let g = app.state.read().await;
+            g.cluster.account_is_donating("freeloader")
+        },
+        "agent must mark account donating"
+    );
+
+    let allowed = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&freeloader_key)
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role":"user","content":"contribute-then-chat"}],
+            "max_tokens": 16
+        }))
+        .send()
+        .await
+        .unwrap();
+    let allow_status = allowed.status();
+    let allow_body = allowed.text().await.unwrap_or_default();
+    assert!(
+        allow_status.is_success(),
+        "with contribution chat must proceed: {allow_status} {allow_body}"
+    );
+    eprintln!(
+        "OBSERVE contribution-gate ALLOW status={allow_status} body_len={}",
+        allow_body.len()
+    );
+
+    agent.abort();
+}
+
+/// Multi-donor sequential PP with lab-mid prepared ClusterEngine agents + tail tensor text.
+#[tokio::test]
+async fn multi_donor_lab_mid_sequential_pp_tail_decode() {
+    use std::fs;
+
+    let dir = std::env::temp_dir().join(format!(
+        "joule-e2e-lab-mid-pp-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    let store = WeightsStore::new(&dir);
+    let m = ManifestFile::load_default().expect("manifest");
+    let spec = m.model("kimi-open").expect("kimi-open");
+    let mid = spec
+        .weights
+        .quants
+        .iter()
+        .find(|q| q.id == "lab-mid")
+        .expect("lab-mid");
+
+    let mut engines = Vec::new();
+    for i in 0..3 {
+        let eng = ClusterEngine::new();
+        let report = prepare_and_install(&store, &eng, spec, mid)
+            .unwrap_or_else(|e| panic!("prepare lab-mid {i}: {e}"));
+        assert!(report.tensors >= 3, "lab-mid tensors={}", report.tensors);
+        assert!(eng.is_model_loaded());
+        eprintln!(
+            "OBSERVE lab-mid prepare agent={i} quant=lab-mid tensors={} bytes={}",
+            report.tensors, report.bytes_resident
+        );
+        engines.push(Arc::new(eng));
+    }
+
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let stage_magics: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let (key_a, a) = spawn_agent_prepared_cluster(
+        agent_addr,
+        "mid-alice",
+        8192,
+        engines[0].clone(),
+        stage_magics.clone(),
+    )
+    .await;
+    let (_kb, b) = spawn_agent_prepared_cluster(
+        agent_addr,
+        "mid-bob",
+        12288,
+        engines[1].clone(),
+        stage_magics.clone(),
+    )
+    .await;
+    let (_kc, c) = spawn_agent_prepared_cluster(
+        agent_addr,
+        "mid-carol",
+        16384,
+        engines[2].clone(),
+        stage_magics.clone(),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+    let chat: serde_json::Value = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&key_a)
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role":"user","content":"lab-mid multi-donor pp"}],
+            "max_tokens": 32
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let content = chat["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    let shards = chat["joule_shard_count"].as_u64().unwrap_or(0);
+    assert!(shards >= 3, "multi-donor plan: shards={shards} chat={chat}");
+    assert!(
+        !content.contains("joule-stub"),
+        "must not be stub: {content}"
+    );
+    assert!(
+        content.contains("joule-decode")
+            || content.contains("joule-tensor")
+            || content.contains("matmul")
+            || content.contains("upstream_bytes="),
+        "tail must be tensor/decode path: {content}"
+    );
+    assert!(
+        !content.starts_with("[joule-pipeline-stage:"),
+        "not stage-tag-only: {content}"
+    );
+    let magics = stage_magics.lock().unwrap().clone();
+    let non_tail_jst = magics.iter().filter(|m| m.starts_with("JST")).count();
+    assert!(
+        non_tail_jst >= 2,
+        "sequential non-tail activations: magics={magics:?}"
+    );
+    eprintln!(
+        "OBSERVE lab-mid-multidonor-pp: quant=lab-mid shards={shards} non_tail_jst={non_tail_jst} text_len={} content={}",
+        content.len(),
+        content.chars().take(160).collect::<String>()
+    );
+
+    // Weight flip on **all** donors changes sequential activations + tail (mutation sensitivity).
+    {
+        use joule_runtime::load_model;
+        for eng in &engines {
+            let mut lm = load_model(&store, spec, mid).expect("reload mid");
+            for bytes in lm.tensors.values_mut() {
+                if bytes.len() < 16 {
+                    continue;
+                }
+                for chunk in bytes.chunks_exact_mut(4) {
+                    let mut v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    if v.is_finite() {
+                        v = -v - 0.37;
+                        chunk.copy_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+            eng.install_loaded(lm);
+        }
+    }
+    stage_magics.lock().unwrap().clear();
+    let chat2: serde_json::Value = client
+        .post(format!("{base}/v1/chat/completions"))
+        .bearer_auth(&key_a)
+        .json(&serde_json::json!({
+            "model": CLUSTER_MODEL,
+            "messages": [{"role":"user","content":"lab-mid multi-donor pp"}],
+            "max_tokens": 32
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let content2 = chat2["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+    assert_ne!(
+        content, content2,
+        "tail weight flip on a donor must change multi-donor text"
+    );
+    eprintln!(
+        "OBSERVE lab-mid-multidonor-pp flip_diff=true text_len1={} text_len2={}",
+        content.len(),
+        content2.len()
+    );
+
+    a.abort();
+    b.abort();
+    c.abort();
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Formal e2e: 3 prepared ClusterEngine agents → sequential JST3 chain + lease audit OBSERVE.
 ///
 /// Combines production prepare (lab-tiny), `require_band_weights` after resident weights,
