@@ -1474,10 +1474,7 @@ mod challenge_integrity_tests {
             Ok(Err(e)) => assert!(e.contains("shard disconnected"), "{e}"),
             other => panic!("expected Err oneshot, got {other:?}"),
         }
-        assert!(
-            matches!(rx_miss.try_recv(), Err(_)),
-            "non-member oneshot untouched"
-        );
+        assert!(rx_miss.try_recv().is_err(), "non-member oneshot untouched");
 
         // Double-call safe.
         let again = state.fail_pending_for_dead_shard(&dead);
