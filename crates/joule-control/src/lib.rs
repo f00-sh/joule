@@ -187,12 +187,14 @@ pub async fn broadcast_pool_status(app: &App) {
     let Ok(r) = joule_runtime::readiness_for_pool_ex(vram, backends, flags, growth) else {
         return;
     };
+    // Production: when fleet can host full K3, recommend kimi-k3-shards so agents
+    // prepare/band-load that quant (not lab-large). Below fleet: lab quant for protocol.
     let quant = ManifestFile::load_default()
         .ok()
         .and_then(|m| m.primary().cloned())
         .and_then(|spec| {
-            // Control does not know each node VRAM here in bulk; agents re-pick.
-            spec.pick_quant(8192).map(|q| q.id.clone())
+            joule_runtime::recommend_quant_for_pool(&spec, r.pool_vram_mib, r.backends)
+                .map(|q| q.id.clone())
         });
 
     let msg = Message::PoolStatus {

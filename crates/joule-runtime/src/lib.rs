@@ -58,7 +58,8 @@ pub use weights::{
 // band helpers live on WeightsStore::required_weight_files_for_band / band_files_ready
 
 /// Gate: digests verified for a **lab fixture** quant of the default manifest model.
-/// Never unlocks on `kimi-k3-shards` / placeholder peer pins (CI has no full K3 weights).
+/// Used for lab CI / protocol arming only — **never** for service_live / full-Kimi claims.
+/// Prefer [`production_digests_ok`] / [`digests_verified_for_service_claim`] on control.
 pub fn digests_verified_for_primary_lab(store: &WeightsStore) -> Result<bool, String> {
     let m = ManifestFile::load_default()?;
     let spec = m.primary().ok_or_else(|| "no primary model".to_string())?;
@@ -67,6 +68,37 @@ pub fn digests_verified_for_primary_lab(store: &WeightsStore) -> Result<bool, St
         .or_else(|| spec.weights.quants.first())
         .ok_or_else(|| "no quant".to_string())?;
     Ok(digests_verified_for_quant(store, &spec.id, quant))
+}
+
+/// Service / full-Kimi digest SoT: production `kimi-k3-shards` only.
+pub fn digests_verified_for_service_claim(store: &WeightsStore) -> bool {
+    production_digests_ok(store)
+}
+
+/// Quant recommendation for PoolStatus fanout.
+///
+/// - Fleet-ready (≥64 GiB verified VRAM and ≥3 backends) and production pins are
+///   non-placeholder → **`kimi-k3-shards`** so donors prepare the full-Kimi path.
+/// - Otherwise lab quant by memory class (protocol / first-light).
+pub fn recommend_quant_for_pool(
+    spec: &manifest::ModelSpec,
+    pool_vram_mib: u64,
+    backends: u32,
+) -> Option<&manifest::QuantSpec> {
+    if full_k3_service_fleet_ok(pool_vram_mib, backends) {
+        if let Some(k3) = spec
+            .weights
+            .quants
+            .iter()
+            .find(|q| q.id == "kimi-k3-shards")
+        {
+            if quant_can_unlock_service_digests(k3) {
+                return Some(k3);
+            }
+        }
+    }
+    spec.pick_quant(8192)
+        .or_else(|| spec.weights.quants.first())
 }
 
 use async_trait::async_trait;
@@ -547,16 +579,48 @@ mod tests {
             "lab fixture must unlock digests after sha256 stage"
         );
         assert!(digests_verified_for_primary_lab(&store).unwrap());
+        // Critical product gate: lab complete must NOT unlock service / full-Kimi digests.
+        assert!(
+            !production_digests_ok(&store),
+            "lab bytes must not set production_digests_ok"
+        );
+        assert!(
+            !digests_verified_for_service_claim(&store),
+            "service claim digests stay false without kimi-k3-shards residency"
+        );
         eprintln!(
-            "OBSERVE k3-content-gate: k3_can_unlock={} k3_verified={} lab={} primary_lab={}",
+            "OBSERVE k3-content-gate: k3_can_unlock={} k3_verified={} lab_verified={} service_claim={} production_ok={}",
             quant_can_unlock_service_digests(k3),
             digests_verified_for_quant(&store, &spec.id, k3),
-            lab.id,
-            digests_verified_for_primary_lab(&store).unwrap()
+            digests_verified_for_primary_lab(&store).unwrap(),
+            digests_verified_for_service_claim(&store),
+            production_digests_ok(&store),
         );
         std::env::remove_var("JOULE_BLOBS_DIR");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&blob);
+    }
+
+    #[test]
+    fn recommend_quant_fleet_prefers_k3_shards() {
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.primary().unwrap();
+        let below = recommend_quant_for_pool(spec, 8192, 1).expect("lab below fleet");
+        assert!(
+            is_lab_fixture_quant(below),
+            "below fleet must recommend lab, got {}",
+            below.id
+        );
+        let fleet = recommend_quant_for_pool(spec, 72 * 1024, 5).expect("k3 on fleet");
+        assert_eq!(
+            fleet.id, "kimi-k3-shards",
+            "fleet-ready must recommend production quant, got {}",
+            fleet.id
+        );
+        eprintln!(
+            "OBSERVE recommend_quant: below={} fleet={}",
+            below.id, fleet.id
+        );
     }
 
     #[tokio::test]

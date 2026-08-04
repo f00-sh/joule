@@ -552,15 +552,16 @@ impl ControlState {
         }
     }
 
-    /// **Only** digests SoT: assign `digests_verified` from WeightsStore MANIFEST sha256
-    /// (`digests_verified_for_primary_lab`). Never BlobsHave catalog, PrepareOk, or ModelLoaded.
+    /// **Only** digests SoT for **service / full-Kimi claims**: production quant
+    /// `kimi-k3-shards` content sha256 via [`joule_runtime::production_digests_ok`].
+    /// Lab fixtures must never set this true. Never BlobsHave / PrepareOk / ModelLoaded alone.
     /// Assigns the pure result (not sticky-or-true).
     pub fn refresh_digests_from_evidence(&mut self) -> bool {
         let store = joule_runtime::WeightsStore::new(joule_runtime::WeightsStore::default_root());
-        let ok = joule_runtime::digests_verified_for_primary_lab(&store).unwrap_or(false);
+        let ok = joule_runtime::production_digests_ok(&store);
         self.set_digests_verified(ok);
         if ok {
-            info!("digests_verified from WeightsStore MANIFEST sha256");
+            info!("digests_verified from production kimi-k3-shards MANIFEST sha256");
         }
         ok
     }
@@ -1301,6 +1302,68 @@ impl ControlState {
             warn!(%from, "challenge failed (exact match required)");
         }
         Some(ok)
+    }
+}
+
+#[cfg(test)]
+mod digest_service_claim_tests {
+    use super::*;
+    use joule_runtime::{
+        digests_verified_for_primary_lab, digests_verified_for_service_claim, prepare_and_install,
+        production_digests_ok, ClusterEngine, ManifestFile, WeightsStore,
+    };
+    use std::sync::Mutex;
+    use uuid::Uuid;
+
+    static ENV: Mutex<()> = Mutex::new(());
+
+    /// Lab prepare must not make control digests_verified / service claim true.
+    #[test]
+    fn refresh_digests_lab_complete_k3_absent_stays_false() {
+        let _g = ENV.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("joule-ctl-digests-{}", Uuid::new_v4()));
+        let blob = std::env::temp_dir().join(format!("joule-ctl-blobs-{}", Uuid::new_v4()));
+        let weights = dir.join("weights");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
+        std::fs::create_dir_all(&weights).unwrap();
+        std::fs::create_dir_all(&blob).unwrap();
+        std::env::set_var("JOULE_WEIGHTS_DIR", &weights);
+        std::env::set_var("JOULE_BLOBS_DIR", &blob);
+
+        let store = WeightsStore::new(&weights);
+        let m = ManifestFile::load_default().unwrap();
+        let spec = m.primary().unwrap();
+        let lab = spec.pick_quant(8192).expect("lab-large");
+        let eng = ClusterEngine::new();
+        prepare_and_install(&store, &eng, spec, lab).expect("lab install");
+        assert!(digests_verified_for_primary_lab(&store).unwrap());
+        assert!(!production_digests_ok(&store));
+        assert!(!digests_verified_for_service_claim(&store));
+
+        let mut state = ControlState::new();
+        assert!(!state.digests_verified);
+        let ok = state.refresh_digests_from_evidence();
+        assert!(!ok, "refresh must not unlock on lab-only residency");
+        assert!(
+            !state.digests_verified,
+            "service digests_verified stays false without kimi-k3-shards"
+        );
+        state.set_service_live_intent(true);
+        assert!(
+            !state.service_live_public(),
+            "service_live_public false without production digests"
+        );
+        eprintln!(
+            "OBSERVE control-digests: lab_ok=true production_ok=false digests_verified={} service_live_public={}",
+            state.digests_verified,
+            state.service_live_public()
+        );
+
+        std::env::remove_var("JOULE_WEIGHTS_DIR");
+        std::env::remove_var("JOULE_BLOBS_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&blob);
     }
 }
 
