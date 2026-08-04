@@ -7,8 +7,8 @@
 use crate::cuda_matvec::{host_matvec_f32, production_matvec4};
 use crate::load::LoadedModel;
 use crate::manifest::{ManifestFile, ModelReadiness, QuantSpec};
-use crate::stage::{activation_commitment_hex, StageOutput, StageRequest};
-use crate::stage_matmul::MATMUL_DIM;
+use crate::stage::{StageOutput, StageRequest};
+use crate::stage_matmul::{pack_jst3, MATMUL_DIM};
 use crate::weights::{
     digests_verified_for_quant, is_lab_fixture_quant, quant_can_unlock_service_digests,
     WeightsStore,
@@ -425,8 +425,21 @@ impl ProductionEngine {
             state.copy_from_slice(&host[..4]);
         }
 
-        pack_jst3_cuda(req, &state, used_cuda, lm.tensors.len() as u32, &lm.tensors)
-            .map_err(RuntimeError::Infer)
+        // Sole StageOutput contract: shared pack_jst3 (activation + is_tail text/decode).
+        let backend = if used_cuda {
+            b"joule-stage-cuda-matvec-v1".as_slice()
+        } else {
+            b"joule-stage-production-host-matvec-v1".as_slice()
+        };
+        pack_jst3(
+            req,
+            &state,
+            1,
+            lm.tensors.len() as u32,
+            &lm.tensors,
+            backend,
+        )
+        .map_err(RuntimeError::Infer)
     }
 
     fn production_infer(&self, req: InferRequest) -> Result<InferResponse, RuntimeError> {
@@ -553,42 +566,6 @@ fn as_f32s(bytes: &[u8]) -> Option<Vec<f32>> {
         out.push(v);
     }
     Some(out)
-}
-
-fn pack_jst3_cuda(
-    req: &StageRequest,
-    state: &[f32; 4],
-    used_cuda: bool,
-    tensors_used: u32,
-    tensors: &HashMap<String, Vec<u8>>,
-) -> Result<StageOutput, String> {
-    let mut out = Vec::with_capacity(80);
-    // JST3 magic preserved for mesh compatibility; backend bit in tag.
-    out.extend_from_slice(b"JST3");
-    out.extend_from_slice(&req.layer_start.to_le_bytes());
-    out.extend_from_slice(&req.layer_end.to_le_bytes());
-    out.extend_from_slice(&(MATMUL_DIM as u32).to_le_bytes());
-    out.extend_from_slice(&1u32.to_le_bytes()); // layers_applied
-    out.extend_from_slice(&tensors_used.to_le_bytes());
-    out.extend_from_slice(&(req.upstream.len() as u32).to_le_bytes());
-    for v in state {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    let tag = if used_cuda {
-        Sha256::digest(b"joule-stage-cuda-matvec-v1")
-    } else {
-        Sha256::digest(b"joule-stage-production-host-matvec-v1")
-    };
-    out.extend_from_slice(&tag[..8]);
-    let _ = activation_commitment_hex(&out);
-    let _ = tensors;
-    // Match ClusterEngine StageOutput shape (activation + optional text stats).
-    Ok(StageOutput {
-        activation: out,
-        text: None,
-        prompt_tokens: 0,
-        completion_tokens: 0,
-    })
 }
 
 #[async_trait]
@@ -997,11 +974,87 @@ mod tests {
             out.activation, out2.activation,
             "CUDA/host production stage must be weight-sensitive"
         );
+
+        // Multi-donor tail contract (agent_handle_infer takes stage.text for InferDone):
+        // is_tail=true must yield non-empty weight-sensitive completion text.
+        let tail_a = eng
+            .stage_layers(StageRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "mesh-k3-tail-hi".into(),
+                layer_start: 0,
+                layer_end: 0,
+                upstream: out2.activation.clone(),
+                is_tail: true,
+                require_upstream: true,
+                require_band_weights: true,
+                required_weight_files: vec!["model-00001-of-000096.safetensors".into()],
+            })
+            .await
+            .expect("tail stage after content proof");
+        // Same extraction as joule_control::agent_handle_infer multi-shard tail.
+        let text_a = tail_a.text.clone().unwrap_or_default();
+        assert!(
+            !text_a.is_empty(),
+            "multi-donor tail InferDone text must be non-empty, got empty (pack_jst3 is_tail)"
+        );
+        assert!(
+            text_a.contains("mesh-k3-tail-hi")
+                || text_a.contains("joule-decode")
+                || text_a.contains("matmul")
+                || text_a.contains("L0"),
+            "tail text should reflect decode/matmul path: {text_a}"
+        );
+        assert!(tail_a.completion_tokens > 0);
+
+        // Weight-sensitive tail: reinstall first-weight set and re-tail.
+        {
+            write_tiny_safetensors_fixture(&path).unwrap();
+            let bytes3 = fs::read(&path).unwrap();
+            let hash3 = hex::encode(Sha256::digest(&bytes3));
+            let quant3 = QuantSpec {
+                id: "kimi-k3-band-proof".into(),
+                min_node_vram_mib: 256,
+                approx_file_mib: 1,
+                files: vec![WeightFile {
+                    path: "model-00001-of-000096.safetensors".into(),
+                    sha256: hash3,
+                    url: "peer://kimi-open/k3/model-00001-of-000096.safetensors".into(),
+                    size_bytes: bytes3.len() as u64,
+                }],
+            };
+            let lm3 = load_model_for_band(&store, spec, &quant3, 0, 0).unwrap();
+            eng.install_production_band(&store, &spec.id, &quant3, lm3, 0, 0)
+                .unwrap();
+        }
+        let tail_b = eng
+            .stage_layers(StageRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "mesh-k3-tail-hi".into(),
+                layer_start: 0,
+                layer_end: 0,
+                upstream: out2.activation.clone(),
+                is_tail: true,
+                require_upstream: true,
+                require_band_weights: true,
+                required_weight_files: vec!["model-00001-of-000096.safetensors".into()],
+            })
+            .await
+            .unwrap();
+        let text_b = tail_b.text.unwrap_or_default();
+        assert!(!text_b.is_empty());
+        // Activation and/or text must differ when weights flip (shared pack_jst3 decode path).
+        assert!(
+            tail_a.activation != tail_b.activation || text_a != text_b,
+            "tail stage must be weight-sensitive"
+        );
+
         assert!(full_k3_service_fleet_ok(200_000, 8));
         eprintln!(
-            "OBSERVE mesh-k3-serve: fail_closed_ok stage_jst3 weight_flip={} fleet_ok={}",
+            "OBSERVE mesh-k3-serve: fail_closed_ok stage_jst3 weight_flip={} fleet_ok={} tail_text_len={} tail_weight_flip={}",
             out.activation != out2.activation,
-            full_k3_service_fleet_ok(200_000, 8)
+            full_k3_service_fleet_ok(200_000, 8),
+            text_a.len(),
+            text_a != text_b || tail_a.activation != tail_b.activation
         );
         std::env::remove_var("JOULE_BLOBS_DIR");
         let _ = fs::remove_dir_all(&root);

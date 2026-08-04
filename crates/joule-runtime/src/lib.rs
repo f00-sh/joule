@@ -48,8 +48,8 @@ pub use stage::{
     stage_activation_with_weights, weight_material_from_tensors, StageOutput, StageRequest,
 };
 pub use stage_matmul::{
-    select_band_tensors, stage_activation_matmul, stage_activation_matmul_scoped, MATMUL_DIM,
-    MAX_STACK_BLOCKS,
+    pack_jst3, select_band_tensors, stage_activation_matmul, stage_activation_matmul_scoped,
+    MATMUL_DIM, MAX_STACK_BLOCKS,
 };
 pub use weights::{
     digests_verified_for_quant, is_lab_fixture_quant, is_synthetic_placeholder_digest,

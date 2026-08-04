@@ -84,7 +84,14 @@ pub fn stage_activation_matmul_scoped(
         applied = applied.saturating_add(1);
     }
 
-    pack_jst3(req, &state, applied, selected.len() as u32, &selected)
+    pack_jst3(
+        req,
+        &state,
+        applied,
+        selected.len() as u32,
+        &selected,
+        b"joule-stage-matmul-v2-stack",
+    )
 }
 
 /// Filter tensors to those whose source file is in `preferred_files`.
@@ -225,12 +232,18 @@ fn as_f32s(bytes: &[u8]) -> Option<Vec<f32>> {
     Some(out)
 }
 
-fn pack_jst3(
+/// Sole JST3 activation packer (lab ClusterEngine + production CUDA path).
+///
+/// `backend_tag` distinguishes pure-Rust stack vs CUDA matvec in the wire tag;
+/// **tail text / decode always use the same contract** so multi-donor
+/// `agent_handle_infer` can take `stage.text` for InferDone.
+pub fn pack_jst3(
     req: &StageRequest,
     state: &[f32],
     layers_applied: u32,
     tensors_used: u32,
     tensors: &HashMap<String, Vec<u8>>,
+    backend_tag: &[u8],
 ) -> Result<StageOutput, String> {
     let mut out = Vec::with_capacity(64 + state.len() * 4);
     out.extend_from_slice(b"JST3");
@@ -243,7 +256,7 @@ fn pack_jst3(
     for v in state {
         out.extend_from_slice(&v.to_le_bytes());
     }
-    let tag = Sha256::digest(b"joule-stage-matmul-v2-stack");
+    let tag = Sha256::digest(backend_tag);
     out.extend_from_slice(&tag[..8]);
     if out.len() < 48 {
         return Err("matmul activation too small".into());
