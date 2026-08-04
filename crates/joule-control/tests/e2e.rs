@@ -656,15 +656,20 @@ async fn service_live_flips_when_mesh_loaded() {
 /// Catalog/seeder announce is not content proof (WeightsStore sha256 only).
 #[tokio::test]
 async fn forged_model_loaded_does_not_set_digests_or_live() {
-    // Isolate blob store so primary lab digests are not accidentally present.
+    // Isolate weights + blobs so host lab prepares (e.g. production-smoke) cannot
+    // make refresh_digests_from_evidence() true without content in this test.
     let dir = std::env::temp_dir().join(format!(
         "joule-e2e-forge-digests-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::env::set_var("JOULE_BLOBS_DIR", &dir);
+    let blobs = dir.join("blobs");
+    let weights = dir.join("weights");
+    std::fs::create_dir_all(&blobs).unwrap();
+    std::fs::create_dir_all(&weights).unwrap();
+    std::env::set_var("JOULE_BLOBS_DIR", &blobs);
+    std::env::set_var("JOULE_WEIGHTS_DIR", &weights);
 
     let app = load_or_init_app(None).expect("app");
     let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
@@ -780,6 +785,7 @@ async fn forged_model_loaded_does_not_set_digests_or_live() {
         }
     }
     std::env::remove_var("JOULE_BLOBS_DIR");
+    std::env::remove_var("JOULE_WEIGHTS_DIR");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

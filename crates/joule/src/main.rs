@@ -1936,7 +1936,11 @@ async fn run_agent(
                             backends,
                             "{message}"
                         );
-                        if pool_ready && !last_armed {
+                        // Production: load the best available quant for this node's mem
+                        // even when the pool is not yet "Kimi-ready" (lab-tiny/mid/large).
+                        // Full Kimi remains gated by digests/service_live on control — not by
+                        // leaving agents unloaded forever below the 64 GiB / 3-backend milestone.
+                        if !last_armed {
                             if let Ok(manifest) = ManifestFile::load_default() {
                                 if let Some(spec) = manifest.primary() {
                                     let quant = recommend_quant
@@ -1946,6 +1950,12 @@ async fn run_agent(
                                         })
                                         .or_else(|| spec.pick_quant(mem_mib));
                                     if let Some(q) = quant {
+                                        if !pool_ready {
+                                            info!(
+                                                quant = %q.id,
+                                                "pool not milestone-ready; preparing lab/available quant for production path"
+                                            );
+                                        }
                                         // Prepare always (may arm while waiting for peer seeds).
                                         match store.prepare(spec, q) {
                                             Ok(st) => {

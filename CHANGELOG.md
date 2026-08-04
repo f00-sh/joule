@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-<!-- Alpha software queue closed at 0.1.13. Post-alpha work (full Kimi, GPU ADR 0003+, fleet ops)
-     is out of band — not open Unreleased product-layer TODOs for this track. -->
+### Fixed
+- **First-light challenges:** cold pool issues 64 MiB mem-hard credit when `verified==0` so stream slots unlock without waiting a multi-second 1 GiB proof on every start (peak credit remains `CHALLENGE_CREDIT_MIB` thereafter)
+- **Agent prepare without pool_ready:** production agents load lab/available quants for local mem even when the pool is below the 64 GiB / 3-backend Kimi milestone (full Kimi still gated by digests/service_live)
+- **`scripts/production-smoke.sh`:** release-binary smoke — control + 2 agents → verified capacity → freeloader 401/403 → contributor `joule-tensor` chat → free==total + tokens/s samples
+
+<!-- Post-alpha (full multi-hundred-GB Kimi, GPU ADR 0003+) remains out of band. -->
 
 ## [0.1.13] — 2026-08-04
 

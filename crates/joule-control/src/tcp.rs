@@ -1538,9 +1538,14 @@ pub async fn challenge_loop(app: App) {
         };
 
         // Peak model: issue up to CHALLENGE_CREDIT_MIB (single-challenge working set).
-        // Prefer challenging nodes still below claim so they can raise peak.
-        let credit_mib = joule_cluster::CHALLENGE_CREDIT_MIB.min(claim.max(1)).max(1);
-        let _ = verified; // reserved for future progressive target = min(claim, verified+step) with full peak work
+        // First light (verified=0): small credit so the pool can admit streams without
+        // a multi-second 1 GiB proof on every cold start — still real mem-hard work.
+        // Later challenges scale to full CHALLENGE_CREDIT_MIB for peak trust.
+        let credit_mib = if verified == 0 {
+            64u32.min(claim.max(1)).max(1)
+        } else {
+            joule_cluster::CHALLENGE_CREDIT_MIB.min(claim.max(1)).max(1)
+        };
 
         let challenge_id = Uuid::new_v4();
         let model = CLUSTER_MODEL.to_string();
