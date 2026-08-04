@@ -1033,6 +1033,68 @@ mod tests {
         assert!(out.text.contains("lab-mid") || out.text.contains("kimi-open"));
         assert!(!out.text.contains("joule-stub"), "got {}", out.text);
         assert!(out.text.contains("lab-mid") || out.text.contains("pool"));
+        assert!(
+            !out.text.starts_with("[joule-pipeline-stage:"),
+            "must not be stage-tag only: {}",
+            out.text
+        );
+
+        // Weight flip on multi-file mid must change tokens (real tensor path).
+        assert!(eng.loaded_report().is_some());
+        {
+            use crate::load::load_model;
+            let mut lm = load_model(&store, spec, mid).expect("reload mid");
+            if let Some(emb) = lm.tensors.get_mut("tok_embeddings.weight") {
+                // Invert all f32 signs so every scored row changes.
+                for chunk in emb.chunks_exact_mut(4) {
+                    let mut v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    v = -v - 0.37;
+                    chunk.copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            eng.install_loaded(lm);
+        }
+        let out2 = eng
+            .infer(InferRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "lab-mid pool infer".into(),
+                max_tokens: 24,
+            })
+            .await
+            .expect("infer after flip");
+        assert_ne!(
+            out.text, out2.text,
+            "lab-mid weight flip must change decode text"
+        );
+        // Activation-sensitive tail decode on multi-file mid.
+        let a = generate_from_activation_state(
+            CLUSTER_MODEL,
+            "lab-mid",
+            &load_model(&store, spec, mid).unwrap().tensors,
+            None,
+            &[0.1, 0.2, 0.3, 0.4],
+            "mid-tail",
+            16,
+        )
+        .expect("mid act decode");
+        let b = generate_from_activation_state(
+            CLUSTER_MODEL,
+            "lab-mid",
+            &load_model(&store, spec, mid).unwrap().tensors,
+            None,
+            &[8.0, -1.0, 0.0, 2.0],
+            "mid-tail",
+            16,
+        )
+        .expect("mid act decode b");
+        assert!(a.contains("joule-decode"), "a={a}");
+        assert_ne!(a, b, "activation seed must change mid tail text");
+        eprintln!(
+            "OBSERVE lab-mid-decode: tensors={} bytes={} text_len={} flip_diff=true act_diff=true",
+            report.tensors,
+            report.bytes_resident,
+            out.text.len()
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1101,6 +1163,67 @@ mod tests {
             out.text
         );
         assert!(!out.text.contains("joule-stub"));
+        assert!(
+            !out.text.starts_with("[joule-pipeline-stage:"),
+            "must not be stage-tag only: {}",
+            out.text
+        );
+        // Weight-sensitive: invert embedding floats → different tokens.
+        {
+            use crate::load::load_model;
+            let mut lm = load_model(&store, spec, large).expect("reload large");
+            if let Some(emb) = lm.tensors.get_mut("tok_embeddings.weight") {
+                for chunk in emb.chunks_exact_mut(4) {
+                    let mut v = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    v = -v + 0.11;
+                    chunk.copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            eng.install_loaded(lm);
+        }
+        let out2 = eng
+            .infer(InferRequest {
+                model: CLUSTER_MODEL.into(),
+                prompt: "lab-large multi-MiB".into(),
+                max_tokens: 16,
+            })
+            .await
+            .expect("infer large flip");
+        assert_ne!(
+            out.text, out2.text,
+            "lab-large weight flip must change decode text"
+        );
+        let tensors = crate::load::load_model(&store, spec, large)
+            .unwrap()
+            .tensors;
+        let ta = generate_from_activation_state(
+            CLUSTER_MODEL,
+            "lab-large",
+            &tensors,
+            None,
+            &[1.0, 0.0, 0.0, 0.0],
+            "large-tail",
+            16,
+        )
+        .expect("large act a");
+        let tb = generate_from_activation_state(
+            CLUSTER_MODEL,
+            "lab-large",
+            &tensors,
+            None,
+            &[0.0, 0.0, 0.0, 1.0],
+            "large-tail",
+            16,
+        )
+        .expect("large act b");
+        assert!(ta.contains("joule-decode"), "{ta}");
+        assert_ne!(ta, tb);
+        eprintln!(
+            "OBSERVE lab-large-decode: tensors={} bytes={} text_len={} flip_diff=true act_diff=true",
+            report.tensors,
+            report.bytes_resident,
+            out.text.len()
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

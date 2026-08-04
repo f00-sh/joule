@@ -2901,6 +2901,10 @@ fn print_capacity(cap: &ClusterCapacity) {
         "  throughput_class_sum (healthy): {}",
         cap.throughput_class_sum
     );
+    println!(
+        "  tokens_per_sec (measured): {} (samples={})",
+        cap.tokens_per_sec, cap.tokens_per_sec_samples
+    );
     if cap.models_available.is_empty() {
         println!("  models:    (none)");
     } else {

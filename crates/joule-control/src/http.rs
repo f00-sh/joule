@@ -200,6 +200,8 @@ fn enrich_capacity(
     mut cap: ClusterCapacity,
     flags: RuntimeFlags,
     growth: Option<f64>,
+    tokens_per_sec: u32,
+    tokens_per_sec_samples: u32,
 ) -> ClusterCapacity {
     if let Some(ref mut ld) = cap.logical_device {
         if let Ok(r) = readiness_for_pool_ex(ld.vram_mib, ld.backends, flags, growth) {
@@ -215,6 +217,8 @@ fn enrich_capacity(
             }
         }
     }
+    cap.tokens_per_sec = tokens_per_sec;
+    cap.tokens_per_sec_samples = tokens_per_sec_samples;
     cap
 }
 
@@ -223,7 +227,8 @@ async fn capacity(State(app): State<App>) -> Json<ClusterCapacity> {
     g.prune();
     let flags = g.runtime_flags();
     let growth = g.vram_growth_mib_per_sec();
-    Json(enrich_capacity(g.cluster.capacity(), flags, growth))
+    let (tps, n) = g.measured_tokens_per_sec();
+    Json(enrich_capacity(g.cluster.capacity(), flags, growth, tps, n))
 }
 
 async fn scheduler(State(app): State<App>) -> impl IntoResponse {
@@ -283,7 +288,8 @@ async fn models(State(app): State<App>) -> impl IntoResponse {
     let g = app.state.read().await;
     let flags = g.runtime_flags();
     let growth = g.vram_growth_mib_per_sec();
-    let cap = enrich_capacity(g.cluster.capacity(), flags, growth);
+    let (tps, n) = g.measured_tokens_per_sec();
+    let cap = enrich_capacity(g.cluster.capacity(), flags, growth, tps, n);
     let online = g.cluster.pool_size() > 0;
     let data = if online {
         let ld = cap.logical_device.as_ref();

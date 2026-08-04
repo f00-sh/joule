@@ -238,6 +238,15 @@ pub struct ClusterCapacity {
     /// **The** public view: one device with aggregate VRAM.
     #[serde(default)]
     pub logical_device: Option<LogicalDevice>,
+    /// Measured tokens/s from recent completions (integer; 0 if no samples yet).
+    ///
+    /// Not derived from `throughput_class_sum` alone — updated when real infer
+    /// finishes with non-zero tokens and elapsed wall time.
+    #[serde(default)]
+    pub tokens_per_sec: u32,
+    /// Sample window size used for `tokens_per_sec` (0 = none).
+    #[serde(default)]
+    pub tokens_per_sec_samples: u32,
 }
 
 /// Ed25519 device authenticity for PlanOffer / PlanAccept.
@@ -662,9 +671,13 @@ mod tests {
             stream_slots_total: 4,
             stream_slots_used: 1,
             logical_device: None,
+            tokens_per_sec: 120,
+            tokens_per_sec_samples: 3,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(v["nodes_healthy"], 2);
+        assert_eq!(v["tokens_per_sec"], 120);
+        assert_eq!(v["tokens_per_sec_samples"], 3);
     }
 
     #[test]

@@ -2699,6 +2699,15 @@ mod tests {
             !g.donors.get(&victim).map(|d| d.healthy).unwrap_or(true),
             "victim must stay unhealthy"
         );
+        eprintln!(
+            "OBSERVE shard-die-replan: attempt_before={attempt_before} attempt_after={} free={} used={} total={} active_leases={} text_len={}",
+            inf.attempt,
+            snap.stream_slots_free,
+            snap.stream_slots_used,
+            snap.stream_slots_total,
+            g.leases.active_count(),
+            text.len()
+        );
     }
 
     /// Mid-flight death: first coordinator is **alive and elected**, then silenced

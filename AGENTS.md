@@ -38,6 +38,9 @@
 - **Any FFI / non-Rust runtime** requires an ADR under `docs/adr/` and an explicit note here before merge.
 - **GPU/FFI engine gate:** [docs/adr/0001-gpu-ffi-engine.md](docs/adr/0001-gpu-ffi-engine.md)
   — pure-Rust default; no GPU/FFI backend ships without a follow-on ADR + this note updated.
+- **Alpha decision (ADR 0002):** pure-Rust remains acceptable for public alpha
+  ([docs/adr/0002-pure-rust-alpha-default.md](docs/adr/0002-pure-rust-alpha-default.md)).
+  A GPU backend needs **ADR 0003+** before merge — not stealth FFI.
 
 ## Workspace
 

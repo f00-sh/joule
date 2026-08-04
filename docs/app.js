@@ -54,6 +54,17 @@
     );
     setText("stat-mode", ready.inference_mode || ld.inference_mode || "—");
     setText("stat-throughput", String(cap.throughput_class_sum ?? "—"));
+    // Measured tokens/s from real completions (capacity.tokens_per_sec); not class Σ alone.
+    const tps = cap.tokens_per_sec;
+    const tpsN = cap.tokens_per_sec_samples || 0;
+    if (tps != null && Number(tps) > 0) {
+      setText(
+        "stat-tokens-per-sec",
+        tpsN > 0 ? String(tps) + " (n=" + tpsN + ")" : String(tps),
+      );
+    } else {
+      setText("stat-tokens-per-sec", tpsN > 0 ? "0 (n=" + tpsN + ")" : "—");
+    }
 
     const cd =
       ready.countdown_label || ld.readiness_message || ready.message || "—";

@@ -130,6 +130,8 @@ pub struct PendingInfer {
     /// True if cluster.try_acquire_stream was used (must release_stream).
     pub stream_reserved: bool,
     pub coordination: CoordinationPath,
+    /// Wall clock when the request entered fanout (for measured tokens/s).
+    pub started: Instant,
     pub tx: Option<oneshot::Sender<Result<InferOutcome, String>>>,
 }
 
@@ -227,6 +229,8 @@ pub struct ControlState {
     pub digests_verified: bool,
     /// NodeId → ed25519 device pubkey hex (from Hello).
     pub node_device_pubkeys: std::collections::HashMap<NodeId, String>,
+    /// Recent (tokens, duration_ms) completion samples for measured tokens/s.
+    pub infer_rate_samples: VecDeque<(u32, u64)>,
     dirty: bool,
 }
 
@@ -271,12 +275,49 @@ impl ControlState {
             leases: joule_cluster::LeaseBook::default(),
             digests_verified: false,
             node_device_pubkeys: std::collections::HashMap::new(),
+            infer_rate_samples: VecDeque::new(),
             dirty: false,
         }
     }
 
     pub(crate) fn economy_mut(&mut self, account: &str) -> &mut AccountEconomy {
         self.account_economy.entry(account.to_string()).or_default()
+    }
+
+    /// Record a completed infer sample for live tokens/s (dashboard capacity).
+    ///
+    /// Ignores zero-token or zero-duration samples so we never invent rates from
+    /// `throughput_class` alone.
+    pub fn record_infer_rate_sample(&mut self, total_tokens: u32, elapsed_ms: u64) {
+        if total_tokens == 0 || elapsed_ms == 0 {
+            return;
+        }
+        self.infer_rate_samples
+            .push_back((total_tokens, elapsed_ms.max(1)));
+        while self.infer_rate_samples.len() > 32 {
+            self.infer_rate_samples.pop_front();
+        }
+    }
+
+    /// Integer tokens/s from recent samples: sum(tokens) / sum(seconds).
+    pub fn measured_tokens_per_sec(&self) -> (u32, u32) {
+        if self.infer_rate_samples.is_empty() {
+            return (0, 0);
+        }
+        let mut tok: u64 = 0;
+        let mut ms: u64 = 0;
+        for (t, d) in &self.infer_rate_samples {
+            tok = tok.saturating_add(u64::from(*t));
+            ms = ms.saturating_add(*d);
+        }
+        if ms == 0 {
+            return (0, self.infer_rate_samples.len() as u32);
+        }
+        let tps = tok.saturating_mul(1000) / ms;
+        (
+            tps.min(u64::from(u32::MAX)) as u32,
+            self.infer_rate_samples.len() as u32,
+        )
     }
 
     /// Build fairness snapshot for scoring (refreshes continuous tenure clock).
@@ -952,6 +993,10 @@ impl ControlState {
             .unwrap_or_else(|| "[joule] empty completion from pool".into());
         let prompt_tokens = pending.prompt_tokens;
         let completion_tokens = pending.completion_tokens;
+        // Sub-ms stub/lab completions still measure; floor 1ms so rate is defined.
+        let elapsed_ms = pending.started.elapsed().as_millis().max(1) as u64;
+        let total_tokens = prompt_tokens.saturating_add(completion_tokens).max(1);
+        self.record_infer_rate_sample(total_tokens, elapsed_ms);
         let tail = pending
             .plan
             .shards

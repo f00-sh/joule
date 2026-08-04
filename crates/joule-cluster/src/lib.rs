@@ -516,6 +516,9 @@ impl Cluster {
             stream_slots_total,
             stream_slots_used,
             logical_device,
+            // Measured rate filled by control from real completion samples.
+            tokens_per_sec: 0,
+            tokens_per_sec_samples: 0,
         }
     }
 

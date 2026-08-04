@@ -230,7 +230,7 @@ No path checks the donor’s network type. If a plan is too slow in practice, op
 2. Transport (lean QUIC).  
 3. Pure-Rust vs ADR’d FFI for production speed.  
 4. Contribution window *N* and freeload grace.  
-5. Whether public capacity includes rough **tokens/s estimate** once measured (not just throughput_class_sum).
+5. ~~Whether public capacity includes rough **tokens/s estimate** once measured (not just throughput_class_sum).~~ **Done (Unreleased):** `ClusterCapacity.tokens_per_sec` measured from completion wall time + samples; dashboard binds `stat-tokens-per-sec`.
 
 ## 15. PR Plan
 

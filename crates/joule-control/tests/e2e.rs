@@ -2509,6 +2509,112 @@ async fn lease_chat_free_used_free_and_audit() {
     agent.abort();
 }
 
+/// Live capacity exposes measured tokens/s after real chat completions (not class Σ alone).
+#[tokio::test]
+async fn capacity_tokens_per_sec_after_chat() {
+    let app = load_or_init_app(None).expect("app");
+    {
+        let mut g = app.state.write().await;
+        g.dual_verify_every = 0;
+    }
+    let (agent_addr, http_addr, _http) = serve_ephemeral(app.clone()).await.expect("serve");
+    let (api_key, agent) = spawn_agent(agent_addr, "tps-alice", 16384).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    {
+        let mut g = app.state.write().await;
+        g.cluster.trust_all_claims_for_tests();
+    }
+
+    let client = reqwest::Client::new();
+    let base = format!("http://{http_addr}");
+
+    let cap0: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/capacity"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        cap0.get("tokens_per_sec").is_some(),
+        "capacity must expose tokens_per_sec field: {cap0}"
+    );
+    assert_eq!(cap0["tokens_per_sec"].as_u64().unwrap_or(0), 0);
+    assert_eq!(cap0["tokens_per_sec_samples"].as_u64().unwrap_or(0), 0);
+    assert!(cap0["nodes_healthy"].as_u64().unwrap_or(0) >= 1);
+    assert!(cap0["mem_mib_healthy"].as_u64().is_some());
+    assert!(cap0["throughput_class_sum"].as_u64().is_some());
+    // No home IPs in public capacity.
+    let cap_s = cap0.to_string();
+    assert!(
+        !cap_s.contains("192.168.") && !cap_s.contains("10.0."),
+        "capacity must not leak private IPs: {cap0}"
+    );
+    eprintln!("OBSERVE capacity before chat: {cap0}");
+
+    for i in 0..2 {
+        let resp = client
+            .post(format!("{base}/v1/chat/completions"))
+            .bearer_auth(&api_key)
+            .json(&serde_json::json!({
+                "model": CLUSTER_MODEL,
+                "messages": [{"role":"user","content": format!("tps-sample-{i}")}],
+                "max_tokens": 32
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "chat {i}: {}",
+            resp.text().await.unwrap_or_default()
+        );
+    }
+
+    let cap1: serde_json::Value = client
+        .get(format!("{base}/v1/cluster/capacity"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let samples = cap1["tokens_per_sec_samples"].as_u64().unwrap_or(0);
+    let tps = cap1["tokens_per_sec"].as_u64().unwrap_or(0);
+    assert!(samples >= 1, "after chat must have rate samples: {cap1}");
+    // Tokens/s can be huge for stub (fast path) but must be measured > 0 with samples.
+    assert!(
+        tps > 0,
+        "measured tokens_per_sec must be >0 after real completions: {cap1}"
+    );
+    eprintln!(
+        "OBSERVE capacity after chat: tokens_per_sec={tps} samples={samples} nodes_healthy={} mem_mib_healthy={} throughput_class_sum={}",
+        cap1["nodes_healthy"], cap1["mem_mib_healthy"], cap1["throughput_class_sum"]
+    );
+
+    // Dashboard static binding: app.js reads tokens_per_sec from capacity JSON.
+    let app_js = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/app.js"));
+    assert!(
+        app_js.contains("tokens_per_sec"),
+        "dashboard app.js must bind tokens_per_sec"
+    );
+    assert!(
+        app_js.contains("stat-tokens-per-sec") || app_js.contains("tokens_per_sec"),
+        "dashboard must reference tokens/s field"
+    );
+    let index_html = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/index.html"
+    ));
+    assert!(
+        index_html.contains("stat-tokens-per-sec"),
+        "index.html must show Tokens / s widget"
+    );
+
+    agent.abort();
+}
+
 /// Formal e2e: 3 prepared ClusterEngine agents → sequential JST3 chain + lease audit OBSERVE.
 ///
 /// Combines production prepare (lab-tiny), `require_band_weights` after resident weights,

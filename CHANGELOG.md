@@ -8,13 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Added
-- **Per-shard band-only prepare/install:** `prepare_for_band` / `prepare_and_install_for_band` stage and load only preferred weight files for a layer band (not the whole multi-file quant per donor); fail closed if preferred files missing
-- **Mesh sequential JST3 parity:** PeerBus multi-donor path with weight-resident ClusterEngine emits JST3 non-tail activations (e2e `multi_donor_pipeline_sequential_jst3_weight_resident`)
-- **Tail activation decode:** multi-shard tail text from activation state + embedding rows (`joule-decode`), not stage-tag prompt echo alone; lab-tiny first
-- **ADR 0001:** GPU/FFI engine gate (pure-Rust default; FFI only with ADR + AGENTS note)
+- **lab-mid / lab-large decode quality:** multi-file fixture prepare→infer is tensor-backed; weight invert and activation seed change emitted tokens (not stage-tag-only)
+- **Measured tokens/s on capacity:** `ClusterCapacity.tokens_per_sec` + `tokens_per_sec_samples` from real completion wall time; dashboard `stat-tokens-per-sec` + `docs/app.js` bind; `GET /v1/cluster/capacity` e2e
+- **Shard die → replan e2e OBSERVE:** mesh `confirmed_shard_death_triggers_replan` — attempt bump, lease free→used→free, free==total
+- **ADR 0002:** pure-Rust remains alpha default ([docs/adr/0002-pure-rust-alpha-default.md](docs/adr/0002-pure-rust-alpha-default.md)); GPU needs ADR 0003+
+- **Per-shard band-only prepare/install:** `prepare_for_band` / `prepare_and_install_for_band` (preferred files only)
+- **Mesh sequential JST3 parity** + **tail `joule-decode`** + **ADR 0001** GPU/FFI gate (prior Unreleased track)
 
 ### Changed
-- Control 3-agent e2e remains green (prepare + sequential JST3 + lease audit)
+- Control path records infer rate samples on settle (sub-ms completions floor 1ms)
+- K3 pin ops: real offline bytes still absent on CI hosts; `pin-k3-shards` fail-closed; no SemVer **0.1.13** cut this cycle (Unreleased only — packaging/channels deferred)
 
 ## [0.1.12] — 2026-08-03
 

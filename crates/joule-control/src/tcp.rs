@@ -1056,6 +1056,7 @@ async fn fanout_infer(
                 charge,
                 stream_reserved,
                 coordination,
+                started: std::time::Instant::now(),
                 tx: Some(tx),
             },
         );
